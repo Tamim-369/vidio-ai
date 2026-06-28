@@ -1,0 +1,11 @@
+edge-tts
+asyncio
+requests
+moviepy
+supertonic
+groq
+ddgs
+wikipedia
+Pillow
+python-dotenv
+soundfile
