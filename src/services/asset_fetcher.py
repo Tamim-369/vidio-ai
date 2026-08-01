@@ -81,17 +81,29 @@ def _fetch_ddg(search_term: str, path: str) -> bool:
     return False
 
 
+def _topic_keywords(topic: str) -> str:
+    """Extract short keywords from topic to anchor image searches."""
+    # Strip common filler words, take first 4 meaningful words
+    stopwords = {"what", "makes", "a", "an", "the", "and", "or", "why", "how",
+                 "is", "are", "do", "does", "in", "on", "at", "to", "of", "for",
+                 "your", "my", "our", "their", "its", "this", "that", "these", "those",
+                 "always", "common", "look", "aren't", "isn't", "don't", "not"}
+    words = [w for w in topic.lower().split() if w.strip(".,?!'\"") not in stopwords]
+    return " ".join(words[:4])
+
+
 def fetch_assets(lines: list, topic: str = "") -> list:
     assets_dir = os.path.join(TEMP_DIR, "assets")
+    keywords = _topic_keywords(topic) if topic else ""
 
     for line in lines:
         line_id = line["id"]
         search_term = line["search_term"]
         image_type = line.get("image_type", "stock")
 
-        # Always anchor to the main topic
-        if topic and topic.lower() not in search_term.lower():
-            search_term = f"{topic} {search_term}"
+        # Anchor to topic keywords only if not already present
+        if keywords and not any(k in search_term.lower() for k in keywords.split()):
+            search_term = f"{keywords} {search_term}"
 
         path = os.path.join(assets_dir, f"{line_id}.jpg")
 

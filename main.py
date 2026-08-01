@@ -15,7 +15,9 @@ def run(topic: str):
     print(f"\n📝 Building script...")
     script = build_script(topic, raw_data)
     print(f"   {len(script['lines'])} lines generated")
-
+    with open("./script.json", "w") as f:
+        import json
+        json.dump(script, f, indent=2)
     print(f"\n🖼  Fetching images...")
     script["lines"] = fetch_assets(script["lines"], topic=topic)
 
@@ -30,4 +32,4 @@ def run(topic: str):
 
 
 if __name__ == "__main__":
-    run("What makes a man's body more attractive and why the common bodybuilder look aren't always attractive.")
+    run("Why Are you wasting time on social media?")

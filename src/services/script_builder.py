@@ -1,4 +1,5 @@
 import json
+import re
 from groq import Groq
 from src.config.settings import GROQ_API_KEY, GROQ_MODEL, VIDEO_STYLE
 
@@ -40,7 +41,11 @@ Format:
 }}
 
 Rules:
-- Each line is ONE sentence, narrated by TTS
+- Each line is ONE sentence, narrated by TTS — write it EXACTLY as it should be spoken out loud
+- NEVER use a hyphen as a sentence connector or pause (e.g. "attractor-open" or "bulk-women" is wrong). Use a comma or period instead
+- Hyphens are ONLY allowed in compound words like "waist-to-hip", "three-day-a-week", or number ranges like "3-4"
+- NEVER use double quotes inside text or search_term values — use single quotes instead if needed
+- NEVER use a hyphen as a sentence connector or pause in text (e.g. "Hulk-women" or "stamina-women" is wrong). Use a comma or period instead. Hyphens are only allowed in compound words like "waist-to-hip" or number ranges like "3-4".
 - search_term must describe what a CAMERA would photograph — think like a photographer, not a summarizer
   - BAD: "subtle effect in the eyes" → matches anything with eyes
   - GOOD: "attractive young man confident direct eye contact close up portrait"
@@ -49,6 +54,56 @@ Rules:
 - 8 to 12 lines total
 - image_type must be "stock" for common/generic visuals (people, nature, gym, city, doctor, etc.) or "search" for specific/niche visuals (specific person, scientific diagram, historical image, specific event, etc.)
 """
+
+
+def _safe_json_loads(text: str) -> dict:
+    """Parse JSON, applying common LLM-output repairs before giving up."""
+    # 1. Try as-is.
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Extract the first balanced {...} block
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            text = candidate
+
+    # 3. Fix unescaped double quotes inside JSON string values.
+    # Matches: "key": "value with "quoted words" inside"
+    # Strategy: inside each string value, replace " with ' unless it's the delimiter.
+    def fix_inner_quotes(m):
+        key = m.group(1)
+        value = m.group(2)
+        # Replace any unescaped double quote inside the value with single quote
+        value = re.sub(r'(?<!\\)"', "'", value)
+        return f'"{key}": "{value}"'
+
+    repaired = re.sub(r'"(\w+)":\s*"(.*?)"(?=\s*[,}\]])', fix_inner_quotes, text, flags=re.DOTALL)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+
+    # 4. Remove trailing commas before } or ]
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError as e:
+        col = getattr(e, "colno", 0)
+        ln = getattr(e, "lineno", 0)
+        lines = repaired.splitlines()
+        snippet = lines[ln - 1] if 0 < ln <= len(lines) else "<eof>"
+        raise json.JSONDecodeError(
+            f"{e.msg} at line {ln} col {col}: {snippet!r}",
+            repaired,
+            e.pos,
+        ) from e
 
 
 def build_script(topic: str, raw_data: str) -> dict:
@@ -78,9 +133,34 @@ Write the video script now.
 
     # Strip markdown code blocks if model wraps response anyway
     if raw.startswith("```"):
-        raw = raw.split("```")[1]
+        parts = raw.split("```")
+        raw = parts[1] if len(parts) > 1 else raw
         if raw.startswith("json"):
             raw = raw[4:]
         raw = raw.strip()
 
-    return json.loads(raw)
+    # Normalize Unicode punctuation so TTS reads it correctly.
+    # Models frequently emit typographic dashes/quotes that TTS engines
+    # either skip or read out by name (e.g. "en dash").
+    replacements = {
+        "\u2011": "-",   # non-breaking hyphen  ‑  -> ASCII hyphen
+        "\u2013": "-",   # en dash              –  -> ASCII hyphen
+        "\u2014": "-",   # em dash              —  -> ASCII hyphen
+        "\u2015": "-",   # horizontal bar       ―  -> ASCII hyphen
+        "\u2212": "-",   # minus sign           −  -> ASCII hyphen
+        "\u2018": "'",   # left single quote    ‘
+        "\u2019": "'",   # right single quote   ’
+        "\u201A": "'",   # single low-9 quote   ‚
+        "\u201C": '"',   # left double quote    “
+        "\u201D": '"',   # right double quote   ”
+        "\u201E": '"',   # double low-9 quote   „
+        "\u2026": "...", # ellipsis             …
+    }
+    for src, dst in replacements.items():
+        raw = raw.replace(src, dst)
+
+    # Dump the normalized text so debugging matches what TTS actually receives.
+    with open("./raw_script.json", "w") as f:
+        f.write(raw)
+
+    return _safe_json_loads(raw)
