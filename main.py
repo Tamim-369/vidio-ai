@@ -1,6 +1,6 @@
 from src.utils.file_helpers import ensure_dirs, cleanup_temp
 from src.services.data_source import research
-from src.services.script_builder import build_script
+from src.services.script_builder import build_script, review_script, revise_script
 from src.services.asset_fetcher import fetch_assets
 from src.services.tts import generate_audio
 from src.services.video_assembler import assemble
@@ -15,13 +15,23 @@ def run(topic: str):
     print(f"\n📝 Building script...")
     script = build_script(topic, raw_data)
     print(f"   {len(script['lines'])} lines generated")
-    with open("./script.json", "w") as f:
-        import json
-        json.dump(script, f, indent=2)
+
+    print(f"\n🔎 Reviewing script...")
+    review = review_script(script)
+
+    if review.get("approved"):
+        print(f"   ✓ Script approved")
+    else:
+        print(f"   ✗ Issues found:")
+        for issue in review.get("issues", []):
+            print(f"     - {issue}")
+        script = revise_script(script, review)
+        print(f"   ✓ Script revised ({len(script['lines'])} lines)")
+
     print(f"\n🖼  Fetching images...")
     script["lines"] = fetch_assets(script["lines"], topic=topic)
 
-    print(f"\n🎙  Generating voiceover...")
+    print(f"\n🎙️  Generating voiceover...")
     script["lines"] = generate_audio(script["lines"])
 
     print(f"\n🎬 Assembling video...")
@@ -32,4 +42,4 @@ def run(topic: str):
 
 
 if __name__ == "__main__":
-    run("Why Are you wasting time on social media?")
+    run("The next generation of Human intelligence.")
