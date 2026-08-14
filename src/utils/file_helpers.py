@@ -29,4 +29,5 @@ def load_json(path: str) -> dict:
 
 def output_path(topic: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", topic.lower()).strip("_")
+    slug = slug[:60]  # cap length to avoid OS path issues
     return os.path.join(OUTPUT_DIR, f"{slug}.mp4")

@@ -1,12 +1,20 @@
 import os
 import re
+
+# Set HuggingFace cache dir before importing kokoro so models land in project folder
+from dotenv import load_dotenv
+load_dotenv()
+hf_home = os.getenv("HF_HOME")
+if hf_home:
+    os.environ["HF_HOME"] = hf_home
+
 import numpy as np
 import soundfile as sf
 from kokoro import KPipeline
 from src.config.settings import TEMP_DIR
 
 # Try am_michael if am_adam sounds off on certain lines
-KOKORO_VOICE = "am_michael"
+KOKORO_VOICE = "am_adam"
 KOKORO_LANG = "a"
 
 _pipeline = None
@@ -41,6 +49,9 @@ def _num_to_words(n: str) -> str:
 
 def _expand_numbers(text: str) -> str:
     """Expand numbers, symbols and abbreviations to speakable form."""
+
+    # Strip currency symbols before number expansion ($ £ € → spoken by context)
+    text = re.sub(r'[$£€]\s*(\d)', r'\1', text)
 
     # Percentages: 10% → ten percent
     def pct(m):
@@ -137,11 +148,30 @@ def generate_audio(lines: list) -> list:
 
         print(f"  [tts] Line {line_id}: {text}")
 
+        # Add trailing silence so Kokoro fully articulates the last word
+        text_with_pause = text + "."
+
         chunks = []
-        for _, _, audio in pipeline(text, voice=KOKORO_VOICE, speed=0.95):
+        for _, _, audio in pipeline(text_with_pause, voice=KOKORO_VOICE, speed=1.15):
+            if hasattr(audio, 'numpy'):
+                audio = audio.numpy()
             chunks.append(audio)
 
         combined = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+
+        # Convert to numpy if Kokoro returned a tensor
+        if hasattr(combined, 'numpy'):
+            combined = combined.numpy()
+
+        # Append 300ms of silence as buffer
+        silence = np.zeros(int(0.3 * 24000), dtype=combined.dtype)
+        combined = np.concatenate([combined, silence])
+
+        # Normalize volume — boost quiet words, prevent clipping
+        peak = np.max(np.abs(combined))
+        if peak > 0:
+            combined = combined / peak * 0.95
+
         sf.write(path, combined, 24000)
 
         line["audio_path"] = path

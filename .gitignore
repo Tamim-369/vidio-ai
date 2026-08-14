@@ -10,3 +10,11 @@ wheels/
 .venv
 .env
 output/
+.models/
+temp/
+/hub
+/xet
+.agent_harness*
+.models/
+*.mp4
+*.mp3

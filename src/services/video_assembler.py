@@ -73,6 +73,7 @@ def assemble(script: dict) -> str:
 
     final = concatenate_videoclips(clips, method="compose")
     out = output_path(script["topic"])
+    os.makedirs(os.path.dirname(out), exist_ok=True)
 
     print(f"  [assembler] Rendering → {out}")
     final.write_videofile(out, fps=FPS, codec="libx264", audio_codec="aac", logger=None)

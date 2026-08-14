@@ -1,0 +1,76 @@
+{
+  "topic": "Why America and Israel lost despite having a larger military budget than Iran",
+  "style": "attraction",
+  "lines": [
+    {
+      "id": 1,
+      "text": "Despite outspending Iran, the United States and Israel face unexpected setbacks in the Gulf.",
+      "search_term": "US and Israeli naval vessels near Strait of Hormuz",
+      "image_type": "stock",
+      "duration": 6
+    },
+    {
+      "id": 2,
+      "text": "Iran's strategic control of the Hormuz Strait threatens the flow of global oil.",
+      "search_term": "busy shipping lane in Strait of Hormuz with Iranian patrol boats",
+      "image_type": "search",
+      "duration": 5
+    },
+    {
+      "id": 3,
+      "text": "Washington's reliance on costly military bases stretches its resources thin.",
+      "search_term": "American military base desert landscape with aircraft",
+      "image_type": "stock",
+      "duration": 5
+    },
+    {
+      "id": 4,
+      "text": "Israel's heavy aid from America cannot offset Iran's asymmetric tactics.",
+      "search_term": "Israeli defense forces training with US equipment in desert",
+      "image_type": "stock",
+      "duration": 6
+    },
+    {
+      "id": 5,
+      "text": "The recent Oman and Iran agreement forces the US and Israel to negotiate for passage.",
+      "search_term": "diplomatic meeting between Omani and Iranian officials",
+      "image_type": "search",
+      "duration": 6
+    },
+    {
+      "id": 6,
+      "text": "Iran's reshuffled command signals a hardline stance that complicates diplomatic options.",
+      "search_term": "Iranian military leaders in briefing room with maps",
+      "image_type": "search",
+      "duration": 5
+    },
+    {
+      "id": 7,
+      "text": "Economic sanctions and compensation demands add pressure on American shipping.",
+      "search_term": "cargo ship waiting near Hormuz under Iranian flag",
+      "image_type": "search",
+      "duration": 5
+    },
+    {
+      "id": 8,
+      "text": "The US military's global commitments dilute its focus on the regional threat.",
+      "search_term": "US warships scattered across world map illustration",
+      "image_type": "stock",
+      "duration": 5
+    },
+    {
+      "id": 9,
+      "text": "Israel's reliance on US technology makes it vulnerable when supply lines are blocked.",
+      "search_term": "Israeli missile defense system on coastal hill with US flag overlay",
+      "image_type": "stock",
+      "duration": 6
+    },
+    {
+      "id": 10,
+      "text": "Ultimately, budget size alone cannot guarantee victory against Iran's localized advantage.",
+      "search_term": "bar chart comparing US, Israel, and Iran military spending and regional influence",
+      "image_type": "search",
+      "duration": 7
+    }
+  ]
+}
