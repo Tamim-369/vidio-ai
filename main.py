@@ -42,4 +42,6 @@ def run(topic: str):
 
 
 if __name__ == "__main__":
-    run("Why America and Israel lost despite having more militery budget then Iran.")
+    topic = input("📝 Enter a topic for the video: ")
+    
+    run(topic)

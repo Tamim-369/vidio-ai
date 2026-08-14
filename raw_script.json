@@ -1,74 +1,67 @@
 {
-  "topic": "Why America and Israel lost despite having a larger military budget than Iran",
+  "topic": "Top 3 strongest nations in the world",
   "style": "attraction",
   "lines": [
     {
       "id": 1,
-      "text": "Despite outspending Iran, the United States and Israel face a costly stalemate in the ongoing conflict.",
-      "search_term": "US and Israeli troops in desert battlefield with Iranian forces",
+      "text": "Welcome to the ultimate showdown of the world's mightiest militaries.",
+      "search_term": "global map highlighting military power ranking",
       "image_type": "stock",
       "duration": 6
     },
     {
       "id": 2,
-      "text": "A two-week ceasefire in early April showed that diplomatic pauses can halt even the most powerful armies.",
-      "search_term": "Negotiators signing ceasefire agreement in war room with American and Israeli flags",
-      "image_type": "stock",
+      "text": "At number three we find Russia. It fields over a million active soldiers and a vast arsenal of tanks and missiles.",
+      "search_term": "Russian soldiers tank parade 2026",
+      "image_type": "search",
       "duration": 7
     },
     {
       "id": 3,
-      "text": "Experts say Iran's resilient defense tactics have turned a high-budget assault into a drawn-out quagmire.",
-      "search_term": "Iranian missile batteries and soldiers defending mountainous terrain",
+      "text": "Russia's modernized S400 air defense and its recent actions in Ukraine keep its combat reputation fierce.",
+      "search_term": "S400 missile system Russia",
       "image_type": "search",
       "duration": 6
     },
     {
       "id": 4,
-      "text": "Training accidents claim more American lives each year than actual combat with Iran.",
-      "search_term": "US soldiers in training accident on military base, wrecked vehicle",
-      "image_type": "stock",
-      "duration": 6
-    },
-    {
-      "id": 5,
-      "text": "The $1.5 trillion defense budget request reflects a shift toward endless war spending rather than strategic wins.",
-      "search_term": "Congressional hearing with officials presenting the defense budget proposal",
-      "image_type": "stock",
+      "text": "Sliding into second place is China, boasting the world's largest standing army and a rapidly expanding navy.",
+      "search_term": "Chinese navy fleet 2026",
+      "image_type": "search",
       "duration": 7
     },
     {
-      "id": 6,
-      "text": "Targeting Iran's leadership has inflicted damage, yet the core military structure remains largely intact.",
-      "search_term": "Aerial view of Iranian command center ruins after strike",
+      "id": 5,
+      "text": "China's fifth generation J20 stealth fighters and its carrier based operations showcase cutting edge technology.",
+      "search_term": "J20 stealth fighter carrier deck China",
       "image_type": "search",
       "duration": 6
     },
     {
-      "id": 7,
-      "text": "Iran's smaller but highly motivated forces exploit terrain advantages that large budgets cannot overcome.",
-      "search_term": "Iranian infantry navigating rugged canyon at sunrise",
+      "id": 6,
+      "text": "Recent drills in the South China Sea demonstrate its ability to project power across contested waters.",
+      "search_term": "Chinese navy drills South China Sea 2026",
       "image_type": "stock",
-      "duration": 6
+      "duration": 7
+    },
+    {
+      "id": 7,
+      "text": "Holding the top spot is the United States. It has a global reach of over 800,000 active troops and a fleet of 11 aircraft carriers.",
+      "search_term": "US Navy aircraft carriers at sea 2026",
+      "image_type": "stock",
+      "duration": 7
     },
     {
       "id": 8,
-      "text": "Logistical overreach stretches American supply lines, causing delays and resource shortages.",
-      "search_term": "Convoy of US military trucks stuck in desert dust storm",
-      "image_type": "stock",
+      "text": "American F35 jets, nuclear submarines, and its massive defense budget ensure unmatched technological superiority.",
+      "search_term": "F35 jets launch USA",
+      "image_type": "search",
       "duration": 6
     },
     {
       "id": 9,
-      "text": "Israel's reliance on air superiority faces sophisticated Iranian air defenses that blunt its advantage.",
-      "search_term": "Israeli fighter jets evading Iranian surface-to-air missile launchers",
-      "image_type": "search",
-      "duration": 7
-    },
-    {
-      "id": 10,
-      "text": "Ultimately, sheer spending cannot guarantee victory when strategy, terrain, and morale favor the underdog.",
-      "search_term": "Military budget chart displayed beside Iranian infantry on a battlefield",
+      "text": "Together, these three powers shape global security, and their next moves will decide the future of warfare.",
+      "search_term": "International military summit 2026",
       "image_type": "stock",
       "duration": 7
     }
