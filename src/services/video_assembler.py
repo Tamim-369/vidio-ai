@@ -66,7 +66,7 @@ def assemble(script: dict) -> str:
             return f[idx]
 
         video_clip = VideoClip(make_frame, duration=duration)
-        audio = AudioFileClip(line["audio_path"]).audio_fadein(0.08).audio_fadeout(0.08)
+        audio = AudioFileClip(line["audio_path"])
         video_clip = video_clip.with_audio(audio)
 
         clips.append(video_clip)

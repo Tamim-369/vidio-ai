@@ -137,6 +137,24 @@ def _clean_text(text: str) -> str:
     return text
 
 
+TARGET_WPM = 150  # natural narration pace — Kokoro at 1.0 ≈ 130 WPM
+
+
+def _target_speed(text: str) -> float:
+    """Calculate speed to hit TARGET_WPM. Clamped to avoid extremes."""
+    BASE_WPM = 130
+    speed = TARGET_WPM / BASE_WPM
+    return max(0.9, min(1.3, speed))
+
+
+def _noise_gate(audio: np.ndarray, threshold: float = 0.008) -> np.ndarray:
+    """Silence samples below threshold to remove background hiss between words."""
+    kernel = np.ones(256) / 256
+    envelope = np.convolve(np.abs(audio), kernel, mode='same')
+    gate = envelope > threshold
+    return audio * gate
+
+
 def generate_audio(lines: list) -> list:
     pipeline = _get_pipeline()
     audio_dir = os.path.join(TEMP_DIR, "audio")
@@ -152,7 +170,7 @@ def generate_audio(lines: list) -> list:
         text_with_pause = "Hmm. " + text + "."
 
         chunks = []
-        for _, _, audio in pipeline(text_with_pause, voice=KOKORO_VOICE, speed=1.15):
+        for _, _, audio in pipeline(text_with_pause, voice=KOKORO_VOICE, speed=_target_speed(text)):
             if hasattr(audio, 'numpy'):
                 audio = audio.numpy()
             chunks.append(audio)
@@ -171,10 +189,17 @@ def generate_audio(lines: list) -> list:
         silence = np.zeros(int(0.3 * 24000), dtype=combined.dtype)
         combined = np.concatenate([combined, silence])
 
-        # Normalize volume — boost quiet words, prevent clipping
-        peak = np.max(np.abs(combined))
-        if peak > 0:
-            combined = combined / peak * 0.95
+        # Apply noise gate to remove hiss between words
+        combined = _noise_gate(combined)
+
+        # RMS normalization — consistent loudness across all lines
+        # Target RMS level (0.0 to 1.0) — 0.15 is a good natural speaking level
+        TARGET_RMS = 0.15
+        rms = np.sqrt(np.mean(combined ** 2))
+        if rms > 0:
+            combined = combined * (TARGET_RMS / rms)
+        # Hard clip to prevent any peaks from distorting
+        combined = np.clip(combined, -0.95, 0.95)
 
         sf.write(path, combined, 24000)
 
