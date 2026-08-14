@@ -148,8 +148,8 @@ def generate_audio(lines: list) -> list:
 
         print(f"  [tts] Line {line_id}: {text}")
 
-        # Add trailing silence so Kokoro fully articulates the last word
-        text_with_pause = text + "."
+        # Prepend a soft buffer word so Kokoro doesn't clip the first phoneme
+        text_with_pause = "Hmm. " + text + "."
 
         chunks = []
         for _, _, audio in pipeline(text_with_pause, voice=KOKORO_VOICE, speed=1.15):
@@ -162,6 +162,10 @@ def generate_audio(lines: list) -> list:
         # Convert to numpy if Kokoro returned a tensor
         if hasattr(combined, 'numpy'):
             combined = combined.numpy()
+
+        # Trim the leading "Hmm" buffer (~0.4s) — keeps the clean start
+        trim_samples = int(0.55 * 24000)
+        combined = combined[trim_samples:]
 
         # Append 300ms of silence as buffer
         silence = np.zeros(int(0.3 * 24000), dtype=combined.dtype)
