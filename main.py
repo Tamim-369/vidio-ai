@@ -6,6 +6,7 @@ from src.services.tts import generate_audio
 from src.services.video_assembler import assemble
 
 
+
 def run(topic: str):
     ensure_dirs()
 
