@@ -1,7 +1,7 @@
 import json
 import re
 from groq import Groq
-from src.config.settings import GROQ_API_KEY, GROQ_MODEL, VIDEO_STYLE
+from src.config.settings import GROQ_API_KEY, GROQ_MODEL
 
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -15,7 +15,6 @@ Return ONLY valid JSON. No explanation, no markdown, no code blocks. Just raw JS
 Format:
 {{
   "topic": "<topic>",
-  "style": "<style>",
   "lines": [
     {{
       "id": 1,
@@ -135,7 +134,7 @@ def build_script(topic: str, raw_data: str) -> dict:
 
     raw = _call_groq([
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Topic: {topic}\nStyle: {VIDEO_STYLE}\n\nResearch data:\n{raw_data}\n\nWrite the video script now."},
+        {"role": "user", "content": f"Topic: {topic}\n\nResearch data:\n{raw_data}\n\nWrite the video script now."},
     ])
 
     raw = _normalize_raw(raw)

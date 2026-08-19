@@ -8,7 +8,6 @@ PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 GROQ_MODEL = "openai/gpt-oss-120b"
 
 VIDEO_FORMAT = "9:16"         # "9:16" for Shorts/Reels, "16:9" for YouTube
-VIDEO_STYLE = "attraction"    # educational | motivational | ad | storytelling | attraction
 VOICE = "M3"                # from voices.py
 
 OUTPUT_DIR = "output"
