@@ -1,8 +1,9 @@
 import os
+import subprocess
 import numpy as np
 from PIL import Image
-from moviepy import VideoClip, AudioFileClip, concatenate_videoclips
-from src.config.settings import VIDEO_FORMAT, VIDEO_RESOLUTIONS
+from moviepy import VideoClip, AudioFileClip
+from src.config.settings import VIDEO_FORMAT, VIDEO_RESOLUTIONS, TEMP_DIR
 from src.utils.file_helpers import output_path
 
 FPS = 24
@@ -70,11 +71,75 @@ def _crossfade_frames(frames1: np.ndarray, frames2: np.ndarray, fade_frames: int
     ], axis=0)
 
 
-def assemble(script: dict) -> str:
-    size = VIDEO_RESOLUTIONS[VIDEO_FORMAT]
-    clips = []
+def _line_frames(asset_paths: list, total_duration: float, size: tuple) -> np.ndarray:
+    """Build the frame array for a single line, bounded to that line only."""
     CROSSFADE_DURATION = 0.8  # Slower crossfade: 800ms instead of 300ms
     MIN_IMAGE_DURATION = 2.5  # Minimum time per image: 2.5 seconds
+
+    num_images = len(asset_paths)
+
+    if num_images == 1:
+        return _make_zoom_frames(_load_image(asset_paths[0], size), total_duration, size)
+
+    # Multiple images: ensure minimum duration per image
+    raw_time_per_image = total_duration / num_images
+    original_count = num_images
+
+    if raw_time_per_image < MIN_IMAGE_DURATION:
+        # Use fewer images to meet minimum duration
+        max_images = int(total_duration / MIN_IMAGE_DURATION)
+        if max_images > 0:
+            asset_paths = asset_paths[:max_images]
+            num_images = len(asset_paths)
+            time_per_image = total_duration / num_images
+            print(f"  [assembler] Using {num_images} images (reduced from {original_count}) for proper timing")
+        else:
+            # Fallback: use single image if duration is very short
+            asset_paths = [asset_paths[0]]
+            num_images = 1
+            time_per_image = total_duration
+    else:
+        time_per_image = raw_time_per_image
+
+    fade_frames = int(CROSSFADE_DURATION * FPS)
+    max_fade_frames = int((time_per_image * 0.3) * FPS)  # Max 30% of image time
+    fade_frames = min(fade_frames, max_fade_frames)
+
+    print(f"  [assembler] Each image: {time_per_image:.1f}s, crossfade: {fade_frames/FPS:.1f}s")
+
+    all_frames = []
+    for i, img_path in enumerate(asset_paths):
+        print(f"  [assembler] Pre-rendering image {i+1}/{num_images}...")
+        img_array = _load_image(img_path, size)
+        img_frames = _make_zoom_frames(img_array, time_per_image, size)
+
+        if i == 0:
+            all_frames = img_frames
+        else:
+            all_frames = _crossfade_frames(all_frames, img_frames, fade_frames)
+
+    return all_frames
+
+
+def _concat_segments(segment_paths: list, out: str) -> None:
+    """Concatenate pre-rendered mp4 segments with ffmpeg concat demuxer (no re-encode)."""
+    list_file = os.path.join(TEMP_DIR, "concat_list.txt")
+    with open(list_file, "w") as f:
+        for p in segment_paths:
+            f.write(f"file '{os.path.abspath(p)}'\n")
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", out],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def assemble(script: dict) -> str:
+    size = VIDEO_RESOLUTIONS[VIDEO_FORMAT]
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    segment_paths = []
+    line_duration = 0.0
 
     for line in script["lines"]:
         audio_path = line.get("audio_path")
@@ -89,76 +154,42 @@ def assemble(script: dict) -> str:
             continue
 
         total_duration = line["actual_duration"]
-        num_images = len(asset_paths)
 
-        print(f"  [assembler] Line {line['id']}: Processing {num_images} image(s) over {total_duration:.1f}s...")
+        print(f"  [assembler] Line {line['id']}: Processing {len(asset_paths)} image(s) over {total_duration:.1f}s...")
 
-        if num_images == 1:
-            # Single image: simple zoom for full duration
-            print(f"  [assembler] Pre-rendering zoom frames for line {line['id']}...")
-            frames = _make_zoom_frames(_load_image(asset_paths[0], size), total_duration, size)
-        else:
-            # Multiple images: ensure minimum duration per image
-            raw_time_per_image = total_duration / num_images
-            
-            # If images would be too fast, reduce count or extend duration
-            if raw_time_per_image < MIN_IMAGE_DURATION:
-                # Option 1: Use fewer images to meet minimum duration
-                max_images = int(total_duration / MIN_IMAGE_DURATION)
-                if max_images > 0:
-                    asset_paths = asset_paths[:max_images]
-                    num_images = len(asset_paths)
-                    time_per_image = total_duration / num_images
-                    print(f"  [assembler] Using {num_images} images (reduced from {len(line.get('asset_paths', []))}) for proper timing")
-                else:
-                    # Fallback: use single image if duration is very short
-                    asset_paths = [asset_paths[0]]
-                    num_images = 1
-                    time_per_image = total_duration
-            else:
-                time_per_image = raw_time_per_image
-            
-            fade_frames = int(CROSSFADE_DURATION * FPS)
-            
-            # Ensure crossfade doesn't exceed image duration
-            max_fade_frames = int((time_per_image * 0.3) * FPS)  # Max 30% of image time
-            fade_frames = min(fade_frames, max_fade_frames)
-            
-            print(f"  [assembler] Each image: {time_per_image:.1f}s, crossfade: {fade_frames/FPS:.1f}s")
-            
-            all_frames = []
-            for i, img_path in enumerate(asset_paths):
-                print(f"  [assembler] Pre-rendering image {i+1}/{num_images} for line {line['id']}...")
-                img_array = _load_image(img_path, size)
-                img_frames = _make_zoom_frames(img_array, time_per_image, size)
-                
-                if i == 0:
-                    all_frames = img_frames
-                else:
-                    # Crossfade with previous frames
-                    all_frames = _crossfade_frames(all_frames, img_frames, fade_frames)
-            
-            frames = all_frames
+        # Build ONLY this line's frames, then render it to a temp file and free.
+        frames = _line_frames(asset_paths, total_duration, size)
 
-        # VideoClip with frame lookup into pre-rendered array — fast
         def make_frame(t, f=frames):
             idx = min(int(t * FPS), len(f) - 1)
             return f[idx]
 
-        # Keep video duration exactly matching audio - no extension to prevent perceived pause
         video_clip = VideoClip(make_frame, duration=total_duration)
         audio = AudioFileClip(audio_path)
-        
-        # Perfect sync between audio and video
         video_clip = video_clip.with_audio(audio)
 
-        clips.append(video_clip)
+        seg = os.path.join(TEMP_DIR, f"line_{line['id']}.mp4")
+        print(f"  [assembler] Rendering line {line['id']} → {seg}")
+        video_clip.write_videofile(seg, fps=FPS, codec="libx264", audio_codec="aac", logger=None)
 
-    final = concatenate_videoclips(clips, method="compose")
+        # Free the frames array for this line before the next one.
+        del frames
+        segment_paths.append(seg)
+        line_duration += total_duration
+
+    if not segment_paths:
+        raise RuntimeError("No renderable lines in script")
+
     out = output_path(script["topic"])
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
-    print(f"  [assembler] Rendering → {out}")
-    final.write_videofile(out, fps=FPS, codec="libx264", audio_codec="aac", logger=None)
+    print(f"  [assembler] Concatenating {len(segment_paths)} segments → {out}")
+    _concat_segments(segment_paths, out)
+
+    for p in segment_paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
 
     return out

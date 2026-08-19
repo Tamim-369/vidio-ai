@@ -54,3 +54,38 @@ OUTPUT RULES
 - One sentence per line.
 - Number the lines (1. 2. 3. etc.).
 - Do not add any intro text, explanations, notes, or extra commentary before or after the script."""
+
+
+def get_metadata_prompt(topic, script_text):
+    return f"""You are a YouTube SEO expert for a faceless shorts channel. Generate a title, description, and tags for a video.
+
+Topic: {topic}
+
+Video script (narration):
+{script_text}
+
+Return ONLY valid JSON (no markdown, no code fences) in this exact shape:
+{{
+  "title": "<40-65 char title>",
+  "description": "<300-500 word description>",
+  "tags": ["<tag1>", "<tag2>", "<tag3>"]
+}}
+
+TITLE PRINCIPLES (follow strictly)
+- Front-load the keyword: primary search term within the first 30 characters.
+- Length: 40-65 characters, fully visible on mobile.
+- Numbers beat vague claims; odd numbers often get higher CTR. Use a specific number if the video ranks/shows one.
+- Capitalize at most ONE word (the word whose removal changes the meaning). Never capitalize the whole title.
+- Add a bracket/parenthetical modifier at the end, e.g. "(Step-by-Step)" or "[True Story]".
+- Do NOT stuff keywords. Write for humans.
+- This is a faceless channel: the title must carry the full emotional hook. Lean on specificity, numbers, and the bracket modifier.
+
+DESCRIPTION PRINCIPLES (follow strictly)
+- First 100-150 characters must be ad copy that sells the click (this is the search snippet).
+- Total length: 300-500 words.
+- Structure: hook (first 2 lines) → what the video covers → key takeaways/list → hashtags at the end (2-3 max).
+- Naturally integrate the topic keywords throughout.
+- The description is a cold-start signal: it must clearly tell the algorithm what the video is about.
+
+TAGS
+- 8-15 tags max. Include the primary keyword first, then relevant long-tail variants. Lowercase, no punctuation except hyphens."""

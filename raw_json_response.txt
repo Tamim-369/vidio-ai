@@ -1,85 +1,77 @@
 {
-  "topic": "The brutal Unit 731 Biological and Chemical Tests ran by imperial japan.",
+  "topic": "Nth Country Experiment",
   "lines": [
     {
       "id": 1,
-      "text": "Imagine a laboratory where prisoners were turned into living death traps.",
-      "search_term": "dark laboratory prison experiment horror",
-      "image_expectation": "A dimly lit, ominous laboratory filled with restraints, surgical tools, and medical equipment suggesting human experimentation horror",
-      "image_type": "search",
-      "duration": 4
-    },
-    {
-      "id": 2,
-      "text": "That was Unit 731, Japan's hidden nightmare that turned science into pure horror.",
-      "search_term": "Unit 731 Japanese wartime laboratory",
-      "image_expectation": "Historical black and white photograph of Japanese wartime military facility with sinister shadows suggesting hidden atrocities",
+      "text": "What if the government paid fresh PhDs to design a nuclear bomb for a weekend project?",
+      "search_term": "PhD scientists nuclear bomb",
+      "image_expectation": "A group of fresh PhD graduates in a laboratory examining nuclear weapon blueprints",
       "image_type": "search",
       "duration": 5
     },
     {
-      "id": 3,
-      "text": "First up, the plague bomb tests - they dropped infected fleas from planes over Chinese towns, watching disease explode like fireworks.",
-      "search_term": "plague bomb airplane fleas attack",
-      "image_expectation": "Vintage warplane flying over rural Chinese village while dropping containers, dramatic aerial view suggesting biological warfare attack",
+      "id": 2,
+      "text": "That's exactly what the Nth Country Experiment did, and it could have handed any small nation a nuclear punch.",
+      "search_term": "Nth Country Experiment nuclear",
+      "image_expectation": "Historical classified document about the Nth Country Experiment showing nuclear weapon research",
       "image_type": "search",
+      "duration": 7
+    },
+    {
+      "id": 3,
+      "text": "Three brilliant minds with zero weapons experience were given only unclassified textbooks and a calculator.",
+      "search_term": "scientists studying textbooks calculator",
+      "image_expectation": "Three young researchers at a desk studying physics textbooks with a simple calculator",
+      "image_type": "stock",
       "duration": 6
     },
     {
       "id": 4,
-      "text": "Even worse, they forced victims to inhale chlorine gas while strapped to tables, recording every gasp and seizure.",
-      "search_term": "chlorine gas victim strapped table",
-      "image_expectation": "A victim strapped to metal table with gas mask apparatus nearby, vintage medical horror scene showing forced chemical exposure",
+      "text": "In under three years they churned out a two point implosion design that matched the Hiroshima bomb.",
+      "search_term": "nuclear implosion design blueprint",
+      "image_expectation": "Technical nuclear weapon implosion design blueprints and schematics spread across a table",
       "image_type": "search",
       "duration": 6
     },
     {
       "id": 5,
-      "text": "They didn't stop at gases. They injected anthrax into soldiers and watched the flesh melt away in minutes.",
-      "search_term": "anthrax injection soldiers experiment",
-      "image_expectation": "Close-up of a syringe injecting into human arm with soldiers in background, dramatic lighting suggesting sinister biological warfare research",
+      "text": "The lab's own experts called it a credible design and said a simpler gun type could be done even faster.",
+      "search_term": "nuclear weapon gun-type design",
+      "image_expectation": "Nuclear weapon experts reviewing and approving a gun-type atomic bomb design document",
+      "image_type": "search",
+      "duration": 6
+    },
+    {
+      "id": 6,
+      "text": "The only thing stopping them was a mountain of enriched uranium, not the physics.",
+      "search_term": "enriched uranium stockpile",
+      "image_expectation": "Massive stockpile of enriched uranium stored in secured facility with armed guards",
       "image_type": "search",
       "duration": 5
     },
     {
-      "id": 6,
-      "text": "The so called vibrio cholerae experiments were a twisted race: they poured contaminated water down throats and timed how fast the victims drowned in their own vomit.",
-      "search_term": "cholera contaminated water force fed",
-      "image_expectation": "Strapped victim being force-fed contaminated liquid through tube, clinical horror scene with stopwatch and notebook documenting the experiment",
-      "image_type": "search",
-      "duration": 7
-    },
-    {
       "id": 7,
-      "text": "Now the most chilling: they harvested organs from living subjects, stitching them back together to study how long a human could survive after a heart was ripped out.",
-      "search_term": "organ harvesting living vivisection surgery",
-      "image_expectation": "Surgical horror scene showing exposed human organs on operating table with vintage medical tools, depicting brutal wartime vivisection experiment",
+      "text": "The report stayed sealed for decades, then released with more redactions than answers.",
+      "search_term": "classified redacted government document",
+      "image_expectation": "A heavily redacted classified government report covered with black bars over sensitive information",
       "image_type": "search",
-      "duration": 7
+      "duration": 5
     },
     {
       "id": 8,
-      "text": "And the final horror - they let a plague infested corpse crawl through a schoolyard, then sent the same kids to the front lines, hoping the disease would be a secret weapon.",
-      "search_term": "plague corpse schoolyard children war",
-      "image_expectation": "Haunting scene of schoolyard with ghostly figure crawling through empty playground, vintage war atmosphere with sinister military research",
+      "text": "Today anyone with a laptop can sketch a comparable weapon in weeks - the experiment proved the world's worst nightmare was already real.",
+      "search_term": "laptop nuclear weapon design",
+      "image_expectation": "A person using a laptop in a dark room designing weapons with glowing digital blueprints",
       "image_type": "search",
       "duration": 7
     },
     {
       "id": 9,
-      "text": "All this was covered up by the US, which traded the data for silence and let the scientists walk free after the war.",
-      "search_term": "US coverup war crimes immunity deal",
-      "image_expectation": "Vintage document exchange between American and Japanese officials shaking hands, shadows suggesting dark diplomatic deal concealing war crimes",
-      "image_type": "search",
-      "duration": 6
-    },
-    {
-      "id": 10,
-      "text": "Which atrocity blows your mind the most, and why do you think the world still pretends it never happened?",
-      "search_term": "historical coverup silence forgotten atrocity",
-      "image_expectation": "Silhouette of person looking at historical documents in dim archive, contemplative atmosphere suggesting hidden truth and forgotten history",
+      "text": "Which part of this secret race freaks you out the most?",
+      "search_term": "person worried concerned face",
+      "image_expectation": "A concerned person thinking deeply with worried expression about dangerous nuclear secrets",
       "image_type": "stock",
-      "duration": 5
+      "duration": 4
     }
   ]
 }
