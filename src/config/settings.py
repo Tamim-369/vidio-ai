@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY_BACKUP = os.getenv("GROQ_API_KEY_BACKUP")  # Backup key for rate limits
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_VISION_MODEL = "qwen/qwen3.6-27b"

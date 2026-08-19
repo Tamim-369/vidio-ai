@@ -31,4 +31,4 @@ def run(topic: str):
 
 if __name__ == "__main__":
     
-    run("top 10 Worst fighter jets in human history with reasons why they were so bad.")
+    run("The brutal Unit 731 Biological and Chemical Tests ran by imperial japan.")

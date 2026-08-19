@@ -3,10 +3,32 @@ import re
 import time
 from groq import Groq
 import ollama  # <-- added
-from src.config.settings import GROQ_API_KEY, GROQ_MODEL
+from src.config.settings import GROQ_API_KEY, GROQ_API_KEY_BACKUP, GROQ_MODEL
 from src.config.prompt import get_raw_script_prompt
 
+# Initialize primary client
 client = Groq(api_key=GROQ_API_KEY)
+backup_client = None
+using_backup = False
+
+def _get_groq_client():
+    """Get the current Groq client (primary or backup)."""
+    global client, backup_client, using_backup
+    
+    if using_backup and backup_client:
+        return backup_client
+    return client
+
+def _switch_to_backup():
+    """Switch to backup API key if available."""
+    global backup_client, using_backup
+    
+    if GROQ_API_KEY_BACKUP and not using_backup:
+        print("    [groq] Switching to backup API key...")
+        backup_client = Groq(api_key=GROQ_API_KEY_BACKUP)
+        using_backup = True
+        return True
+    return False
 
 # Prompt for converting raw script to structured JSON
 JSON_STRUCTURE_PROMPT = """You are a JSON converter. Your ONLY job is to convert a raw video script into structured JSON.
@@ -122,17 +144,27 @@ def _call_groq(messages: list, temperature: float = 0.7, model: str = None, max_
 
     for attempt in range(max_retries):
         try:
-            response = client.chat.completions.create(
+            current_client = _get_groq_client()
+            response = current_client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
             )
             return response.choices[0].message.content.strip()
+            
         except Exception as e:
             error_msg = str(e).lower()
+            print(f"    [groq] Attempt {attempt + 1}/{max_retries}: {e}")
 
             # Handle rate limit errors
             if "rate_limit" in error_msg or "413" in error_msg or "tokens" in error_msg:
+                # Try switching to backup key on first rate limit
+                if attempt == 0 and not using_backup:
+                    if _switch_to_backup():
+                        print(f"    [groq] Retrying with backup key...")
+                        continue  # Retry immediately with backup
+                
+                # If backup also fails or no backup, wait
                 if attempt < max_retries - 1:
                     wait_time = (2 ** attempt) * 1  # Exponential backoff: 1s, 2s, 4s
                     print(f"    [groq] Rate limit hit, waiting {wait_time}s before retry...")
