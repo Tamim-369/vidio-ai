@@ -1,6 +1,6 @@
 from src.utils.file_helpers import ensure_dirs, cleanup_temp
 from src.services.data_source import research
-from src.services.script_builder import build_script, review_script, revise_script
+from src.services.script_builder import build_script
 from src.services.asset_fetcher import fetch_assets
 from src.services.tts import generate_audio
 from src.services.video_assembler import assemble
@@ -16,19 +16,7 @@ def run(topic: str):
     script = build_script(topic, raw_data)
     print(f"   {len(script['lines'])} lines generated")
 
-    print(f"\n🔎 Reviewing script...")
-    review = review_script(script)
-
-    if review.get("approved"):
-        print(f"   ✓ Script approved")
-    else:
-        print(f"   ✗ Issues found:")
-        for issue in review.get("issues", []):
-            print(f"     - {issue}")
-        script = revise_script(script, review)
-        print(f"   ✓ Script revised ({len(script['lines'])} lines)")
-
-    print(f"\n🖼  Fetching images...")
+    print(f"\n�  Fetching images...")
     script["lines"] = fetch_assets(script["lines"], topic=topic)
 
     print(f"\n🎙️  Generating voiceover...")
@@ -42,6 +30,5 @@ def run(topic: str):
 
 
 if __name__ == "__main__":
-    topic = input("📝 Enter a topic for the video: ")
     
-    run(topic)
+    run("top 10 Worst fighter jets in human history with reasons why they were so bad.")

@@ -1,74 +1,64 @@
 import json
 import re
+import time
 from groq import Groq
-from src.config.settings import GROQ_API_KEY, GROQ_MODEL, VIDEO_STYLE
+import ollama  # <-- added
+from src.config.settings import GROQ_API_KEY, GROQ_MODEL
+from src.config.prompt import get_raw_script_prompt
 
 client = Groq(api_key=GROQ_API_KEY)
 
+# Prompt for converting raw script to structured JSON
+JSON_STRUCTURE_PROMPT = """You are a JSON converter. Your ONLY job is to convert a raw video script into structured JSON.
 
+IMPORTANT: You MUST preserve EVERY line from the raw script. Do not skip any lines.
 
-SYSTEM_PROMPT = """
-You are given a topic and research data. Your job is to write a short video script (8-12 lines).
+The raw script will have numbered lines like:
+1. First sentence here.
+2. Second sentence here.
+
+You must convert EACH numbered line into a JSON object.
 
 Return ONLY valid JSON. No explanation, no markdown, no code blocks. Just raw JSON.
 
 Format:
-{{
+{
   "topic": "<topic>",
-  "style": "<style>",
   "lines": [
-    {{
+    {
       "id": 1,
-      "text": "<one sentence to be narrated>",
-      "search_term": "<descriptive image search query for this sentence>",
+      "text": "<original text from line 1, without the number prefix>",
+      "search_term": "<3-8 word search query>",
+      "image_expectation": "<15-20 word visual description>",
       "image_type": "<stock|search>",
-      "duration": <estimated seconds as integer>
-    }}
+      "duration": <3-7 seconds as integer>
+    },
+    {
+      "id": 2,
+      "text": "<original text from line 2, without the number prefix>",
+      "search_term": "<3-8 word search query>",
+      "image_expectation": "<15-20 word visual description>",
+      "image_type": "<stock|search>",
+      "duration": <3-7 seconds as integer>
+    }
   ]
-}}
+}
 
 Rules:
-- Each line is ONE sentence, narrated by TTS — write it EXACTLY as it should be spoken out loud
-- NEVER use a hyphen as a sentence connector or pause. Use a comma or period instead
-- Hyphens are ONLY allowed in compound words like "waist-to-hip" or number ranges like "3-4"
-- NEVER use double quotes inside text or search_term values — use single quotes instead if needed
-- search_term must describe what a CAMERA would photograph — think like a photographer, not a summarizer
-- search_term must include the topic context so results stay relevant
-- duration should match how long it takes to say the text naturally (3-8 seconds)
-- 8 to 12 lines total
-- image_type: "stock" for generic visuals (people, nature, gym, city), "search" for specific ones (person, diagram, event)
-"""
-
-REVIEW_PROMPT = """
-You are a strict video script reviewer. You will be given a video script JSON.
-
-Your job is to review it and return a JSON object with this format:
-{{
-  "approved": true or false,
-  "issues": ["issue 1", "issue 2", ...],
-  "suggestions": ["suggestion 1", "suggestion 2", ...]
-}}
-
-Check for these issues:
-- Any hyphen used as a sentence connector instead of a comma/period (e.g. "bulk-women", "attractor-open")
-- Lines that are too long or awkward to speak naturally
-- Search terms that are too vague (just one word) or don't describe a visual scene
-- Lines that feel repetitive or don't add new information
-- Poor flow between lines (topics jumping around randomly)
-- Any line where the search_term wouldn't find a relevant image
-
-Return ONLY valid JSON. No explanation, no markdown.
-"""
-
-REVISION_PROMPT = """
-You are given a video script JSON and a list of issues found during review.
-Fix ALL the listed issues and return the corrected script in the exact same JSON format.
-Return ONLY valid JSON. No explanation, no markdown, no code blocks.
-"""
+- Create one object per numbered line from the raw script
+- text: The original sentence WITHOUT the number prefix (e.g., "1. " or "2. ")
+- search_term: 3-8 words MAX. Pure keywords for image search
+- image_expectation: 15-20 words. Describe the visual that matches the drama
+- image_type: "search" for specific things, "stock" for generic scenes
+- duration: How long it takes to speak (3-7 seconds)
+- Do NOT skip any lines - convert ALL of them"""
 
 
 def _normalize_raw(raw: str) -> str:
     """Strip markdown blocks and normalize Unicode punctuation."""
+    if not raw:
+        return raw
+
     if raw.startswith("```"):
         parts = raw.split("```")
         raw = parts[1] if len(parts) > 1 else raw
@@ -76,6 +66,12 @@ def _normalize_raw(raw: str) -> str:
             raw = raw[4:]
         raw = raw.strip()
 
+    # Remove thinking tags
+    raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL)
+    raw = re.sub(r'<thinking>.*?</thinking>', '', raw, flags=re.DOTALL)
+    raw = raw.strip()
+
+    # Normalize Unicode punctuation
     replacements = {
         "\u2011": "-", "\u2013": "-", "\u2014": "-",
         "\u2015": "-", "\u2212": "-",
@@ -120,72 +116,92 @@ def _safe_json_loads(text: str) -> dict:
         raise json.JSONDecodeError(f"{e.msg}: {snippet!r}", repaired, e.pos) from e
 
 
-def _call_groq(messages: list, temperature: float = 0.7) -> str:
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
+def _call_groq(messages: list, temperature: float = 0.7, model: str = None, max_retries: int = 3) -> str:
+    if model is None:
+        model = GROQ_MODEL
+
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            error_msg = str(e).lower()
+
+            # Handle rate limit errors
+            if "rate_limit" in error_msg or "413" in error_msg or "tokens" in error_msg:
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) * 1  # Exponential backoff: 1s, 2s, 4s
+                    print(f"    [groq] Rate limit hit, waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                    continue
+                raise e
+            # For other errors, don't retry
+            raise e
+
+    raise Exception(f"Failed after {max_retries} retries")
+
+
+def _call_ollama(messages: list, temperature: float = 0.3, model: str = "minimax-m3:cloud") -> str:
+    """Call Ollama (used for JSON structuring)."""
+    response = ollama.chat(
+        model=model,
         messages=messages,
-        temperature=temperature,
+        options={
+            "temperature": temperature,
+        }
     )
-    return response.choices[0].message.content.strip()
+    return response["message"]["content"].strip()
+
+
+def _generate_raw_script(topic: str, raw_data: str) -> str:
+    """Generate raw spoken script using the viral script prompt."""
+    prompt = get_raw_script_prompt(topic)
+
+    raw_script = _call_groq([
+        {"role": "user", "content": f"{prompt}\n\nResearch data:\n{raw_data}"}
+    ], temperature=0.9)  # Higher temp for more creative scripts
+
+    return _normalize_raw(raw_script)
+
+
+def _convert_to_json(raw_script: str, topic: str) -> dict:
+    """Convert raw viral script to structured JSON with search terms and image expectations.
+    Now uses Ollama + minimax-m3:cloud instead of Groq.
+    """
+    raw_json = _call_ollama([
+        {"role": "system", "content": JSON_STRUCTURE_PROMPT},
+        {"role": "user", "content": f"Raw script:\n{raw_script}\n\nTopic: {topic}\n\nConvert to structured JSON now."}
+    ], temperature=0.3)
+
+    raw_json = _normalize_raw(raw_json)
+    
+    # Save the JSON response for debugging
+    with open("./raw_json_response.txt", "w") as f:
+        f.write(raw_json)
+    
+    return _safe_json_loads(raw_json)
 
 
 def build_script(topic: str, raw_data: str) -> dict:
-    """Build script from topic + research data."""
-    
+    """Build script from topic + research data using two-step pipeline.
 
-    raw = _call_groq([
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Topic: {topic}\nStyle: {VIDEO_STYLE}\n\nResearch data:\n{raw_data}\n\nWrite the video script now."},
-    ])
+    Step 1: Generate raw spoken script using viral script prompt (still Groq)
+    Step 2: Convert raw script to structured JSON format (now Ollama + minimax-m3:cloud)
+    """
+    # Step 1: Generate raw script
+    print("    [script] Generating raw script...")
+    raw_script = _generate_raw_script(topic, raw_data)
 
-    raw = _normalize_raw(raw)
+    # Save raw script for debugging
+    with open("./raw_script.txt", "w") as f:
+        f.write(raw_script)
 
-    with open("./raw_script.json", "w") as f:
-        f.write(raw)
+    # Step 2: Convert to structured JSON
+    print("    [script] Converting to structured JSON (via Ollama)...")
+    script = _convert_to_json(raw_script, topic)
 
-    return _safe_json_loads(raw)
-
-
-def review_script(script: dict) -> dict:
-    """Review the script. Returns review result with approved, issues, suggestions."""
-    print("  [review] Reviewing script...")
-
-    raw = _call_groq([
-        {"role": "system", "content": REVIEW_PROMPT},
-        {"role": "user", "content": f"Review this script:\n{json.dumps(script, indent=2)}"},
-    ], temperature=0.3)
-
-    raw = _normalize_raw(raw)
-
-    try:
-        return _safe_json_loads(raw)
-    except Exception:
-        # If review JSON is broken, assume approved to not block the pipeline
-        return {"approved": True, "issues": [], "suggestions": []}
-
-
-def revise_script(script: dict, review: dict) -> dict:
-    """Revise the script based on review feedback."""
-    print("  [review] Revising script...")
-
-    issues_text = "\n".join(f"- {i}" for i in review.get("issues", []))
-    suggestions_text = "\n".join(f"- {s}" for s in review.get("suggestions", []))
-
-    raw = _call_groq([
-        {"role": "system", "content": REVISION_PROMPT},
-        {"role": "user", "content": (
-            f"Issues found:\n{issues_text}\n\n"
-            f"Suggestions:\n{suggestions_text}\n\n"
-            f"Script to fix:\n{json.dumps(script, indent=2)}"
-        )},
-    ], temperature=0.5)
-
-    raw = _normalize_raw(raw)
-
-    with open("./raw_script.json", "w") as f:
-        f.write(raw)
-
-    try:
-        return _safe_json_loads(raw)
-    except Exception:
-        return script  # if revision fails, return original
+    return script

@@ -1,0 +1,101 @@
+{
+  "topic": "top 10 Worst fighter jets in human history with reasons why they were so bad.",
+  "lines": [
+    {
+      "id": 1,
+      "text": "Imagine a fighter so terrible pilots called it a death trap before it even left the runway.",
+      "search_term": "fighter jet death trap runway",
+      "image_expectation": "A vintage fighter jet on a dark, ominous runway with dramatic shadows emphasizing danger and dread",
+      "image_type": "stock",
+      "duration": 5
+    },
+    {
+      "id": 2,
+      "text": "We're counting down the ten most disastrous jets ever built, and the fallout still haunts air forces today.",
+      "search_term": "ten most disastrous fighter jets",
+      "image_expectation": "A dramatic countdown style image showing multiple failed fighter jets from different eras with debris",
+      "image_type": "stock",
+      "duration": 6
+    },
+    {
+      "id": 3,
+      "text": "10. Bell P-59 Airacomet - America's first jet, slower than the prop fighters it was supposed to replace, a flying embarrassment.",
+      "search_term": "Bell P-59 Airacomet jet aircraft",
+      "image_expectation": "A vintage Bell P-59 Airacomet jet aircraft on display, appearing slow and obsolete compared to propeller planes beside it",
+      "image_type": "search",
+      "duration": 7
+    },
+    {
+      "id": 4,
+      "text": "9. Northrop F-107 Banshee - terrible handling, terrible visibility, cancelled after a handful of crashes.",
+      "search_term": "Northrop F-107 Banshee fighter jet",
+      "image_expectation": "A Northrop F-107 Banshee fighter jet with dramatic angles showing its unusual swept-wing design and poor visibility cockpit",
+      "image_type": "search",
+      "duration": 6
+    },
+    {
+      "id": 5,
+      "text": "8. Convair F-102 Delta Dagger - a safety nightmare, 259 of its 1,000 siblings vanished in accidents.",
+      "search_term": "Convair F-102 Delta Dagger jet",
+      "image_expectation": "A Convair F-102 Delta Dagger delta-wing jet in dramatic lighting with smoke trails suggesting crashed aircraft and accidents",
+      "image_type": "search",
+      "duration": 6
+    },
+    {
+      "id": 6,
+      "text": "7. Grumman F-7U Cutlass - wildly unstable, prone to fire, pilots literally begged to be taken off the roster.",
+      "search_term": "Grumman F7U Cutlass jet",
+      "image_expectation": "A Grumman F7U Cutlass jet aircraft with dramatic flames and unstable flight imagery suggesting danger and instability",
+      "image_type": "search",
+      "duration": 6
+    },
+    {
+      "id": 7,
+      "text": "6. Lockheed F-104 Starfighter - the \"Widowmaker\" that ate more pilots than any other NATO jet, barely a dogfighter.",
+      "search_term": "Lockheed F-104 Starfighter Widowmaker",
+      "image_expectation": "A Lockheed F-104 Starfighter with dark dramatic silhouette representing the Widowmaker nickname and pilot casualties",
+      "image_type": "search",
+      "duration": 7
+    },
+    {
+      "id": 8,
+      "text": "5. Sukhoi Su-7 \"Fitter\" - a fuel-guzzling brick that barely climbed and left crews stranded on the tarmac.",
+      "search_term": "Sukhoi Su-7 Fitter jet",
+      "image_expectation": "A Sukhoi Su-7 Fitter aircraft appearing bulky and brick-like, stranded on an empty tarmac with stranded crew silhouettes",
+      "image_type": "search",
+      "duration": 7
+    },
+    {
+      "id": 9,
+      "text": "4. Mikoyan-Gurevich MiG-21 early blocks - radar-less, blind, and still forced into combat by starving regimes.",
+      "search_term": "MiG-21 early variant jet",
+      "image_expectation": "An early MiG-21 aircraft with empty nose cone suggesting missing radar, blind and forced into desperate combat scenario",
+      "image_type": "search",
+      "duration": 6
+    },
+    {
+      "id": 10,
+      "text": "3. Yakovlev Yak-38 - the Soviet VTOL nightmare, under-powered and responsible for endless carrier accidents.",
+      "search_term": "Yakovlev Yak-38 Soviet VTOL",
+      "image_expectation": "A Yakovlev Yak-38 Soviet VTOL jet failing to take off from a carrier deck with under-powered engines visible and smoke",
+      "image_type": "search",
+      "duration": 7
+    },
+    {
+      "id": 11,
+      "text": "2. Heinkel He-162 Volksjäger - rushed wooden jet with engine failures, pilots called it a flying coffin.",
+      "search_term": "Heinkel He-162 Volksjäger wooden jet",
+      "image_expectation": "A Heinkel He-162 Volksjäger wooden jet fighter with engine failure smoke, resembling a flying coffin against dark sky",
+      "image_type": "search",
+      "duration": 6
+    },
+    {
+      "id": 12,
+      "text": "1. F-35 Lightning II - a $1.5 trillion software circus that still crashes on takeoff and still haunts me, which disaster shocked you the most?",
+      "search_term": "F-35 Lightning II crash",
+      "image_expectation": "An F-35 Lightning II stealth jet with dramatic software glitch visualization and crash debris, representing trillion dollar failure",
+      "image_type": "search",
+      "duration": 7
+    }
+  ]
+}
