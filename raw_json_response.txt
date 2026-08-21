@@ -1,77 +1,77 @@
 {
-  "topic": "Nth Country Experiment",
+  "topic": "The Furtive Fallacy: When Historians See Conspiracy Everywhere",
   "lines": [
     {
       "id": 1,
-      "text": "What if the government paid fresh PhDs to design a nuclear bomb for a weekend project?",
-      "search_term": "PhD scientists nuclear bomb",
-      "image_expectation": "A group of fresh PhD graduates in a laboratory examining nuclear weapon blueprints",
-      "image_type": "search",
+      "text": "What if every historic disaster was actually a secret plot waiting to be uncovered?",
+      "search_term": "historic disaster secret plot",
+      "image_expectation": "Mysterious ancient ruins shrouded in fog with hidden symbols suggesting conspiracy and unseen forces manipulating history",
+      "image_type": "stock",
       "duration": 5
     },
     {
       "id": 2,
-      "text": "That's exactly what the Nth Country Experiment did, and it could have handed any small nation a nuclear punch.",
-      "search_term": "Nth Country Experiment nuclear",
-      "image_expectation": "Historical classified document about the Nth Country Experiment showing nuclear weapon research",
-      "image_type": "search",
-      "duration": 7
+      "text": "Historians love to whisper that unseen hands pulled the strings behind the biggest moments.",
+      "search_term": "historians whisper unseen hands",
+      "image_expectation": "Dimly lit library with scholars leaning over old manuscripts, shadows forming puppet strings over world map",
+      "image_type": "stock",
+      "duration": 5
     },
     {
       "id": 3,
-      "text": "Three brilliant minds with zero weapons experience were given only unclassified textbooks and a calculator.",
-      "search_term": "scientists studying textbooks calculator",
-      "image_expectation": "Three young researchers at a desk studying physics textbooks with a simple calculator",
-      "image_type": "stock",
-      "duration": 6
-    },
-    {
-      "id": 4,
-      "text": "In under three years they churned out a two point implosion design that matched the Hiroshima bomb.",
-      "search_term": "nuclear implosion design blueprint",
-      "image_expectation": "Technical nuclear weapon implosion design blueprints and schematics spread across a table",
-      "image_type": "search",
-      "duration": 6
-    },
-    {
-      "id": 5,
-      "text": "The lab's own experts called it a credible design and said a simpler gun type could be done even faster.",
-      "search_term": "nuclear weapon gun-type design",
-      "image_expectation": "Nuclear weapon experts reviewing and approving a gun-type atomic bomb design document",
-      "image_type": "search",
-      "duration": 6
-    },
-    {
-      "id": 6,
-      "text": "The only thing stopping them was a mountain of enriched uranium, not the physics.",
-      "search_term": "enriched uranium stockpile",
-      "image_expectation": "Massive stockpile of enriched uranium stored in secured facility with armed guards",
+      "text": "You won't believe how bad this got with the 1918 Spanish Flu-some still claim it was a German bioweapon, not a natural virus.",
+      "search_term": "1918 Spanish Flu bioweapon",
+      "image_expectation": "Grim wartime hospital corridor, patients coughing, a German laboratory silhouette with vials and ominous green glow",
       "image_type": "search",
       "duration": 5
     },
     {
+      "id": 4,
+      "text": "Then the Titanic-officially an iceberg, yet a few say the owners buried sub-standard steel flaws to protect profits.",
+      "search_term": "Titanic hidden steel flaws",
+      "image_expectation": "Titanic ship model cracked open, revealing rusted steel beams and schematics with red warning marks",
+      "image_type": "search",
+      "duration": 5
+    },
+    {
+      "id": 5,
+      "text": "Next, Archduke Franz Ferdinand's murder-often called a random shot, but many insist it was a covert Serbian conspiracy to spark war.",
+      "search_term": "Archduke Ferdinand Serbian conspiracy",
+      "image_expectation": "Historic Sarajevo street scene, gun smoke, Serbian flag fluttering, conspiratorial figures whispering behind a newspaper stand",
+      "image_type": "search",
+      "duration": 5
+    },
+    {
+      "id": 6,
+      "text": "Even worse, the fall of the Western Roman Empire-textbooks blame barbarians, but a fringe argues secret Christian sabotage drained the treasury.",
+      "search_term": "Western Roman Empire Christian sabotage",
+      "image_expectation": "Ancient Roman treasury vault, Christian symbols etched on walls, shadowy figures moving gold coins under candlelight",
+      "image_type": "stock",
+      "duration": 5
+    },
+    {
       "id": 7,
-      "text": "The report stayed sealed for decades, then released with more redactions than answers.",
-      "search_term": "classified redacted government document",
-      "image_expectation": "A heavily redacted classified government report covered with black bars over sensitive information",
+      "text": "The Cuban Missile Crisis-most see brinkmanship, but a handful swear the CIA planted missiles as a false-flag to scare Khrushchev.",
+      "search_term": "Cuban Missile Crisis false flag",
+      "image_expectation": "Cold war era map, missile icons placed over Cuba, CIA silhouette pulling strings, tense red alert overlay",
       "image_type": "search",
       "duration": 5
     },
     {
       "id": 8,
-      "text": "Today anyone with a laptop can sketch a comparable weapon in weeks - the experiment proved the world's worst nightmare was already real.",
-      "search_term": "laptop nuclear weapon design",
-      "image_expectation": "A person using a laptop in a dark room designing weapons with glowing digital blueprints",
+      "text": "This one takes the cake: the Hiroshima bombing-officially to end WWII, yet some argue it was a covert test of a new terror weapon aimed at the Soviet Union.",
+      "search_term": "Hiroshima bombing covert test",
+      "image_expectation": "Mushroom cloud over Hiroshima, secret laboratory notes, Soviet silhouette watching, ominous red question marks hovering",
       "image_type": "search",
-      "duration": 7
+      "duration": 5
     },
     {
       "id": 9,
-      "text": "Which part of this secret race freaks you out the most?",
-      "search_term": "person worried concerned face",
-      "image_expectation": "A concerned person thinking deeply with worried expression about dangerous nuclear secrets",
+      "text": "Which hidden conspiracy chills you to the bone? Comment below and let the debate explode.",
+      "search_term": "hidden conspiracy comment debate",
+      "image_expectation": "Dark forum thread with glowing comment boxes, question marks floating, viewers' avatars reacting with shocked expressions",
       "image_type": "stock",
-      "duration": 4
+      "duration": 5
     }
   ]
 }

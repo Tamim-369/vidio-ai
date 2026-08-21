@@ -13,12 +13,21 @@ GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "minimax-m3:cloud")
 
+# Gemini (topic generation). Flash is the free-tier workhorse (~15 RPM,
+# ~1500 RPD) — plenty for a handful of brainstorm calls per day.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+
 VIDEO_FORMAT = "9:16"         # "9:16" for Shorts/Reels, "16:9" for YouTube
 VIDEO_STYLE = "attraction"    # educational | motivational | ad | storytelling | attraction
 VOICE = "M3"                # from voices.py
 
 OUTPUT_DIR = "output"
 TEMP_DIR = "temp"
+
+# Pocket-TTS voice (cloned from the Kokoro narrator ref in voice_tests/chatterbox_ref.wav)
+POCKET_VOICE_STATE = "voices/narrator.safetensors"
+POCKET_VOICE_REF = "voice_tests/chatterbox_ref.wav"
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 

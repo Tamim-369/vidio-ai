@@ -72,34 +72,17 @@ def _crossfade_frames(frames1: np.ndarray, frames2: np.ndarray, fade_frames: int
 
 
 def _line_frames(asset_paths: list, total_duration: float, size: tuple) -> np.ndarray:
-    """Build the frame array for a single line, bounded to that line only."""
+    """Build the frame array for a single line, bounded to that line only.
+    Always uses all provided images (3 per line); crossfade is capped so it
+    never exceeds 30% of the per-image window."""
     CROSSFADE_DURATION = 0.8  # Slower crossfade: 800ms instead of 300ms
-    MIN_IMAGE_DURATION = 2.5  # Minimum time per image: 2.5 seconds
 
     num_images = len(asset_paths)
 
     if num_images == 1:
         return _make_zoom_frames(_load_image(asset_paths[0], size), total_duration, size)
 
-    # Multiple images: ensure minimum duration per image
-    raw_time_per_image = total_duration / num_images
-    original_count = num_images
-
-    if raw_time_per_image < MIN_IMAGE_DURATION:
-        # Use fewer images to meet minimum duration
-        max_images = int(total_duration / MIN_IMAGE_DURATION)
-        if max_images > 0:
-            asset_paths = asset_paths[:max_images]
-            num_images = len(asset_paths)
-            time_per_image = total_duration / num_images
-            print(f"  [assembler] Using {num_images} images (reduced from {original_count}) for proper timing")
-        else:
-            # Fallback: use single image if duration is very short
-            asset_paths = [asset_paths[0]]
-            num_images = 1
-            time_per_image = total_duration
-    else:
-        time_per_image = raw_time_per_image
+    time_per_image = total_duration / num_images
 
     fade_frames = int(CROSSFADE_DURATION * FPS)
     max_fade_frames = int((time_per_image * 0.3) * FPS)  # Max 30% of image time
@@ -172,8 +155,11 @@ def assemble(script: dict) -> str:
         print(f"  [assembler] Rendering line {line['id']} → {seg}")
         video_clip.write_videofile(seg, fps=FPS, codec="libx264", audio_codec="aac", logger=None)
 
-        # Free the frames array for this line before the next one.
+        # Free this line's frames array and clip before the next one.
         del frames
+        del make_frame
+        del video_clip
+        audio.close()
         segment_paths.append(seg)
         line_duration += total_duration
 

@@ -16,11 +16,15 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 from src.config.settings import (
+    OUTPUT_DIR,
     REDDIT_CLIENT_ID,
     REDDIT_CLIENT_SECRET,
     REDDIT_PASSWORD,
     REDDIT_USERNAME,
 )
+
+from src.services.channel_miner import fetch_channel_candidates
+from src.services.gemini_topics import brainstorm_topics
 
 # Niche-focused Reddit subs (secondary source, currently unreliable on this ISP).
 # Crime (serial killers, missing persons) and paranormal subs are deliberately excluded.
@@ -202,17 +206,37 @@ WIKI_HEADERS = {
 }
 
 
+_wiki_last_request = 0.0
+WIKI_MIN_INTERVAL = 1.2  # seconds between ANY Wikipedia request (rate limit ~1/s)
+
+
+def _wiki_throttle():
+    """Ensure a minimum gap between all Wikipedia requests."""
+    global _wiki_last_request
+    elapsed = time.monotonic() - _wiki_last_request
+    if elapsed < WIKI_MIN_INTERVAL:
+        time.sleep(WIKI_MIN_INTERVAL - elapsed)
+    _wiki_last_request = time.monotonic()
+
+
 def _wiki_get_json(params: dict) -> dict:
     params.setdefault("format", "json")
     for attempt in range(3):
         try:
+            _wiki_throttle()
             r = requests.get(
                 WIKI_API, params=params, headers=WIKI_HEADERS, timeout=20, verify=False
             )
             if r.status_code == 200:
                 return r.json()
             if r.status_code == 429:
-                wait = 5 + attempt * 5
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    wait = int(retry_after) if retry_after is not None else 0
+                except (TypeError, ValueError):
+                    wait = 0
+                if wait <= 0:
+                    wait = 5 + attempt * 5
                 print(f"    [wiki] rate-limited — backing off {wait}s...")
                 time.sleep(wait)
                 continue
@@ -267,7 +291,6 @@ def _wiki_extract_many(titles: list, chunk: int = 40) -> dict:
             ext = (page.get("extract") or "").strip()
             if ext:
                 results[title] = ext
-        time.sleep(0.3)
     return results
 
 
@@ -339,7 +362,6 @@ def fetch_wikipedia_candidates(limit: int = 40, target: int = 0, used_titles: li
         for page in range(3):
             if len(candidates) >= target:
                 break
-            time.sleep(0.8)  # stay under ~1 req/s to avoid 429 backoffs
             titles = _wiki_search(q, limit=10, offset=page * 10)
             if not titles:
                 break
@@ -352,9 +374,7 @@ def fetch_wikipedia_candidates(limit: int = 40, target: int = 0, used_titles: li
                 seen.add(low)
                 fresh.append(t)
             if not fresh:
-                time.sleep(0.5)
                 continue
-            time.sleep(0.8)
             extracts = _wiki_extract_many(fresh)
             for t in fresh:
                 c = _candidate(t, "mystery", extracts)
@@ -362,7 +382,6 @@ def fetch_wikipedia_candidates(limit: int = 40, target: int = 0, used_titles: li
                     candidates.append(c)
                     if len(candidates) >= target:
                         break
-            time.sleep(0.3)
 
     # Category pass (enrichment) only if search came up short.
     if len(candidates) < target:
@@ -380,9 +399,7 @@ def fetch_wikipedia_candidates(limit: int = 40, target: int = 0, used_titles: li
                 seen.add(low)
                 fresh.append((t, category))
             if not fresh:
-                time.sleep(0.5)
                 continue
-            time.sleep(0.8)
             extracts = _wiki_extract_many([t for t, _ in fresh])
             for t, category in fresh:
                 c = _candidate(t, category, extracts)
@@ -390,7 +407,6 @@ def fetch_wikipedia_candidates(limit: int = 40, target: int = 0, used_titles: li
                     candidates.append(c)
                     if len(candidates) >= target:
                         break
-            time.sleep(0.3)
 
     print(f"    [wiki] total: {len(candidates)} candidates")
     return candidates
@@ -445,6 +461,10 @@ NICHE_CONTEXT = [
 def _min_selftext(c: dict) -> int:
     if c.get("source") == "wikipedia":
         return 500
+    if c.get("source") == "gemini":
+        return 40  # summaries are short by design
+    if c.get("source", "").startswith("channel:"):
+        return 500
     sub = c["source"].split(":", 1)[-1]
     if sub in TITLE_BASED_SUBS:
         return 40
@@ -453,6 +473,10 @@ def _min_selftext(c: dict) -> int:
 
 def _min_score(c: dict) -> int:
     if c.get("source") == "wikipedia":
+        return 0
+    if c.get("source") == "gemini":
+        return 0
+    if c.get("source", "").startswith("channel:"):
         return 0
     sub = c["source"].split(":", 1)[-1]
     if sub in TITLE_BASED_SUBS:
@@ -702,6 +726,14 @@ def _is_niche(c: dict) -> bool:
         context_hits = sum(1 for k in NICHE_CONTEXT if k in low_body)
         return body_hits >= 2 or (body_hits >= 1 and context_hits >= 2)
 
+    if c.get("source") == "gemini":
+        # Gemini is prompted to stay in-niche and grounded; trust the proposal.
+        return True
+
+    if c.get("source", "").startswith("channel:"):
+        # Channel seeds are already LLM-gated to the niche (mystery/scary/injustice/heroic).
+        return True
+
     sub = c["source"].split(":", 1)[-1]
     if any(k in low_title for k in NICHE_STRONG):
         return True
@@ -730,14 +762,50 @@ def _load_used() -> list:
     return []
 
 
-def _is_duplicate(title: str, used: list) -> bool:
+def _token_overlap(a: str, b: str) -> float:
+    """Fraction of the shorter title's tokens that appear in the other."""
+    ta, tb = set(_normalize(a).split()), set(_normalize(b).split())
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / min(len(ta), len(tb))
+
+
+def _is_duplicate(title: str, used: list, fuzzy: bool = True) -> bool:
+    """Exact or fuzzy match against used topics.
+
+    Fuzzy: if >70% of the shorter title's tokens are shared, treat as a
+    duplicate (catches "Tuskegee Syphilis Study" vs "The Tuskegee Study").
+    """
     norm = _normalize(title)
-    return any(_normalize(t) == norm for t in used)
+    for t in used:
+        if _normalize(t) == norm:
+            return True
+        if fuzzy and len(norm.split()) >= 2 and _token_overlap(title, t) >= 0.6:
+            return True
+    return False
+
+
+def _scan_made_videos() -> list:
+    """Return topic titles reconstructed from existing output/*.mp4 filenames.
+
+    The output dir is the ground truth of videos actually made — this catches
+    duplicates even if used_topics.json was deleted or never written.
+    """
+    made = []
+    if os.path.isdir(OUTPUT_DIR):
+        for f in os.listdir(OUTPUT_DIR):
+            if f.endswith(".mp4"):
+                slug = f[:-4].replace("_", " ")
+                made.append(slug)
+    return made
 
 
 # ---------------------------------------------------------------- output fields
 
 def _verification_status(c: dict) -> str:
+    if c.get("source", "").startswith("channel:"):
+        # LLM-gated from a real documentary transcript; topics are still on-niche.
+        return "verified"
     subreddit = c["source"].split(":", 1)[-1]
     if subreddit == "badhistory":
         return "myth_debunked"
@@ -773,6 +841,33 @@ def _est_length_min(content: str) -> int:
     return 5
 
 
+def _verify_on_wikipedia(title: str) -> bool:
+    """Best-effort: does this topic correspond to a real Wikipedia article?
+
+    Searches with the topic's proper nouns (capitalized words like "Vela",
+    "Byford Dolphin") plus year tokens. Accepts if the top search result
+    shares a large fraction of the proposed title's tokens — a hallucinated
+    subject gets a weak/empty match, a real one returns its article.
+    On rate-limit/error we return True (don't block a run for throttling).
+    """
+    words = re.findall(r"[A-Za-z][a-z]+|\d{3,4}", title)
+    key = [w for w in words if (w[0].isupper() and w.lower() not in ("the", "a", "an")) or (w.isdigit() and len(w) == 4)]
+    if len(key) < 2:
+        return True
+    # Use the two most distinctive proper nouns; Wikipedia finds a real article
+    # (e.g. "Vela incident") but not a hallucinated one.
+    query = " ".join(key[:2])
+    try:
+        hits = _wiki_search(query, limit=5)
+        if not hits:
+            return False
+        top = _normalize(hits[0])
+        k1, k2 = _normalize(key[0]), _normalize(key[1])
+        return k1 in top and k2 in top
+    except Exception:
+        return True
+
+
 def _to_topic(c: dict) -> dict:
     source_name = c["source"].split(":", 1)[-1]
     category = c.get("category") or CATEGORY_MAP.get(source_name, "mystery")
@@ -796,17 +891,66 @@ def _to_topic(c: dict) -> dict:
 
 # ---------------------------------------------------------------- main
 
+def _rank_key(c: dict):
+    if c.get("source", "").startswith("channel:"):
+        return (0, 4, c["score"])  # by views — proven viral topics surface first
+    if c.get("source") == "gemini":
+        return (0, 3, c["score"])  # fresh proposals, grounded but unproven
+    if c.get("source") == "wikipedia":
+        return (0, 2, c["title"])  # backstop source
+    return (0, 1, c["score"])
+
+
 def run_topic_generation(limit: int = 100, target: int = TARGET_TOPICS, use_browser: bool = True) -> list:
     os.makedirs(TOPICS_OUTPUT_DIR, exist_ok=True)
-    used = _load_used()
+    used = list(dict.fromkeys(_load_used() + _scan_made_videos()))
+    if len(used) > len(_load_used()):
+        print(f"Reconciled: {len(used)} topics tracked (incl. {len(_scan_made_videos())} from output/)")
 
     raw = []
 
-    # 1) Primary: Wikipedia (stable, not ISP-blocked)
-    print(f"Pulling niche topics from Wikipedia...")
-    raw.extend(fetch_wikipedia_candidates(limit=limit, target=target, used_titles=used))
+    # 1) Gemini brainstorm: fresh viral topic seeds, grounded in search.
+    print("Brainstorming viral topics with Gemini...")
+    gemini_seeds = brainstorm_topics(count=target, blocklist=used)
+    verified = []
+    for s in gemini_seeds:
+        if _is_duplicate(s["title"], used):
+            continue
+        if not _verify_on_wikipedia(s["title"]):
+            print(f"  [gemini] dropped (not on Wikipedia): {s['title']}")
+            continue
+        verified.append(s)
+    for s in verified:
+        raw.append({
+            "source": "gemini",
+            "category": s["angle"],
+            "title": s["title"],
+            "content": s["summary"],
+            "score": 80,  # grounded proposal; below channel-mined views
+            "upvote_ratio": 1.0,
+            "source_urls": [],
+        })
+    print(f"  [gemini] {len(verified)}/{len(gemini_seeds)} seeds verified")
 
-    # 2) Secondary: Reddit (best-effort — unreliable on this ISP).
+    # 2) Competitor-channel mining: proven-viral topics ranked by views.
+    #    Cached on disk + parallel LLM calls, so re-runs are fast.
+    print("Mining competitor channels for viral topics...")
+    try:
+        raw.extend(fetch_channel_candidates(used_titles=used))
+    except Exception as e:
+        print(f"  [miner] failed: {e}")
+
+    # 3) Primary backstop: Wikipedia (stable, not ISP-blocked). Runs only if
+    #    Gemini + miner came up short, so the slow crawl is a rarity.
+    target_covered = target * 3
+    if len(raw) < target_covered:
+        print("Pulling niche topics from Wikipedia as backstop...")
+        raw.extend(fetch_wikipedia_candidates(
+            limit=limit, target=target_covered - len(raw), used_titles=used))
+    else:
+        print("Enough from Gemini + channels — skipping Wikipedia")
+
+    # 4) Secondary: Reddit (best-effort — unreliable on this ISP).
     #    Skipped unless REDDIT_ENABLED=1 (or --limit high forces it) to keep runs fast.
     reddit_raw = []
     if os.environ.get("REDDIT_ENABLED") == "1":
@@ -842,13 +986,8 @@ def run_topic_generation(limit: int = 100, target: int = TARGET_TOPICS, use_brow
     passed = [c for c in raw if _passes_filters(c) and not _is_duplicate(c["title"], used)]
     print(f"After filters + dedupe: {len(passed)}")
 
-    # Rank: story-driven Reddit subs first, otherwise by score. Wikipedia has a
-    # flat score so order within it is stable.
-    def _rank_key(c: dict):
-        if c.get("source") == "wikipedia":
-            return (0, 0, c["title"])
-        return (0, 1, c["score"])
-
+    # Rank: proven-viral channel topics first (by views), then fresh Gemini
+    # proposals, then Wikipedia, then Reddit.
     passed.sort(key=_rank_key, reverse=True)
     topics = [_to_topic(c) for c in passed[:target]]
     print(f"Selected: {len(topics)} topics")
@@ -867,7 +1006,18 @@ def run_topic_generation(limit: int = 100, target: int = TARGET_TOPICS, use_brow
 
 def _save_used(titles: list) -> None:
     with open(USED_TOPICS_FILE, "w") as f:
-        json.dump(titles, f, indent=2)
+        json.dump(list(dict.fromkeys(titles)), f, indent=2)
+
+
+def record_made_video(topic_title: str) -> None:
+    """Record a successfully made video so it is never regenerated.
+
+    Called after a render completes. Mirrors the used_topics.json record
+    (so the exact topic is blocked) and is reconciled with output/ on the
+    next generation run regardless.
+    """
+    used = list(dict.fromkeys(_load_used() + [topic_title]))
+    _save_used(used)
 
 
 def load_latest_topics() -> list:

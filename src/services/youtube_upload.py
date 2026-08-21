@@ -2,7 +2,11 @@ import json
 import os
 import time
 
-from src.config.prompt import get_metadata_prompt
+from src.config.prompt import (
+    get_metadata_prompt,
+    get_metadata_verifier_prompt,
+    get_metadata_fix_prompt,
+)
 from src.config.settings import (
     YOUTUBE_CATEGORY_ID,
     YOUTUBE_CLIENT_SECRETS,
@@ -12,7 +16,7 @@ from src.config.settings import (
     YOUTUBE_TAGS,
     YOUTUBE_TOKEN_FILE,
 )
-from src.services.script_builder import _call_groq
+from src.services.script_builder import _call_ollama
 
 
 def get_credentials():
@@ -98,42 +102,99 @@ def _fallback_metadata(topic: str, script_text: str) -> dict:
     return {"title": title, "description": description, "tags": tags}
 
 
-def generate_metadata(topic: str, script: dict) -> dict:
-    """Generate title, description, and tags using Groq + the SEO/CTR principles.
-
-    Falls back to deterministic metadata if the LLM call fails.
-    """
-    script_text = _format_script(script)
-    prompt = get_metadata_prompt(topic, script_text)
-
+def _extract_json(raw: str) -> dict:
+    """Pull the first {...} JSON object out of an LLM response."""
+    start, end = raw.find("{"), raw.rfind("}")
+    if start == -1 or end <= start:
+        return {}
     try:
-        raw = _call_groq(
-            [{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_retries=2,
-        )
-        start, end = raw.find("{"), raw.rfind("}")
-        if start != -1 and end > start:
-            meta = json.loads(raw[start:end + 1])
-        else:
-            meta = {}
-    except Exception as e:
-        print(f"    [youtube] Metadata generation failed, using fallback: {e}")
-        meta = {}
+        return json.loads(raw[start:end + 1])
+    except json.JSONDecodeError:
+        return {}
 
-    title = meta.get("title") or ""
-    description = meta.get("description") or ""
+
+def _clean_metadata(meta: dict) -> dict:
+    """Validate and normalize a metadata dict; empty values fall back to fallback."""
+    title = (meta.get("title") or "").strip()
+    description = (meta.get("description") or "").strip()
     tags = meta.get("tags") or []
 
     if not title or not description or len(title) > 100 or len(description) < 50:
-        print("    [youtube] LLM metadata invalid, using fallback")
-        return _fallback_metadata(topic, script_text)
+        return {}
 
     return {
         "title": title,
+        "title_alternates": [t for t in (meta.get("title_alternates") or []) if isinstance(t, str)][:3],
         "description": description,
         "tags": [str(t).lower().replace(" ", "-") for t in tags if str(t).strip()][:15],
     }
+
+
+def generate_metadata(topic: str, script: dict) -> dict:
+    """Generate title, description, and tags using minimax-m3:cloud (Ollama).
+
+    Two-pass with a verifier:
+      1. The generator is told to think through title/description tactics first.
+      2. A verifier (same model) audits the result against every rule and returns
+         a PASS/FAIL verdict. On FAIL it is fed the verifier's feedback and
+         rewrites, up to MAX_VERIFY_ROUNDS.
+    Falls back to deterministic metadata if the LLM calls fail.
+    """
+    MAX_VERIFY_ROUNDS = 2
+    script_text = _format_script(script)
+
+    def _call(prompt: str, temperature: float = 0.6) -> dict:
+        try:
+            raw = _call_ollama(
+                [{"role": "user", "content": prompt}],
+                temperature=temperature,
+            )
+            return _extract_json(raw)
+        except Exception as e:
+            print(f"    [youtube] Ollama call failed: {e}")
+            return {}
+
+    # Pass 1: generate (think-first prompt).
+    meta = _call(get_metadata_prompt(topic, script_text), temperature=0.7)
+    if not meta:
+        print("    [youtube] Metadata generation failed, using fallback")
+        return _fallback_metadata(topic, script_text)
+
+    # Pass 2+: verify, and rewrite on FAIL until it passes.
+    for round_no in range(1, MAX_VERIFY_ROUNDS + 1):
+        verifier = _call(
+            get_metadata_verifier_prompt(topic, script_text, json.dumps(meta, indent=2)),
+            temperature=0.2,
+        )
+        verdict = (verifier.get("verdict") or "").strip().upper()
+        print(
+            f"    [youtube] Verifier round {round_no}: {verdict}"
+            f" (title {verifier.get('title_score')}/100,"
+            f" desc {verifier.get('description_score')}/100,"
+            f" emotion: {verifier.get('emotion_triggered')})"
+        )
+
+        if verdict == "PASS":
+            # Prefer the verifier's fixed title if it supplied a stronger one.
+            fixed_title = (verifier.get("fixed_title") or "").strip()
+            if fixed_title and _clean_metadata({"title": fixed_title, "description": meta.get("description", ""), "tags": meta.get("tags", [])}):
+                meta["title"] = fixed_title
+            break
+
+        # FAIL: rewrite with the verifier's feedback.
+        meta = _call(
+            get_metadata_fix_prompt(topic, script_text, json.dumps(meta, indent=2), json.dumps(verifier, indent=2)),
+            temperature=0.7,
+        )
+        if not meta:
+            break
+
+    cleaned = _clean_metadata(meta)
+    if not cleaned:
+        print("    [youtube] LLM metadata invalid after verification, using fallback")
+        return _fallback_metadata(topic, script_text)
+
+    return cleaned
 
 
 def upload_video(

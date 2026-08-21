@@ -41,6 +41,10 @@ def create_video(topic: str, raw_data: str = None, publish: bool = None):
     print(f"\n🎬 Assembling video...")
     output = assemble(script)
 
+    # Record the topic as done so it is never regenerated (fuzzy + exact dedup).
+    from src.services.topic_generator import record_made_video
+    record_made_video(topic)
+
     if publish:
         publish_video(output, script["topic"], script)
     else:
@@ -70,13 +74,14 @@ def create_video_from_topic(topic: dict, publish: bool = None) -> str:
     return create_video(topic["title"], raw_data=raw_data, publish=publish)
 
 
-def run_batch(generate: bool = True, limit: int = 100, target: int = 20, publish: bool = None):
-    """Generate (or load) topics and produce a video for each one."""
-    from src.services.topic_generator import run_topic_generation, load_latest_topics
+def run_batch(generate: bool = True, limit: int = 100, target: int = 24, publish: bool = None):
+    """Generate (via the research pipeline) or load topics, then produce a video each."""
+    from src.services.research_pipeline import run_research_pipeline
+    from src.services.topic_generator import load_latest_topics
 
     if generate:
-        print(f"\n🎯 Generating {target} topics...")
-        topics = run_topic_generation(limit=limit, target=target)
+        print(f"\n🎯 Researching {target} topics...")
+        topics = run_research_pipeline(target=target)
     else:
         print("\n📂 Loading latest topic batch...")
         topics = load_latest_topics()
@@ -100,8 +105,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch", action="store_true", help="Generate topics and make videos for all")
     parser.add_argument("--use-saved", action="store_true", help="Use saved topic batch instead of generating")
     parser.add_argument("--upload", action="store_true", help="Upload to YouTube after making videos")
-    parser.add_argument("--limit", type=int, default=100, help="Posts per subreddit when generating topics")
-    parser.add_argument("--target", type=int, default=20, help="How many topics to generate")
+    parser.add_argument("--limit", type=int, default=100, help="Posts per source when researching topics")
+    parser.add_argument("--target", type=int, default=24, help="How many topics to research")
     args = parser.parse_args()
 
     publish = True if args.upload else None

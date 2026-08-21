@@ -178,15 +178,19 @@ def _call_groq(messages: list, temperature: float = 0.7, model: str = None, max_
 
 
 def _call_ollama(messages: list, temperature: float = 0.3, model: str = "minimax-m3:cloud") -> str:
-    """Call Ollama (used for JSON structuring)."""
-    response = ollama.chat(
-        model=model,
-        messages=messages,
-        options={
-            "temperature": temperature,
-        }
-    )
-    return response["message"]["content"].strip()
+    """Call Ollama (used for JSON structuring). Falls back to Groq on any failure."""
+    try:
+        response = ollama.chat(
+            model=model,
+            messages=messages,
+            options={
+                "temperature": temperature,
+            }
+        )
+        return response["message"]["content"].strip()
+    except Exception as e:
+        print(f"    [ollama] failed ({str(e)[:120]}) — falling back to Groq")
+        return _call_groq(messages, temperature=temperature)
 
 
 def _generate_raw_script(topic: str, raw_data: str) -> str:
