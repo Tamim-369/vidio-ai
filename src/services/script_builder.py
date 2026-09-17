@@ -53,7 +53,8 @@ Format:
       "search_term": "<3-8 word search query>",
       "image_expectation": "<15-20 word visual description>",
       "image_type": "<stock|search>",
-      "duration": <3-7 seconds as integer>
+      "duration": <3-7 seconds as integer>,
+      "loud": false
     },
     {
       "id": 2,
@@ -61,7 +62,8 @@ Format:
       "search_term": "<3-8 word search query>",
       "image_expectation": "<15-20 word visual description>",
       "image_type": "<stock|search>",
-      "duration": <3-7 seconds as integer>
+      "duration": <3-7 seconds as integer>,
+      "loud": false
     }
   ]
 }
@@ -73,6 +75,7 @@ Rules:
 - image_expectation: 15-20 words. Describe the visual that matches the drama
 - image_type: "search" for specific things, "stock" for generic scenes
 - duration: How long it takes to speak (3-7 seconds)
+- loud: true ONLY for explosive, dramatic, anger or exclamatory lines that should be SHOUTED (e.g. "they burned them alive!!"). false for normal narration. Default false, and only raise the volume if the sentence genuinely calls for it.
 - Do NOT skip any lines - convert ALL of them"""
 
 
@@ -193,9 +196,9 @@ def _call_ollama(messages: list, temperature: float = 0.3, model: str = "minimax
         return _call_groq(messages, temperature=temperature)
 
 
-def _generate_raw_script(topic: str, raw_data: str) -> str:
+def _generate_raw_script(topic: str, raw_data: str, style: dict = None) -> str:
     """Generate raw spoken script using the viral script prompt."""
-    prompt = get_raw_script_prompt(topic)
+    prompt = get_raw_script_prompt(topic, style=style)
 
     raw_script = _call_groq([
         {"role": "user", "content": f"{prompt}\n\nResearch data:\n{raw_data}"}
@@ -222,15 +225,18 @@ def _convert_to_json(raw_script: str, topic: str) -> dict:
     return _safe_json_loads(raw_json)
 
 
-def build_script(topic: str, raw_data: str) -> dict:
+def build_script(topic: str, raw_data: str, style: dict = None) -> dict:
     """Build script from topic + research data using two-step pipeline.
+
+    style: optional writing-style dict (src/config/writing_styles.py) that
+    shapes how the narrator's script sounds for a given voice persona.
 
     Step 1: Generate raw spoken script using viral script prompt (still Groq)
     Step 2: Convert raw script to structured JSON format (now Ollama + minimax-m3:cloud)
     """
     # Step 1: Generate raw script
     print("    [script] Generating raw script...")
-    raw_script = _generate_raw_script(topic, raw_data)
+    raw_script = _generate_raw_script(topic, raw_data, style=style)
 
     # Save raw script for debugging
     with open("./raw_script.txt", "w") as f:

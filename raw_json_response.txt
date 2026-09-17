@@ -1,77 +1,95 @@
 {
-  "topic": "The Furtive Fallacy: When Historians See Conspiracy Everywhere",
+  "topic": "Eastern Airlines Flight 212 crash (1974)",
   "lines": [
     {
       "id": 1,
-      "text": "What if every historic disaster was actually a secret plot waiting to be uncovered?",
-      "search_term": "historic disaster secret plot",
-      "image_expectation": "Mysterious ancient ruins shrouded in fog with hidden symbols suggesting conspiracy and unseen forces manipulating history",
-      "image_type": "stock",
-      "duration": 5
+      "text": "Listen to me. A DC-9 slammed into a cornfield at 7:30 AM like a dead weight on the bench.",
+      "search_term": "DC-9 crash cornfield morning",
+      "image_expectation": "A white DC-9 aircraft nose-first embedded in a golden cornfield under early morning light, smoke rising.",
+      "image_type": "search",
+      "duration": 6,
+      "loud": false
     },
     {
       "id": 2,
-      "text": "Historians love to whisper that unseen hands pulled the strings behind the biggest moments.",
-      "search_term": "historians whisper unseen hands",
-      "image_expectation": "Dimly lit library with scholars leaning over old manuscripts, shadows forming puppet strings over world map",
+      "text": "You have to understand this flight had 78 passengers, a captain with 9,000 hours and a rookie co-pilot.",
+      "search_term": "flight passengers captain co-pilot",
+      "image_expectation": "Interior of a commercial cockpit showing a seasoned captain, a young co-pilot, and a passenger manifest list.",
       "image_type": "stock",
-      "duration": 5
+      "duration": 5,
+      "loud": false
     },
     {
       "id": 3,
-      "text": "You won't believe how bad this got with the 1918 Spanish Flu-some still claim it was a German bioweapon, not a natural virus.",
-      "search_term": "1918 Spanish Flu bioweapon",
-      "image_expectation": "Grim wartime hospital corridor, patients coughing, a German laboratory silhouette with vials and ominous green glow",
-      "image_type": "search",
-      "duration": 5
+      "text": "First, low-lying fog rolled in, a thin veil that hid the runway like a bad warm-up set.",
+      "search_term": "low fog runway hidden",
+      "image_expectation": "A runway disappearing into a dense, low-lying fog, with a faint outline of runway lights barely visible.",
+      "image_type": "stock",
+      "duration": 5,
+      "loud": false
     },
     {
       "id": 4,
-      "text": "Then the Titanic-officially an iceberg, yet a few say the owners buried sub-standard steel flaws to protect profits.",
-      "search_term": "Titanic hidden steel flaws",
-      "image_expectation": "Titanic ship model cracked open, revealing rusted steel beams and schematics with red warning marks",
-      "image_type": "search",
-      "duration": 5
+      "text": "The pilots were chatting about a political crisis, flexing their opinions instead of checking their instruments.",
+      "search_term": "pilots political conversation cockpit",
+      "image_expectation": "Two pilots in a cockpit animatedly discussing politics, ignoring instrument panels that display altitude and speed.",
+      "image_type": "stock",
+      "duration": 6,
+      "loud": false
     },
     {
       "id": 5,
-      "text": "Next, Archduke Franz Ferdinand's murder-often called a random shot, but many insist it was a covert Serbian conspiracy to spark war.",
-      "search_term": "Archduke Ferdinand Serbian conspiracy",
-      "image_expectation": "Historic Sarajevo street scene, gun smoke, Serbian flag fluttering, conspiratorial figures whispering behind a newspaper stand",
-      "image_type": "search",
-      "duration": 5
+      "text": "Their altimeter read 1,670 feet, but they missed the lower dial that actually showed 670 feet.",
+      "search_term": "altimeter misreading flight error",
+      "image_expectation": "Close-up of an aircraft altimeter with two needles, one indicating 1,670 feet while the correct lower dial shows 670 feet.",
+      "image_type": "stock",
+      "duration": 5,
+      "loud": false
     },
     {
       "id": 6,
-      "text": "Even worse, the fall of the Western Roman Empire-textbooks blame barbarians, but a fringe argues secret Christian sabotage drained the treasury.",
-      "search_term": "Western Roman Empire Christian sabotage",
-      "image_expectation": "Ancient Roman treasury vault, Christian symbols etched on walls, shadowy figures moving gold coins under candlelight",
+      "text": "The terrain warning screamed, but the crew treated it like a weak grunt and silenced it.",
+      "search_term": "terrain warning ignored cockpit",
+      "image_expectation": "Cockpit alert panel flashing terrain warning light, while pilots dismiss it, hand covering the alarm speaker.",
       "image_type": "stock",
-      "duration": 5
+      "duration": 5,
+      "loud": false
     },
     {
       "id": 7,
-      "text": "The Cuban Missile Crisis-most see brinkmanship, but a handful swear the CIA planted missiles as a false-flag to scare Khrushchev.",
-      "search_term": "Cuban Missile Crisis false flag",
-      "image_expectation": "Cold war era map, missile icons placed over Cuba, CIA silhouette pulling strings, tense red alert overlay",
+      "text": "The plane drifted below the glide path, hit trees, broke into three pieces, and fire ate the wreckage.",
+      "search_term": "plane crash trees fire",
+      "image_expectation": "A DC-9 descending into a forest, colliding with trees, breaking apart, flames engulfing the wreckage.",
       "image_type": "search",
-      "duration": 5
+      "duration": 6,
+      "loud": false
     },
     {
       "id": 8,
-      "text": "This one takes the cake: the Hiroshima bombing-officially to end WWII, yet some argue it was a covert test of a new terror weapon aimed at the Soviet Union.",
-      "search_term": "Hiroshima bombing covert test",
-      "image_expectation": "Mushroom cloud over Hiroshima, secret laboratory notes, Soviet silhouette watching, ominous red question marks hovering",
-      "image_type": "search",
-      "duration": 5
+      "text": "AND THEY WERE TALKING ABOUT POLITICS WHILE THE ALARM BLARED!!",
+      "search_term": "cockpit alarm politics shouting",
+      "image_expectation": "Intense scene of pilots shouting, alarm lights flashing red, cockpit chaos as political debate continues.",
+      "image_type": "stock",
+      "duration": 4,
+      "loud": true
     },
     {
       "id": 9,
-      "text": "Which hidden conspiracy chills you to the bone? Comment below and let the debate explode.",
-      "search_term": "hidden conspiracy comment debate",
-      "image_expectation": "Dark forum thread with glowing comment boxes, question marks floating, viewers' avatars reacting with shocked expressions",
+      "text": "The NTSB banned cockpit chatter, a new sterile rule that saved countless lives later.",
+      "search_term": "NTSB cockpit chatter rule",
+      "image_expectation": "Official NTSB document headline announcing ban on cockpit conversation, with a calm cockpit background.",
       "image_type": "stock",
-      "duration": 5
+      "duration": 5,
+      "loud": false
+    },
+    {
+      "id": 10,
+      "text": "Which mistake blows your mind the most? Comment below and keep the memory alive.",
+      "search_term": "question audience comment crash",
+      "image_expectation": "Engaging call-to-action graphic with question text overlay, encouraging viewers to comment, background of crash site silhouette.",
+      "image_type": "stock",
+      "duration": 4,
+      "loud": false
     }
   ]
 }

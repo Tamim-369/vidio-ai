@@ -1,4 +1,26 @@
-def get_raw_script_prompt(topic):
+def get_raw_script_prompt(topic, style: dict = None):
+    """Build the raw-script prompt.
+
+    style: optional dict from src/config/writing_styles.py. If provided, its
+    "persona" block replaces the default LANGUAGE & STYLE section so the script
+    is written in that voice's style (e.g. Trump, Arnold). A "rules" list
+    (signature catchphrases / vocabulary constraints) is injected too.
+    """
+    from src.config.writing_styles import get_style
+
+    if style is None:
+        style = get_style(None)
+
+    import textwrap
+
+    rules_block = ""
+    if style.get("rules"):
+        rules = "\n".join(f"- {r}" for r in style["rules"])
+        rules_block = f"""
+VOICE RULES (this voice's real speech signatures — follow them in some shape or form)
+{rules}
+"""
+
     return f"""You are an elite YouTube Shorts scriptwriter who specializes in high-retention, viral ranking videos. Your only job is to write a raw spoken script that maximizes watch time, comments, and shares.
 
 Topic: {topic}
@@ -21,13 +43,15 @@ STRUCTURE
 - Final 1–2 lines: Strong closer that invites comments or creates a rewatch loop
 
 LANGUAGE & STYLE
-- Write exactly how a confident, slightly unhinged narrator would speak.
-- Short, punchy sentences. One clear idea per line.
-- Use emotional and judgmental language (nightmare, death trap, embarrassing, cancelled, pilots refused, complete failure, disaster, etc.).
-- Use ranking energy (“Even worse…”, “This one takes the cake…”, “You won’t believe how bad this got…”).
-- Sound like a real person ranking disasters, not a textbook or Wikipedia article.
-- Never use a hyphen as a pause or connector. Use periods or commas instead.
-- No double quotes.
+{textwrap.dedent(style["persona"]).strip()}
+{rules_block}
+DELIVERY & DYNAMICS (important — the narrator reads these literally)
+- The narrator's volume is controlled by the words you write, so you decide when they raise or lower their voice.
+- To make the narrator SHOUT at a line, write that line in FULL CAPS or end it with "!!" or both: e.g. "AND YOU KNOW WHAT THEY DID? THEY BURNED THEM ALIVE!!"
+- To make the narrator go quiet and tense (a drop), use an ellipsis and short, staccato words: e.g. "...they never found the bodies."
+- Use ALL-CAPS sparingly — at most 1-2 lines per script, reserved for the single biggest moment. Every line shouting is as bad as no line shouting.
+- Normal lines should sound conversational; let volume only change when the moment genuinely demands it.
+- Do NOT use instruction words like "[shout]" or "(loud)" — the punctuation and caps ARE the instruction.
 
 ACCURACY & SPECIFICITY
 - Only include real, well-known examples that actually fit the topic.
