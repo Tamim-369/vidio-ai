@@ -367,8 +367,12 @@ def _fetch_single_asset(line: dict, keywords: str, assets_dir: str, topic: str =
     line_text = line.get("text", "")
 
     search_term = original_search_term
-    if keywords and not any(k in search_term.lower() for k in keywords.split()):
-        search_term = f"{keywords} {search_term}"
+    # Always prepend core topic keywords (first 3) so topic dominates image search,
+    # not the sentence-specific term. This ensures images are about the TOPIC,
+    # not just the sentence's specific wording.
+    if keywords:
+        core = " ".join(keywords.split()[:3])
+        search_term = f"{core} {search_term}"
 
     print(f"  [asset] Line {line_id} [{image_type}]: Fetching {IMAGES_PER_LINE} images for '{search_term}'")
 

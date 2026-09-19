@@ -551,7 +551,7 @@ def _strip_lead_buffer(audio: np.ndarray, sr: int, buffer_text: str, full_text: 
     return audio[int(cut * sr):]
 
 
-def _normalize_pacing(audio: np.ndarray, sr: int, text: str, params: dict) -> np.ndarray:
+def _normalize_pacing(audio: np.ndarray, sr: int, text: str, params: dict, is_first: bool = False) -> np.ndarray:
     """Equalize speaking rate into the [TTS_MIN_WPS, TTS_MAX_WPS] band.
 
     The rate is words/second measured over SPEECH-ONLY time — silence gaps are
@@ -560,6 +560,9 @@ def _normalize_pacing(audio: np.ndarray, sr: int, text: str, params: dict) -> np
     genuine speech tempo is corrected: too-fast lines are slowed to the band
     top, too-slow lines are picked up to the band floor, via a whole-line
     uniform tempo (formant-preserving, no mid-sentence speed step).
+
+    For the first line (is_first=True), enforce EXACT mid-band pace (3.2 wps)
+    so the opening sounds perfectly normal — not slow, not fast, just right.
     """
     from src.config.settings import TTS_MIN_WPS, TTS_MAX_WPS
     if not TTS_MAX_WPS or TTS_MAX_WPS <= 0:
@@ -573,6 +576,20 @@ def _normalize_pacing(audio: np.ndarray, sr: int, text: str, params: dict) -> np
     gaps = _detect_silence_gaps(audio, sr)
     speech = max(dur - sum(d for _, d in gaps), 0.3)
     wps = words / speech
+    
+    # Mid-band target for "normal" pace
+    mid_wps = (TTS_MIN_WPS + TTS_MAX_WPS) / 2.0  # 3.2
+    
+    if is_first:
+        # First line: enforce EXACT mid-band pace
+        if abs(wps - mid_wps) > 0.05:  # only adjust if meaningfully off
+            factor = mid_wps / wps
+            # Cap at reasonable bounds to avoid artifacts
+            factor = min(max(factor, 0.85), 1.15)
+            print(f"    [tts] First-line pacing: {wps:.2f} -> {mid_wps:.2f} wps ({factor:.2f}x)")
+            return _time_stretch(audio, sr, factor)
+        return audio
+    
     if wps > TTS_MAX_WPS:
         # Cap the slow-down at 3%: a line that ran hot must not suddenly gum up
         # against the band ceiling (perceptible as a mid-video speed drop).

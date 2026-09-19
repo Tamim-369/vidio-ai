@@ -381,6 +381,10 @@ def _clean_text(text: str) -> str:
                   text, flags=re.IGNORECASE)
     text = re.sub(r'\bkm\b', 'kilometers', text, flags=re.IGNORECASE)
 
+    # Fix known TTS pronunciation issues
+    # "through" often comes out muffled/hollow — use phonetic-friendly "thru"
+    text = re.sub(r'\bthrough\b', 'thru', text, flags=re.IGNORECASE)
+
     # Sloppy number formatting before word expansion:
     #  - "400, 000" → "400,000" (space between thousands-grouped digits; only
     #    when the comma starts an exact 3-digit group, so "2001, 2002" is safe)

@@ -195,7 +195,7 @@ def _chat_loop(lines: list, voice: dict, audio_dir: str) -> list:
         combined = _enforce_pauses(combined.astype(np.float32), sr, synth_text)
         if line.get("is_first") and TTS_LEAD_BUFFER:
             combined = _strip_lead_buffer(combined, sr, TTS_LEAD_BUFFER, synth_text)
-        combined = _normalize_pacing(combined, sr, text, params)
+        combined = _normalize_pacing(combined, sr, text, params, is_first=line.get("is_first", False))
         gain = LOUD_GAIN if line.get("loud") else params.get("gain", 1.0)
         # Every line keeps the same short 60ms head pad. Bigger lead-ins made a
         # ~1s dead-silence pause between sentences (huge audible gap every line).
