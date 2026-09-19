@@ -12,7 +12,7 @@ import numpy as np
 import soundfile as sf
 
 
-def _noise_gate(audio: np.ndarray, threshold: float = 0.008) -> np.ndarray:
+def _noise_gate(audio: np.ndarray, threshold: float | None = None) -> np.ndarray:
     """Silence background hiss below threshold WITHOUT the paper-cut clicks.
 
     Naive ``audio * (envelope > threshold)`` is a BINARY gate: every time the
@@ -22,9 +22,26 @@ def _noise_gate(audio: np.ndarray, threshold: float = 0.008) -> np.ndarray:
     the SAME 256-sample moving window used to build the envelope, so 0->1 and
     1->0 transitions ramp over ~10 ms instead of snapping. Same window = zero
     phase shift, so word timing is unchanged — only the clicks are removed.
+
+    The threshold is ADAPTIVE unless one is given: a fixed absolute level (the
+    old 0.008) sits right at the hiss floor, so per-voice EQ boosts (Trump's
+    +2.5 dB at 3k/6.5k) push the hiss above the gate and it comes back as
+    audible "fog" in the pauses. Instead we derive it from THIS clip's quiet
+    floor in envelope terms — safely below speech, clearly above the fog.
     """
     kernel = np.ones(256) / 256
     envelope = np.convolve(np.abs(audio), kernel, mode='same')
+    if threshold is None:
+        peak = float(envelope.max())
+        # Ignore true silence (model pauses, our zero pads) — otherwise the
+        # percentile lands at 0 and the threshold collapses to ~peak*0.008.
+        non_silent = envelope[envelope > peak * 0.002]
+        if len(non_silent):
+            floor = float(np.percentile(non_silent, 25))
+        else:
+            floor = peak * 0.01
+        threshold = max(floor * 1.6, peak * 0.005)
+        threshold = min(threshold, peak * 0.08)
     gate = (envelope > threshold).astype(np.float32)
     gate = np.convolve(gate, kernel, mode='same')  # attack/release smoothing
     return audio * gate
@@ -32,10 +49,10 @@ def _noise_gate(audio: np.ndarray, threshold: float = 0.008) -> np.ndarray:
 
 _HOP_S = 0.01                    # RMS envelope hop (s), matches captions timing
 _PUNCT_PAUSE = {
-    '.': 0.42, '!': 0.42, '?': 0.42,      # sentence end → real breath
-    ',': 0.22, ';': 0.25, ':': 0.25,       # reduced from 0.25–0.28 to avoid intruding on speech
-    '-': 0.28,
-    '\u2013': 0.28, '\u2014': 0.28,
+    '.': 0.20, '!': 0.20, '?': 0.20,       # sentence end → short beat, not dead air
+    ',': 0.12, ';': 0.14, ':': 0.14,
+    '-': 0.15,
+    '\u2013': 0.15, '\u2014': 0.15,
 }
 _PUNCT_MATCH_W = {                         # max gap-offset (s) for pairing punctuation to a real silence gap
     '.': 0.25, '!': 0.25, '?': 0.25,
@@ -109,19 +126,21 @@ def _enforce_pauses(audio: np.ndarray, sr: int, text: str) -> np.ndarray:
 
     Neural TTS (especially a cloned voice) tends to rush: sentence periods get
     ~0.1 s, commas often nothing. This post-processes so a pause never lands in
-    the middle of speech:
+    the middle of speech and never drags on as dead air:
 
-      - . ! ?  → at least 0.42 s (a real sentence breath)
-      - , ; :  → at least 0.22 s (a beat)
-      - dashes → at least 0.28 s
+      - . ! ?  → about 0.20 s (a short beat)
+      - , ; :  → about 0.12–0.14 s (barely a breath)
+      - dashes → about 0.15 s
 
     Word boundaries come from ENERGY ALIGNMENT of this exact audio (the same
     model the captions use), NOT a char-count guess — that guess drifted off by
     up to a second on real Chatterbox output, so punctuation found nothing to
     extend. For each punctuation token:
 
-      1. If a REAL silence the model made overlaps that word boundary, extend
-         the gap to the target (never cut into the surrounding speech).
+      1. If a REAL silence the model made overlaps that word boundary, bring the
+         gap to the target — lengthen when too short, TRIM when the model left
+         an over-long breath (that dead air is the "1 s pause" between
+         sentences, and its fog is the hiss we then zero out).
       2. If the model ran the words together (no gap at all), INSERT the pause
          at the aligned boundary — positioned at the quietest frame in a small
          window around the boundary so it lands between words, never mid-word.
@@ -205,12 +224,27 @@ def _enforce_pauses(audio: np.ndarray, sr: int, text: str) -> np.ndarray:
             if d < best_d:
                 best_d, best_g = d, (gs, gd)
         if best_g is not None:
-            have = best_g[1]
-            need = target - have
-            if need >= 0.04:
-                at = best_g[0] + shift  # extend from the gap's start
-                out = _insert_silence(out, sr, at, need)
-                shift += need
+            gs, have = best_g
+            if have > target + 0.02:
+                # Model left an over-long breath: dead audio + hiss fog between
+                # sentences. Replace the WHOLE gap with `target` clean zeros —
+                # trims the dead air AND zeros out the foggy noise at once.
+                i0 = int((gs + shift) * sr)
+                i1 = int(((gs + have) + shift) * sr)
+                i1 = min(i1, len(out))
+                left = out[:i0].copy()
+                right = out[i1:].copy()
+                fade = min(int(0.002 * sr), len(left), len(right))
+                if fade:
+                    left[-fade:] *= np.linspace(1.0, 0.0, fade)
+                    right[:fade] *= np.linspace(0.0, 1.0, fade)
+                pad = np.zeros(int(target * sr), dtype=out.dtype)
+                out = np.concatenate([left, pad, right])
+                shift += target - have
+            elif target - have >= 0.04:
+                at = gs + shift  # extend from the gap's start
+                out = _insert_silence(out, sr, at, target - have)
+                shift += target - have
             continue
 
         # 2) Model ran words together → INSERT the pause at the aligned
@@ -334,7 +368,7 @@ def _onset_boost(audio: np.ndarray, sr: int, peak_gain: float = 2.2, window: flo
     return audio * g
 
 
-def _finalize(combined: np.ndarray, sr: int, pitch_shift: float = 0.0, gain: float = 1.0, eq: list = None, speed: float = 1.0, attack_pitch: float = 0.0, lead_in: float = 0.12) -> np.ndarray:
+def _finalize(combined: np.ndarray, sr: int, pitch_shift: float = 0.0, gain: float = 1.0, eq: list = None, speed: float = 1.0, attack_pitch: float = 0.0, lead_in: float = 0.06) -> np.ndarray:
     """Shared post-processing: EQ + pitch/speed, attack dip, silence pad, noise gate, RMS normalize, clip.
 
     eq: list of sox filter args (e.g. ["highpass 90", "equalizer 3000 1 2.5"]) applied
@@ -342,8 +376,8 @@ def _finalize(combined: np.ndarray, sr: int, pitch_shift: float = 0.0, gain: flo
     speed: playback rate multiplier (<1.0 = slower, >1.0 = faster); pitch preserved.
     attack_pitch: per-onset pitch dip in semitones (negative = gruff word starts).
     lead_in: seconds of clean silence prepended to the clip — the first word of a
-    line must never sit at sample 0 (see below); pass a longer value (e.g. 1.0) for
-    the very first line of a video so the intro breathes before speech begins.
+    line must never sit at sample 0 (see below). Keep SHORT: a large pad reads as
+    dead air before every line and makes the video feel laggy.
     """
     if eq or pitch_shift or speed != 1.0:
         # SoX formant-preserving pitch (no phase-vocoder smear like librosa), per-voice
@@ -374,14 +408,14 @@ def _finalize(combined: np.ndarray, sr: int, pitch_shift: float = 0.0, gain: flo
     if attack_pitch:
         combined = _attack_dip(combined, sr, dip=attack_pitch)
 
-    silence = np.zeros(int(0.3 * sr), dtype=combined.dtype)  # 300ms sentence gap
+    silence = np.zeros(int(0.06 * sr), dtype=combined.dtype)  # 60ms line tail — no dead air
     combined = np.concatenate([combined, silence])
     combined = _noise_gate(combined)
 
     # Lead-in pad: the first word of a clip must never sit at sample 0. Video
     # encoders/players trim a few tens of ms off the head, which silently eats
     # the (quiet) onset consonant of the very first word ("Listen"→"isten").
-    # A short speech-free lead-in protects every line's first phoneme.
+    # keep it short — a big pad shows up as dead air before every line.
     lead_in = np.zeros(int(lead_in * sr), dtype=combined.dtype)
     combined = np.concatenate([lead_in, combined])
 
@@ -435,11 +469,12 @@ def _time_stretch(audio: np.ndarray, sr: int, factor: float) -> np.ndarray:
     Applied across the ENTIRE line uniformly, so it can never create the
     mid-sentence speed step that per-region stretching caused before. The factor
     is CLAMPED to a range that stays artifact-free (so an extremely slow line is
-    still picked up as much as is safe rather than skipped entirely).
+    still picked up as much as is safe rather than skipped entirely). Never
+    slows more than 3%: anything below 0.97 reads as a sudden speed drop.
     """
     if factor <= 0:
         return audio
-    factor = min(max(factor, 0.7), 1.5)
+    factor = min(max(factor, 0.97), 1.5)
     import subprocess
     import tempfile
     with tempfile.TemporaryDirectory() as td:
@@ -539,7 +574,9 @@ def _normalize_pacing(audio: np.ndarray, sr: int, text: str, params: dict) -> np
     speech = max(dur - sum(d for _, d in gaps), 0.3)
     wps = words / speech
     if wps > TTS_MAX_WPS:
-        factor = TTS_MAX_WPS / wps  # slower
+        # Cap the slow-down at 3%: a line that ran hot must not suddenly gum up
+        # against the band ceiling (perceptible as a mid-video speed drop).
+        factor = max(TTS_MAX_WPS / wps, 0.97)
     elif wps < TTS_MIN_WPS:
         factor = TTS_MIN_WPS / wps  # faster
     else:
