@@ -55,9 +55,11 @@ TTS_WORKERS = int(os.getenv("TTS_WORKERS", "2"))
 # (silence gaps subtracted) so deliberate pauses/dramatic lines are not
 # punished. Only lines whose actual speech bursts fall outside the band are
 # corrected (whole-line uniform tempo): faster than TTS_MAX_WPS → slowed to it,
-# slower than TTS_MIN_WPS → picked up to it. Tuned to natural human delivery
-# (~2.6-3.4 wps in burst speech); 0 disables.
-TTS_MIN_WPS = float(os.getenv("TTS_MIN_WPS", "2.6"))
+# slower than TTS_MIN_WPS → picked up to it. Tuned to natural energized
+# narration (~3.0-3.4 wps of burst speech): a floor of 2.6 left lots of lines
+# audibly draggy, and forcing a 1.05x stretch felt robotic, so the floor sits at
+# normal narration (+1) and the ceiling just reins in the rare rush; 0 disables.
+TTS_MIN_WPS = float(os.getenv("TTS_MIN_WPS", "3.0"))
 TTS_MAX_WPS = float(os.getenv("TTS_MAX_WPS", "3.4"))
 # Throwaway word(s) prepended to the FIRST line's TTS prompt and then stripped
 # from the audio. Chatterbox voices the first phoneme of a fresh synthesis

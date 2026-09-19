@@ -115,11 +115,20 @@ def _enforce_pauses(audio: np.ndarray, sr: int, text: str) -> np.ndarray:
       - , ; :  → at least 0.22 s (a beat)
       - dashes → at least 0.28 s
 
-    It only ever LENGTHENS a silence the model already made near a boundary —
-    it never fabricates a pause at an estimated time, because the char-
-    proportional time guess is too unreliable and a forced insert lands mid-word
-    (the "random pauses" bug). When no natural gap is close by, the model's own
-    pacing is left alone.
+    Word boundaries come from ENERGY ALIGNMENT of this exact audio (the same
+    model the captions use), NOT a char-count guess — that guess drifted off by
+    up to a second on real Chatterbox output, so punctuation found nothing to
+    extend. For each punctuation token:
+
+      1. If a REAL silence the model made overlaps that word boundary, extend
+         the gap to the target (never cut into the surrounding speech).
+      2. If the model ran the words together (no gap at all), INSERT the pause
+         at the aligned boundary — positioned at the quietest frame in a small
+         window around the boundary so it lands between words, never mid-word.
+         The added pad is pure zeros with 2 ms fades, so no clicks.
+
+    Falls back to the old char-proportional search (lengthen-only, never
+    fabricate) when alignment is unavailable or counts don't match the words.
     """
     tokens = (text or "").split()
     n = len(tokens)
@@ -128,10 +137,40 @@ def _enforce_pauses(audio: np.ndarray, sr: int, text: str) -> np.ndarray:
 
     dur = len(audio) / sr
     gaps = _detect_silence_gaps(audio, sr)
-    # Cumulative end (in chars) of each token → proportional time estimate.
-    # Used only to SEARCH for the nearest real gap, never to place silence.
+
+    # Per-word (start, end) times from the real waveform (same alignment the
+    # captions use). Only used to anchor WHERE a boundary is; silences that get
+    # lengthened still come from `gaps`.
+    times = None
+    try:
+        from src.services.captions import word_times_from_waveform
+        times = word_times_from_waveform(audio, sr, text)
+        if len(times) != n:
+            times = None
+    except Exception:
+        times = None
+
+    # Char-proportional fallback (lengthen-only, conservative).
     charlen = np.cumsum([len(t) + 1 for t in tokens])
     total = float(charlen[-1])
+
+    # Envelope used to pick the quietest frame near a boundary (for insertion).
+    hop = max(1, int(sr * _HOP_S))
+    nf = len(audio) // hop
+    if nf > 0:
+        frame = audio[:nf * hop].reshape(nf, hop)
+        env = np.sqrt(np.mean(frame ** 2, axis=1) + 1e-12)
+    else:
+        env = np.zeros(0)
+
+    def _quietest_time(center: float) -> float:
+        """Time of the lowest-energy frame within +-0.035s of `center`."""
+        i0 = max(int((center - 0.035) / _HOP_S), 0)
+        i1 = min(int((center + 0.035) / _HOP_S) + 1, len(env))
+        if i1 <= i0 or i0 >= len(env):
+            return max(min(center, dur - 0.01), 0.0)
+        k = i0 + int(np.argmin(env[i0:i1]))
+        return min(k * _HOP_S, dur - 0.01)
 
     out = audio
     shift = 0.0  # cumulative inserted time this line
@@ -142,27 +181,49 @@ def _enforce_pauses(audio: np.ndarray, sr: int, text: str) -> np.ndarray:
             continue
         target = _PUNCT_PAUSE[punct]
 
-        # Search window: punctuation belongs to the nearest silence gap ONLY if
-        # that gap is close to the estimated boundary — with the tight tolerance
-        # per-punct so a comma never matches the period's breath 0.3 s away.
-        mat_ch = _PUNCT_MATCH_W[punct]
+        if times is not None:
+            # Aligned boundary: the end of this word / start of the next word.
+            w_end = times[i][1]
+            n_start = times[i + 1][0]
+            lo = max(w_end - 0.05, 0.0)
+            hi = min(n_start + 0.02, dur)
+        else:
+            mat_ch = _PUNCT_MATCH_W[punct]
+            est = charlen[i] / total * dur
+            lo, hi = est - mat_ch, est + mat_ch
+
+        # 1) Prefer lengthening a REAL silence the model made near the boundary.
         best_g, best_d = None, 1e9
         for (gs, gd) in gaps:
-            d = abs((gs + gd / 2) - (charlen[i] / total * dur))
+            if gs >= hi or gs + gd <= lo:
+                continue
+            center = gs + gd / 2
+            if lo <= center <= hi:
+                d = 0.0
+            else:
+                d = min(abs(center - lo), abs(center - hi))
             if d < best_d:
                 best_d, best_g = d, (gs, gd)
-        if best_g is None or best_d > mat_ch:
-            continue  # no trusted anchor → leave the model's own pacing alone
-
-        have = best_g[1]
-        need = target - have
-        if need < 0.04:
+        if best_g is not None:
+            have = best_g[1]
+            need = target - have
+            if need >= 0.04:
+                at = best_g[0] + shift  # extend from the gap's start
+                out = _insert_silence(out, sr, at, need)
+                shift += need
             continue
-        # Extend the gap from its start (end of previous talk) so we never cut
-        # into surrounding speech — the added pad is pure zeros.
-        at = best_g[0] + shift
-        out = _insert_silence(out, sr, at, need)
-        shift += need
+
+        # 2) Model ran words together → INSERT the pause at the aligned
+        #    boundary, at its quietest frame. Only when we have real alignment
+        #    (a char-count guess is exactly what caused the mid-word bug).
+        if times is None:
+            continue
+        at = _quietest_time(w_end) + shift
+        pad = target
+        if pad < 0.04 or at + pad * sr > len(out):
+            continue
+        out = _insert_silence(out, sr, at, pad)
+        shift += pad
     return out
 
 
@@ -372,10 +433,13 @@ def _time_stretch(audio: np.ndarray, sr: int, factor: float) -> np.ndarray:
     factor > 1 = faster).
 
     Applied across the ENTIRE line uniformly, so it can never create the
-    mid-sentence speed step that per-region stretching caused before.
+    mid-sentence speed step that per-region stretching caused before. The factor
+    is CLAMPED to a range that stays artifact-free (so an extremely slow line is
+    still picked up as much as is safe rather than skipped entirely).
     """
-    if not (0.7 < factor < 1.5):
+    if factor <= 0:
         return audio
+    factor = min(max(factor, 0.7), 1.5)
     import subprocess
     import tempfile
     with tempfile.TemporaryDirectory() as td:
