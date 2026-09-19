@@ -16,7 +16,7 @@ from src.config.settings import (
     YOUTUBE_TAGS,
     YOUTUBE_TOKEN_FILE,
 )
-from src.services.script_builder import _call_ollama
+from src.services.llm import call_ollama
 
 
 def get_credentials():
@@ -145,7 +145,7 @@ def generate_metadata(topic: str, script: dict) -> dict:
 
     def _call(prompt: str, temperature: float = 0.6) -> dict:
         try:
-            raw = _call_ollama(
+            raw = call_ollama(
                 [{"role": "user", "content": prompt}],
                 temperature=temperature,
             )

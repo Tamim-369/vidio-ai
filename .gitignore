@@ -31,5 +31,9 @@ cookie
 raw_*.txt
 voice_tests/test_output/*
 voice_tests/*.wav
+voice_tests/scripts/*
+voice_tests/assets/*
+voice_tests/audio/*
+voice_tests/output/*
 /voices
 /channel_cache

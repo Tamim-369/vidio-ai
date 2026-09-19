@@ -1,47 +1,52 @@
 import os
 import base64
 import re
+import time
+import threading
 import requests
 from PIL import Image
 from io import BytesIO
 from ddgs import DDGS
-from groq import Groq
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from src.config.settings import TEMP_DIR, PEXELS_API_KEY, GROQ_API_KEY, GROQ_API_KEY_BACKUP, GROQ_VISION_MODEL
+from src.config.settings import (
+    TEMP_DIR,
+    PEXELS_API_KEY,
+    GROQ_VISION_MODEL,
+    ASSET_MAX_PARALLEL_WORKERS,
+    ASSET_IMAGES_PER_LINE,
+    ASSET_MAX_REFINE_ATTEMPTS,
+    ASSET_MAX_ASPECT_RATIO,
+    ASSET_VERIFY_MIN_INTERVAL,
+)
+from src.services.llm import call_groq
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 BLOCKED_DOMAINS = ["shutterstock", "gettyimages", "alamy", "istockphoto", "dreamstime"]
-MAX_ASPECT_RATIO = 1.5
-MAX_REFINE_ATTEMPTS = 4
-MAX_PARALLEL_WORKERS = 8  # Conservative: safe for most PCs
-IMAGES_PER_LINE = 3  # Number of images to fetch per sentence
+MAX_ASPECT_RATIO = ASSET_MAX_ASPECT_RATIO
+MAX_REFINE_ATTEMPTS = ASSET_MAX_REFINE_ATTEMPTS
+MAX_PARALLEL_WORKERS = ASSET_MAX_PARALLEL_WORKERS  # Conservative: safe for most PCs
+IMAGES_PER_LINE = ASSET_IMAGES_PER_LINE  # Number of images to fetch per sentence
+
+# Rate-limit gate: Groq free-tier ITPM = 7000; each vision call ~2200 input tokens.
+# Max safe throughput ≈ 3 calls/min → 19 s between calls.
+_VERIFY_MIN_INTERVAL = ASSET_VERIFY_MIN_INTERVAL
+_verify_lock = threading.Lock()
+_verify_last_time = 0.0
+
+def _rate_limit_verify():
+    """Block until safe to make another vision API call."""
+    global _verify_last_time
+    with _verify_lock:
+        now = time.time()
+        wait = _VERIFY_MIN_INTERVAL - (now - _verify_last_time)
+        if wait > 0:
+            print(f"    [verify] Rate-limit gate: waiting {wait:.0f}s...", flush=True)
+            time.sleep(wait)
+        _verify_last_time = time.time()
 
 # Copyright-safe image sources only
 # Pexels: Free, no attribution required, commercial use OK
 # DuckDuckGo with license filter: Public domain and Creative Commons
-
-groq_client = Groq(api_key=GROQ_API_KEY)
-groq_backup_client = None
-using_backup = False
-
-def _get_vision_client():
-    """Get current vision client (primary or backup)."""
-    global groq_client, groq_backup_client, using_backup
-    
-    if using_backup and groq_backup_client:
-        return groq_backup_client
-    return groq_client
-
-def _switch_to_backup_vision():
-    """Switch to backup API key for vision calls."""
-    global groq_backup_client, using_backup
-    
-    if GROQ_API_KEY_BACKUP and not using_backup:
-        print("    [vision] Switching to backup API key...")
-        groq_backup_client = Groq(api_key=GROQ_API_KEY_BACKUP)
-        using_backup = True
-        return True
-    return False
 
 
 def _strip_thinking_tags(text: str) -> str:
@@ -64,99 +69,81 @@ def _is_usable_image(content: bytes) -> bool:
         return False
 
 
-def _verify_image(image_path: str, search_term: str, line_text: str, image_expectation: str) -> tuple:
+def _verify_image(image_path: str, search_term: str, line_text: str, image_expectation: str, topic: str = "") -> tuple:
     """Use Groq vision to check if image matches what we want.
     Returns (is_valid, new_search_term or None).
     """
+    _rate_limit_verify()
     try:
         with open(image_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode()
 
-        current_client = _get_vision_client()
-        response = current_client.chat.completions.create(
-            model=GROQ_VISION_MODEL,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": f"""You are validating an image for a video script.
+        topic_block = f"\nVideo topic: {topic}" if topic else ""
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"""You are validating a single image for a video script.{topic_block}
 
 Search term used: {search_term}
 Sentence context: {line_text}
 Expected visual concept: {image_expectation}
 
-Question: Does this image show what the expected visual concept describes?
-Answer ONLY 'valid' or 'invalid'.
-If invalid, provide a better search term (3-5 words) that would find an image matching the expected visual concept.
+Question: Does this image clearly and specifically show the expected VISUAL CONCEPT? A matching image shows the actual subject — not just a related or abstract scene.
+
+Rules:
+- 'valid' ONLY if the image genuinely and specifically depicts the expected subject{(' for THIS exact topic' if topic else '')}.
+- 'invalid' if it is a generic/related scene, unrelated, or only vaguely connected.
+- If invalid, give a better search term (3-5 words) describing a real, findable scene that WOULD match.
 
 Format (MUST include both lines):
 Answer: valid/invalid
 Search term: <new_search_term>"""},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
-                ]
-            }],
-            temperature=0.2,
-            max_tokens=50,
-        )
-        answer = response.choices[0].message.content.strip().lower()
-        
-        # Parse response
-        is_valid = "valid" in answer or "invalid" not in answer
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
+            ]
+        }]
+        answer = call_groq(messages, temperature=0.0, max_tokens=50,
+                           model=GROQ_VISION_MODEL, tag="verify").lower()
+
+        # Strict parsing: 'valid' only when the model explicitly says so.
+        first_line = (answer.splitlines()[0] if answer else "").lower()
+        is_valid = ("valid" in first_line) and ("invalid" not in first_line)
         new_search_term = None
-        
+
         if not is_valid:
             # Try to extract new search term
             if "search term:" in answer:
                 parts = answer.split("search term:", 1)
                 if len(parts) > 1:
                     new_search_term = parts[1].strip().strip('"\'').split('\n')[0].strip()
-        
+
                     new_search_term = _strip_thinking_tags(new_search_term)
 
         return (is_valid, new_search_term)
-        
+
     except Exception as e:
-        error_msg = str(e).lower()
         print(f"    [verify] Error: {e}")
-        
-        # Handle rate limit for vision calls
-        if "rate_limit" in error_msg and not using_backup:
-            if _switch_to_backup_vision():
-                print(f"    [verify] Retrying with backup vision key...")
-                return _verify_image(image_path, search_term, line_text, image_expectation)
-        
         return (True, None)  # fallback: accept the image if verification fails
 
 
-def _refine_search_term(original_term: str, line_text: str, image_expectation: str) -> str:
+def _refine_search_term(original_term: str, line_text: str, image_expectation: str, topic: str = "") -> str:
     """Ask Groq to refine the search term based on what the image expectation is."""
     try:
-        current_client = _get_vision_client()
-        response = current_client.chat.completions.create(
-            model=GROQ_VISION_MODEL,
-            messages=[{
-                "role": "user",
-                "content": f"""Original search term: '{original_term}'
+        topic_line = f"Video topic: '{topic}'" if topic else ""
+        messages = [{
+            "role": "user",
+            "content": f"""Original search term: '{original_term}'
 Sentence context: '{line_text}'
 Expected visual concept: '{image_expectation}'
+{topic_line}
 
-The original search term didn't find a good image. Provide a better, more specific search term that would capture the expected visual concept (just the term, no explanation):"""
-            }],
-            temperature=0.7,
-            max_tokens=50,
-        )
-        refined = response.choices[0].message.content.strip()
+The original search term didn't find a good image. Provide a better, more specific search term that would find a REAL image of THIS topic (just the term, no explanation):"""
+        }]
+        refined = call_groq(messages, temperature=0.7, max_tokens=50,
+                            model=GROQ_VISION_MODEL, tag="refine")
         refined = _strip_thinking_tags(refined)
         return refined if refined else original_term
     except Exception as e:
-        error_msg = str(e).lower()
         print(f"    [refine] Error: {e}")
-        
-        # Handle rate limit for refine calls
-        if "rate_limit" in error_msg and not using_backup:
-            if _switch_to_backup_vision():
-                print(f"    [refine] Retrying with backup vision key...")
-                return _refine_search_term(original_term, line_text, image_expectation)
-        
         return original_term
 
 
@@ -276,7 +263,7 @@ def _topic_keywords(topic: str) -> str:
     return " ".join(words[:4])
 
 
-def _fetch_single_asset(line: dict, keywords: str, assets_dir: str) -> dict:
+def _fetch_single_asset(line: dict, keywords: str, assets_dir: str, topic: str = "") -> dict:
     """Fetch multiple assets for a single line. Returns the line with asset_paths list."""
     line_id = line["id"]
     original_search_term = line["search_term"]
@@ -294,8 +281,11 @@ def _fetch_single_asset(line: dict, keywords: str, assets_dir: str) -> dict:
 
     downloaded_paths = []
     attempts = 0
+    rounds = 0
+    MAX_ROUNDS = MAX_REFINE_ATTEMPTS + IMAGES_PER_LINE * 2  # hard cap on fetch/verify rounds
 
-    while len(downloaded_paths) < IMAGES_PER_LINE and attempts <= MAX_REFINE_ATTEMPTS:
+    while len(downloaded_paths) < IMAGES_PER_LINE and attempts <= MAX_REFINE_ATTEMPTS and rounds < MAX_ROUNDS:
+        rounds += 1
         # Calculate how many more images we need
         needed = IMAGES_PER_LINE - len(downloaded_paths)
         
@@ -316,43 +306,55 @@ def _fetch_single_asset(line: dict, keywords: str, assets_dir: str) -> dict:
                 backup_base = os.path.join(assets_dir, f"{line_id}_pex.jpg")
                 new_paths.extend(_fetch_pexels(search_term, backup_base, remaining))
 
-        if new_paths:
-            # Verify the first new image with vision model
-            print(f"    [verify] Line {line_id}: Checking if images match...")
-            is_valid, new_search_term = _verify_image(new_paths[0], search_term, line_text, image_expectation)
-            
-            if is_valid:
-                print(f"  [asset] Line {line_id}: ✓ Downloaded {len(new_paths)} image(s)")
-                downloaded_paths.extend(new_paths)
-            else:
-                # Images don't match, delete them and refine search
-                for img_path in new_paths:
-                    try:
-                        os.remove(img_path)
-                    except:
-                        pass
-                
-                # Get a better search term
-                if new_search_term and new_search_term != search_term:
-                    print(f"    [verify] Line {line_id}: ✗ Images don't match, using new search term...")
-                    search_term = new_search_term
-                else:
-                    print(f"    [verify] Line {line_id}: ✗ Images don't match, refining search term...")
-                    search_term = _refine_search_term(search_term, line_text, image_expectation)
-                    print(f"    [verify] Line {line_id}: New term: '{search_term}'")
-                
-                attempts += 1
-        else:
+        if not new_paths:
             # No images fetched, refine search term
             search_term = _refine_search_term(search_term, line_text, image_expectation)
             print(f"    [verify] Line {line_id}: No images found, new term: '{search_term}'")
             attempts += 1
+            continue
 
-    if len(downloaded_paths) < IMAGES_PER_LINE:
-        print(f"  [asset] Line {line_id}: ⚠️  Only got {len(downloaded_paths)}/{IMAGES_PER_LINE} images")
-    
-    if not downloaded_paths:
-        print(f"  [asset] Line {line_id}: ✗ Failed to fetch any images")
+        # Verify EACH candidate individually and keep only the ones that match
+        # the expected visual. One passing image no longer drags the whole batch.
+        gained = 0
+        refined_term = None
+        for img_path in new_paths:
+            print(f"    [verify] Line {line_id}: Checking {os.path.basename(img_path)}...")
+            is_valid, nst = _verify_image(img_path, search_term, line_text, image_expectation, topic)
+            if is_valid:
+                downloaded_paths.append(img_path)
+                gained += 1
+            else:
+                try:
+                    os.remove(img_path)
+                except OSError:
+                    pass
+                if nst and nst.lower() != search_term.lower():
+                    refined_term = nst
+
+        if gained:
+            print(f"  [asset] Line {line_id}: ✓ Kept {gained} matching image(s) "
+                  f"({len(downloaded_paths)}/{IMAGES_PER_LINE} so far)")
+            if len(downloaded_paths) < IMAGES_PER_LINE:
+                # Need more — prefer any term the verifier suggested for the rest.
+                if refined_term:
+                    print(f"    [verify] Line {line_id}: Using suggested term '{refined_term}' for the rest")
+                    search_term = refined_term
+        else:
+            # Nothing matched — use the verifier's suggestion if it had one,
+            # otherwise ask for a fresh search term, then retry.
+            if refined_term:
+                print(f"    [verify] Line {line_id}: ✗ Nothing matched, using suggested term '{refined_term}'")
+                search_term = refined_term
+            else:
+                print(f"    [verify] Line {line_id}: ✗ Nothing matched, refining search term...")
+                search_term = _refine_search_term(search_term, line_text, image_expectation, topic)
+                print(f"    [verify] Line {line_id}: New term: '{search_term}'")
+            attempts += 1
+
+    if len(downloaded_paths) < IMAGES_PER_LINE and not downloaded_paths:
+        print(f"  [asset] Line {line_id}: ✗ Failed to fetch any verified images")
+    elif len(downloaded_paths) < IMAGES_PER_LINE:
+        print(f"  [asset] Line {line_id}: ⚠️  Only kept {len(downloaded_paths)}/{IMAGES_PER_LINE} verified images")
 
     line["asset_paths"] = downloaded_paths  # Now a list instead of single path
     # Keep backward compatibility
@@ -374,7 +376,7 @@ def fetch_assets(lines: list, topic: str = "") -> list:
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
         # Submit all tasks
         future_to_line = {
-            executor.submit(_fetch_single_asset, line, keywords, assets_dir): line["id"]
+            executor.submit(_fetch_single_asset, line, keywords, assets_dir, topic): line["id"]
             for line in lines
         }
         

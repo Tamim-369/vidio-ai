@@ -16,7 +16,7 @@ import os
 import re
 import time
 
-from src.services.script_builder import _call_ollama
+from src.services.llm import call_ollama
 from src.services.topic_generator import (
     _load_used,
     _scan_made_videos,
@@ -33,9 +33,11 @@ TOPICS_OUTPUT_DIR = "topics"
 
 # Hard reject: true crime / serial killers / missing persons / paranormal /
 # cryptid / folklore. Mirror of the channel-miner gate.
+# "was killed" is intentionally ABSENT — casualty language is the substance of
+# war-story topics.
 VET_BLOCK = [
-    "serial killer", "murder", "killer", "rapist", "stalker", "cctv",
-    "kidnap", "abduction", "missing person", "body found", "was killed",
+    "serial killer", "murder", "rapist", "stalker", "cctv",
+    "kidnap", "abduction", "missing person", "body found",
     "school shooting", "mass shooter", "arrested", "police", "criminal",
     "manslaughter", "ghost", "haunted", "ghost ship", "poltergeist",
     "cryptid", "skinwalker", "werewolf", "vampire", "zombie", "bigfoot",
@@ -90,58 +92,108 @@ def _vet_idea(idea: dict) -> dict:
 
 # Each niche has its own Wikipedia categories + search queries + prompt focus.
 # This keeps sourcing and prompt tuning separate per category (no dilution).
+# The "war_*" niches additionally merge in the LIVE source pool
+# (src/services/war_stories.py: Google News RSS for the current wars, and
+# long-form war-history magazine feeds) so modern conflicts surface as they
+# break. War/story/war-experiment topics replace the old mystery niches.
 NICHES = {
-    "ancient_mysteries": {
+    # 2026 US–Iran war — the flagship modern-war niche, news-driven.
+    "iran_360": {
         "categories": [
-            "Category:Archaeological artifacts",
-            "Category:Unexplained phenomena",
-            "Category:Archaeological mysteries",
-            "Category:Ancient warfare",
+            "Category:Iran–United States relations",
+            "Category:2020s in Iran",
+            "Category:2026 in Iran",
+            "Category:Wars involving Iran",
+            "Category:Red Sea crisis",
         ],
         "queries": [
-            "ancient mystery", "lost civilization", "undeciphered script",
-            "ancient artifact unexplained", "forgotten civilization",
-            "ancient technology mystery",
+            "US Iran war 2026", "Iran war February 2026", "Iran missile attack 2026",
+            "US strikes Iran 2026", "Houthi Yemen 2026", "Houthi Red Sea attacks 2026",
+            "Strait of Hormuz 2026", "Iran naval blockade 2026", "US garrison attack 2026",
         ],
         "prompt": (
-            "ancient mysteries: lost civilizations, unexplained artifacts, "
-            "undeciphered scripts, and forgotten ancient technology"
+            "the 2026 US–Iran war and the wider Middle East crisis it triggered: "
+            "aerial strikes, missile/drone barrages on US bases and Gulf states, "
+            "the Houthi offensive in Yemen, the Strait of Hormuz naval blockade, "
+            "and the troops caught in it"
+        ),
+        "live": True,
+        "floor_bonus": 2,  # war news is the money niche — feed more of it
+    },
+    # Iraq war — insurgent operations, battles, and the gates-of-hades fighting.
+    "iraq_war": {
+        "categories": [
+            "Category:Iraq War",
+            "Category:Military operations of the Iraq War",
+            "Category:Military history of Iraq",
+            "Category:People of the Iraq War",
+        ],
+        "queries": [
+            "Iraq war battle fallen city", "Iraq war ambush convoy",
+            "insurgent attack Iraq", "Fallujah battle", "Baghdad war 2003",
+            "Iraq war helicopter downed", "Iraq war soldier story",
+        ],
+        "prompt": (
+            "stories of the Iraq War: urban battles like Fallujah, ambushed convoys "
+            "and downed helicopters, brutal insurgency operations, and the soldiers "
+            "who fought through them"
         ),
     },
-    "ww2_secret": {
+    # Vietnam War — first-hand combat stories, tunnels, and big-unit battles.
+    "vietnam_war": {
+        "categories": [
+            "Category:Vietnam War",
+            "Category:Battles and operations of the Vietnam War",
+            "Category:Vietnam War casualties",
+        ],
+        "queries": [
+            "Vietnam war battle Ia Drang", "Khe Sanh siege 1968",
+            "Tet Offensive battle", "Vietnam war tunnel rat",
+            "Vietnam war ambush platoon", "Cu Chi tunnels",
+        ],
+        "prompt": (
+            "stories from the Vietnam War: desperate firefights and sieges like Ia Drang "
+            "and Khe Sanh, tunnel operations, ambushed patrols, and the grunts who "
+            "fought a war they weren't told they could win"
+        ),
+    },
+    # Cold War / proxy conflicts — Berlin, nuclear close-calls, secret missions.
+    "cold_war": {
+        "categories": [
+            "Category:Cold War conflicts",
+            "Category:Cold War",
+            "Category:Cuban Missile Crisis",
+        ],
+        "queries": [
+            "cold war brush with nuclear war", "Cuban missile crisis day by day",
+            "spy plane shot down cold war", "Cold war submarine incident",
+            "proxy war cold war Africa Asia", "Berlin blockade airlift",
+            "Kursk submarine disaster", "nuclear submarine collision",
+        ],
+        "prompt": (
+            "Cold War stories: nuclear close calls and hair-trigger incidents, "
+            "spy-plane shootdowns and submarine collisions, Berlin and the airlift, "
+            "and the proxy wars waged around the world from Africa to Asia"
+        ),
+    },
+    # Weird military experiments (kept) — secret projects, test failures,
+    # radiation/nuclear mishaps, and bizarre prototypes.
+    "war_experiments": {
         "categories": [
             "Category:V-weapons",
             "Category:World War II weapons of Germany",
-            "Category:Nazi Germany",
-            "Category:German inventions",
-        ],
-        "queries": [
-            "secret weapon world war 2", "nazi secret project",
-            "ww2 secret experiment", "german secret weapon",
-            "allied secret weapon ww2", "hidden ww2 project",
-        ],
-        "prompt": (
-            "WW2 secret experiments and weapons: classified programs, prototype "
-            "wonder-weapons, and hidden research projects of the war"
-        ),
-    },
-    "secret_history": {
-        "categories": [
-            "Category:Conspiracy theories",
-            "Category:Classified information",
-            "Category:Covert operations",
-            "Category:Intelligence operations",
             "Category:Secret military programs",
-            "Category:Espionage",
+            "Category:Human subject research",
         ],
         "queries": [
-            "declassified secret program", "covert operation history",
-            "secret military program", "classified experiment",
-            "forgotten secret history", "hidden intelligence operation",
+            "secret military experiment", "nuclear test gone wrong",
+            "weird war weapon prototype", "soldier guinea pig experiment",
+            "secret ww2 project", "chemical weapon test soldier",
         ],
         "prompt": (
-            "obscure and secret history: declassified programs, covert operations, "
-            "and hidden chapters of history that are real but little-known"
+            "weird and classified military experiments: secret weapon programs, "
+            "nuclear and chemical tests that went horribly wrong, and the soldiers "
+            "used as guinea pigs"
         ),
     },
 }
@@ -149,7 +201,12 @@ NICHES = {
 # ---------------------------------------------------------------- source layer
 
 def _fetch_niche_sources(niche: str, limit: int = 25) -> list:
-    """Gather raw candidate articles for one niche (title + url + intro)."""
+    """Gather raw candidate articles for one niche (title + url + intro).
+
+    Live-marked niches (e.g. the 2026 US–Iran war) also merge in the external
+    source pool — Google News RSS + war-history magazines — so the current war
+    surfaces alongside the archival Wikipedia material.
+    """
     spec = NICHES[niche]
     titles = []
     seen = set()
@@ -183,6 +240,23 @@ def _fetch_niche_sources(niche: str, limit: int = 25) -> list:
             "url": f"https://en.wikipedia.org/wiki/{t.replace(' ', '_')}",
             "content": ext,
         })
+
+    # Live layer for current-war niches: news + long-form history feeds.
+    if spec.get("live"):
+        try:
+            from src.services.war_stories import fetch_all_war_sources
+            extra = fetch_all_war_sources(limit=limit)
+            known = {s["title"].lower() for s in sources}
+            for s in extra:
+                if s["title"].lower() not in known:
+                    sources.append(s)
+                    known.add(s["title"].lower())
+        except Exception as e:
+            print(f"    [war] live source pool failed: {e}")
+        print(f"  {len(sources)} sources (incl. live war pool)")
+
+    if not sources:
+        print(f"  [source] {niche}: nothing usable")
     return sources
 
 
@@ -214,23 +288,15 @@ Raw material:
 """
 
 
-def _generate_ideas(niche: str, sources: list, max_ideas: int = 10) -> list:
-    """One Ollama call per niche batch -> structured idea list (best-effort)."""
-    if not sources:
-        return []
+# Max sources per single LLM call, and max chars per source, so an individual
+# request stays well under the 8k-TPM free-tier ceiling of Groq/Ollama.
+# (Chunked, not RAG-indexed: the goal is small prompt windows, not retrieval.)
+IDEAS_CHUNK_SOURCES = 4
+IDEAS_SOURCE_CHARS = 500
 
-    raw = "\n\n".join(
-        f"[{i}] {s['title']}\n{s['content'][:800]}\nSource: {s['url']}"
-        for i, s in enumerate(sources, 1)
-    )
-    prompt = IDEAS_PROMPT.format(
-        niche=NICHES[niche]["prompt"], raw=raw[:16000]
-    )
-    raw_out = _call_ollama(
-        [{"role": "user", "content": prompt}], temperature=0.7
-    )
 
-    # Strip markdown fences / prose, grab the JSON array.
+def _parse_idea_json(raw_out: str) -> list:
+    """Strip fences/prose, grab the JSON array, normalize to idea dicts."""
     m = re.search(r"\[.*\]", raw_out, re.S)
     if not m:
         print(f"    [llm] no JSON in response")
@@ -261,6 +327,46 @@ def _generate_ideas(niche: str, sources: list, max_ideas: int = 10) -> list:
             "source_url": str(item.get("source_url", "")).strip(),
             "confidence": confidence,
         })
+    return ideas
+
+
+def _generate_ideas(niche: str, sources: list, max_ideas: int = 10) -> list:
+    """Chunked LLM calls per niche window -> deduped structured idea list.
+
+    One small call per source-chunk (not one giant call): each request stays
+    under the runtime's token ceiling, and a broken/rate-limited chunk can be
+    skipped without losing the rest of the window.
+    """
+    if not sources:
+        return []
+
+    ideas, seen = [], set()
+    for start in range(0, len(sources), IDEAS_CHUNK_SOURCES):
+        chunk = sources[start:start + IDEAS_CHUNK_SOURCES]
+        raw = "\n\n".join(
+            f"[{i}] {s['title']}\n{s['content'][:IDEAS_SOURCE_CHARS]}\nSource: {s['url']}"
+            for i, s in enumerate(chunk, 1)
+        )
+        prompt = IDEAS_PROMPT.format(
+            niche=NICHES[niche]["prompt"], raw=raw
+        )
+        try:
+            raw_out = call_ollama(
+                [{"role": "user", "content": prompt}], temperature=0.7
+            )
+        except Exception as e:
+            print(f"    [llm] chunk {start//IDEAS_CHUNK_SOURCES + 1} failed: {str(e)[:80]}")
+            continue
+
+        for idea in _parse_idea_json(raw_out):
+            key = idea["title"].strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            ideas.append(idea)
+        if len(ideas) >= max_ideas:
+            break
+        time.sleep(1.5)
     return ideas[:max_ideas]
 
 
@@ -375,9 +481,13 @@ def run_research_pipeline(target: int = 24, min_per_niche: int = 6) -> list:
     topics.sort(key=lambda t: t["score"], reverse=True)
 
     # Category quota balance: don't let one bucket flood the queue.
-    # Research niches get at least min_per_niche; no bucket exceeds ~40% of target.
+    # Research niches get at least min_per_niche(+floor_bonus); no bucket exceeds
+    # ~40% of target. The 2026 Iran war niche gets a bigger floor because the
+    # live news layer feeds it fresh material continuously.
     selected, counts = [], {}
-    per_niche_floor = {n: min_per_niche for n in NICHES}
+    per_niche_floor = {
+        n: min_per_niche + NICHES[n].get("floor_bonus", 0) for n in NICHES
+    }
     max_bucket = max(1, int(target * 0.4))
 
     # Pass 1: guarantee each research niche its floor.

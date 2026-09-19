@@ -3,7 +3,8 @@ import subprocess
 import numpy as np
 from PIL import Image
 from moviepy import VideoClip, AudioFileClip
-from src.config.settings import VIDEO_FORMAT, VIDEO_RESOLUTIONS, TEMP_DIR
+from src.config.settings import VIDEO_FORMAT, VIDEO_RESOLUTIONS, TEMP_DIR, VIDEO_STYLE, CAPTIONS_ENABLED, CAPTION_ACCENT
+from src.services.captions import add_captions, accent_for_style, align_words
 from src.utils.file_helpers import output_path
 
 FPS = 24
@@ -34,17 +35,19 @@ def _make_zoom_frames(img_array: np.ndarray, duration: float, size: tuple) -> np
     n_frames = max(1, int(duration * FPS))
     zoom_start, zoom_end = 1.0, 1.06  # Much more subtle zoom (was 1.12)
     pil_img = Image.fromarray(img_array)
-    frames = []
+    frames = np.empty((n_frames, h, w, 3), dtype=np.uint8)
 
     for i in range(n_frames):
         scale = zoom_start + (zoom_end - zoom_start) * (i / max(n_frames - 1, 1))
         new_w, new_h = int(w * scale), int(h * scale)
-        img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+        # BILINEAR is ~2x faster than LANCZOS and visually identical for a 6%
+        # subtle zoom; the resize+center-crop happens every frame regardless.
+        img = pil_img.resize((new_w, new_h), Image.BILINEAR)
         left = (new_w - w) // 2
         top = (new_h - h) // 2
-        frames.append(np.array(img.crop((left, top, left + w, top + h))))
+        frames[i] = np.asarray(img.crop((left, top, left + w, top + h)))
 
-    return np.stack(frames)  # shape: (n_frames, H, W, 3)
+    return frames
 
 
 def _crossfade_frames(frames1: np.ndarray, frames2: np.ndarray, fade_frames: int) -> np.ndarray:
@@ -101,6 +104,17 @@ def _line_frames(asset_paths: list, total_duration: float, size: tuple) -> np.nd
         else:
             all_frames = _crossfade_frames(all_frames, img_frames, fade_frames)
 
+    # Crossfades overlap frames, so the array can come up short of the line's
+    # real-time budget. Pad by holding the final frame so playback (frame i at
+    # i/FPS) extends through the full duration instead of freezing mid-audio.
+    target = max(1, int(round(total_duration * FPS)))
+    n = len(all_frames)
+    if n < target:
+        pad = np.repeat(all_frames[-1:], target - n, axis=0)
+        all_frames = np.concatenate([all_frames, pad], axis=0)
+    elif n > target:
+        all_frames = all_frames[:target]
+
     return all_frames
 
 
@@ -143,6 +157,12 @@ def assemble(script: dict) -> str:
         # Build ONLY this line's frames, then render it to a temp file and free.
         frames = _line_frames(asset_paths, total_duration, size)
 
+        # Burn styled karaoke captions onto this line's frames (after crossfades).
+        if CAPTIONS_ENABLED and line.get("text") and audio_path:
+            accent = accent_for_style(VIDEO_STYLE, CAPTION_ACCENT)
+            word_times = align_words(audio_path, line["text"])
+            frames = add_captions(frames, line["text"], total_duration, accent=accent, word_times=word_times, frame_rate=FPS)
+
         def make_frame(t, f=frames):
             idx = min(int(t * FPS), len(f) - 1)
             return f[idx]
@@ -153,7 +173,10 @@ def assemble(script: dict) -> str:
 
         seg = os.path.join(TEMP_DIR, f"line_{line['id']}.mp4")
         print(f"  [assembler] Rendering line {line['id']} → {seg}")
-        video_clip.write_videofile(seg, fps=FPS, codec="libx264", audio_codec="aac", logger=None)
+        # preset="veryfast": libx264 speed/quality tradeoff is imperceptible for
+        # short social clips with captions, and cuts encode time by 2-4x here.
+        video_clip.write_videofile(seg, fps=FPS, codec="libx264", audio_codec="aac",
+                                   preset="veryfast", logger=None)
 
         # Free this line's frames array and clip before the next one.
         del frames

@@ -1,6 +1,5 @@
 import os
-import re
-import shlex
+import multiprocessing as mp
 
 # Set HuggingFace cache dir before importing pocket_tts so models land in project folder
 from dotenv import load_dotenv
@@ -11,7 +10,38 @@ if hf_home:
 
 import numpy as np
 import soundfile as sf
-from src.config.settings import TEMP_DIR, POCKET_VOICE_STATE, POCKET_VOICE_REF
+from src.config.settings import TEMP_DIR, POCKET_VOICE_STATE, POCKET_VOICE_REF, TTS_WORKERS, TTS_LEAD_BUFFER
+
+# Normalization + DSP extracted into focused modules; re-exported here so callers
+# keep working with the old `from src.services.tts import ...` imports.
+from src.services.tts_text import _clean_text
+from src.services.tts_dsp import (
+    LOUD_GAIN,
+    _de_shout,
+    _enforce_pauses,
+    _finalize,
+    _normalize_pacing,
+    _strip_lead_buffer,
+    postprocess_line,
+)
+
+# --- Silence known harmless third-party warnings from Chatterbox's internals ---
+# (all fired by chatterbox's own deps during model load / generation, not our code)
+import warnings
+warnings.filterwarnings("ignore",
+    message=r"`LoRACompatibleLinear` is deprecated",
+    category=FutureWarning,
+)
+warnings.filterwarnings("ignore",
+    message=r"`torch\.backends\.cuda\.sdp_kernel\(\)` is deprecated",
+    category=FutureWarning,
+)
+warnings.filterwarnings("ignore",
+    message=r"`output_attentions=True` is not supported with `attn_implementation`",
+    category=UserWarning,
+)
+import logging
+logging.getLogger("transformers.integrations.sdpa_attention").setLevel(logging.ERROR)
 
 _model = None
 _voice_state = None
@@ -21,9 +51,14 @@ _chat_model = None
 _chat_ref = None
 _chat_sr = 24000
 
-# Turbo engine (15s conditioning window) — separate model + ref cache
-_turbo_model = None
-_turbo_ref = None
+
+def _conds_cache_path(ref_audio: str, tag: str) -> str:
+    """Persist prepared voice conditionals next to the reference so the costly
+    voice-cloning embedding is computed once per audio, not every run."""
+    import hashlib
+    st = os.stat(ref_audio)
+    key = hashlib.sha1(f"{ref_audio}:{st.st_size}:{st.st_mtime}".encode()).hexdigest()[:12]
+    return os.path.join(os.path.dirname(ref_audio), f"{os.path.basename(ref_audio)}.{tag}.{key}.pts")
 
 
 def _get_pocket_model():
@@ -46,180 +81,6 @@ def _get_voice_state():
             os.makedirs(os.path.dirname(POCKET_VOICE_STATE), exist_ok=True)
             export_model_state(_voice_state, POCKET_VOICE_STATE)
     return _voice_state
-
-
-def _clean_text(text: str) -> str:
-    """Normalize text for clean TTS output."""
-    # Unicode normalization
-    text = text.replace("\u2014", ", ").replace("\u2013", ", ")
-    text = text.replace("\u2026", "...").replace("\u2018", "'").replace("\u2019", "'")
-    text = text.replace("\u201c", '"').replace("\u201d", '"')
-
-    # Common abbreviations Pocket-TTS may mangle
-    abbrevs = {
-        r'\bAI\b': 'A I',
-        r'\bDNA\b': 'D N A',
-        r'\bUSA\b': 'U S A',
-        r'\bUK\b': 'U K',
-        r'\bUSSR\b': 'U S S R',
-        r'\bNATO\b': 'N A T O',
-        r'\bRAF\b': 'R A F',
-        r'\bUSAF\b': 'U S A F',
-        r'\be\.g\.\b': 'for example',
-        r'\bi\.e\.\b': 'that is',
-        r'\bvs\.\b': 'versus',
-        r'\bvs\b': 'versus',
-        r'\bMPH\b': 'miles per hour',
-        r'\bmph\b': 'miles per hour',
-        r'\bKPH\b': 'kilometers per hour',
-        r'\bkph\b': 'kilometers per hour',
-    }
-    for pattern, replacement in abbrevs.items():
-        text = re.sub(pattern, replacement, text)
-
-    # Ensure proper spacing after punctuation
-    text = re.sub(r'([?!])([^\s])', r'\1 \2', text)
-    text = re.sub(r'([.])([A-Z])', r'\1 \2', text)  # Space after periods before capitals
-
-    # Clean up multiple spaces
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    return text
-
-
-def _noise_gate(audio: np.ndarray, threshold: float = 0.008) -> np.ndarray:
-    """Silence samples below threshold to remove background hiss between words."""
-    kernel = np.ones(256) / 256
-    envelope = np.convolve(np.abs(audio), kernel, mode='same')
-    gate = envelope > threshold
-    return audio * gate
-
-
-def _attack_dip(audio: np.ndarray, sr: int, dip: float = -2.0, window: float = 0.09) -> np.ndarray:
-    """Per-word/sentence onset pitch dip — the 'gruff attack' signature.
-
-    Detects rising-energy onsets (word/sentence starts) and briefly drops pitch
-    on the attack window via SoX (formant-preserving), crossfading boundaries to
-    avoid clicks. dip < 0 makes word starts deeper, gliding back to normal.
-    """
-    if dip == 0.0:
-        return audio
-    import librosa
-    import subprocess
-    import tempfile
-
-    # Onset detection on a 10ms envelope.
-    hop = int(sr * 0.01)
-    n = int(sr * 0.03)
-    env = librosa.feature.rms(y=audio, frame_length=n, hop_length=hop)[0]
-    env = env / (env.max() + 1e-9)
-    base = float(np.percentile(env, 40))
-    thr = base + (1.0 - base) * 0.25
-
-    onsets = []
-    above = env > thr
-    min_run = int(0.04 / 0.01)  # 40ms sustained energy = a real onset
-    min_gap = int(0.15 / 0.01)  # re-trigger only on distinct words/sentences
-    prev_end = -10 ** 9
-    i = 0
-    while i < len(above) - 1:
-        if above[i]:
-            j = i
-            while j < len(above) and above[j]:
-                j += 1
-            if (j - i) >= min_run and i - prev_end >= min_gap:
-                onsets.append(i * hop)
-                prev_end = j
-            i = j
-        else:
-            i += 1
-
-    if not onsets:
-        return audio
-
-    win_len = int(window * sr)
-    cents = int(round(dip * 100))
-    xf = int(0.008 * sr)  # 8ms crossfade at segment edges to prevent clicks
-
-    # Gather all windows to process, then run sox per window.
-    with tempfile.TemporaryDirectory() as td:
-        for t0 in onsets:
-            s0 = int(t0)
-            e0 = min(s0 + win_len, len(audio))
-            if e0 - s0 < int(0.03 * sr):
-                continue
-            seg = audio[s0:e0]
-            tmp_in = os.path.join(td, "in.wav")
-            tmp_out = os.path.join(td, "out.wav")
-            sf.write(tmp_in, seg, sr)
-            subprocess.run(
-                ["sox", tmp_in, tmp_out, "pitch", str(cents)],
-                check=True, capture_output=True,
-            )
-            seg_p, _ = sf.read(tmp_out, dtype="float32")
-            if len(seg_p) != len(seg):
-                seg_p = seg_p[:len(seg)]
-            # Fade edges (attack inlet / release outlet) so the dip is a glide, not a click.
-            f = np.ones(len(seg), dtype=np.float32)
-            f[:xf] = np.linspace(0.0, 1.0, xf)
-            f[-xf:] = np.linspace(1.0, 0.0, xf)
-            seg = seg + (seg_p - seg) * f
-            audio[s0:e0] = seg
-    return audio
-
-
-def _finalize(combined: np.ndarray, sr: int, pitch_shift: float = 0.0, gain: float = 1.0, eq: list = None, speed: float = 1.0, attack_pitch: float = 0.0) -> np.ndarray:
-    """Shared post-processing: EQ + pitch/speed, attack dip, silence pad, noise gate, RMS normalize, clip.
-
-    eq: list of sox filter args (e.g. ["highpass 90", "equalizer 3000 1 2.5"]) applied
-    BEFORE normalization so loudness stays constant regardless of the EQ boost.
-    speed: playback rate multiplier (<1.0 = slower, >1.0 = faster); pitch preserved.
-    attack_pitch: per-onset pitch dip in semitones (negative = gruff word starts).
-    """
-    if eq or pitch_shift or speed != 1.0:
-        # SoX formant-preserving pitch (no phase-vocoder smear like librosa), per-voice
-        # timbre EQ and time-stretch. Round-trips through a temp wav since sox CLI works
-        # when multiple effects chain.
-        import subprocess
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as td:
-            tmp_in = os.path.join(td, "in.wav")
-            tmp_out = os.path.join(td, "out.wav")
-            sf.write(tmp_in, combined, sr)
-            effects = []
-            if eq:
-                for fil in eq:
-                    effects.extend(shlex.split(fil))
-            if pitch_shift:
-                cents = int(round(pitch_shift * 100))
-                effects.extend(["pitch", str(cents)])
-            if speed != 1.0:
-                effects.extend(["tempo", f"{speed:.4f}"])
-            subprocess.run(
-                ["sox", tmp_in, tmp_out, *effects],
-                check=True, capture_output=True,
-            )
-            combined, _ = sf.read(tmp_out, dtype="float32")
-
-    if attack_pitch:
-        combined = _attack_dip(combined, sr, dip=attack_pitch)
-
-    silence = np.zeros(int(0.05 * sr), dtype=combined.dtype)  # 50ms gap
-    combined = np.concatenate([combined, silence])
-    combined = _noise_gate(combined)
-
-    # RMS normalization — consistent loudness across all lines
-    TARGET_RMS = 0.15
-    rms = np.sqrt(np.mean(combined ** 2))
-    if rms > 0:
-        combined = combined * (TARGET_RMS / rms)
-    if gain != 1.0:
-        combined = combined * gain
-    combined = np.clip(combined, -0.95, 0.95)
-    return combined
-
-
 def _generate_pocket(lines: list, audio_dir: str) -> list:
     from pocket_tts import TTSModel  # noqa: F401  (validates import path for type hints)
     model = _get_pocket_model()
@@ -228,7 +89,8 @@ def _generate_pocket(lines: list, audio_dir: str) -> list:
 
     for line in lines:
         line_id = line["id"]
-        text = _clean_text(line["text"])
+        cleaned = _clean_text(line["text"])
+        text = _de_shout(cleaned) if line.get("loud") else cleaned
         path = os.path.join(audio_dir, f"{line_id}.wav")
 
         print(f"  [tts] Line {line_id}: {text}")
@@ -241,10 +103,17 @@ def _generate_pocket(lines: list, audio_dir: str) -> list:
         else:
             combined = np.asarray(audio)
 
-        combined = _finalize(combined.astype(np.float32), sr)
-        sf.write(path, combined, sr)
+        raw_audio = combined.astype(np.float32)
+        gain = LOUD_GAIN if line.get("loud") else 1.0
+        final, raw = postprocess_line(
+            raw_audio, sr, "pocket", text, {"gain": gain}
+        )
+        # Preserve pre-finalize "raw" wav beside the final one (pause-only
+        # re-bakes rebuild from this without touching the model).
+        sf.write(os.path.join(audio_dir, f"{line_id}.raw.wav"), raw, sr)
+        sf.write(path, final, sr)
         line["audio_path"] = path
-        line["actual_duration"] = len(combined) / sr
+        line["actual_duration"] = len(final) / sr
 
     return lines
 
@@ -258,50 +127,61 @@ def _get_chatterbox_model():
     return _chat_model
 
 
-def _get_turbo_model():
-    global _turbo_model
-    if _turbo_model is None:
-        from chatterbox.tts_turbo import ChatterboxTurboTTS
-        print("  [tts] Loading Chatterbox-Turbo model (cached)...", flush=True)
-        _turbo_model = ChatterboxTurboTTS.from_pretrained("cpu")
-        # Patch S3 tokenizer mel_filters from double → float to match numpy float32 input.
-        tok = _turbo_model.s3gen.tokenizer
-        if hasattr(tok, '_mel_filters'):
-            tok._mel_filters = tok._mel_filters.float()
-    return _turbo_model
+def _prep_chat_conds(model, voice: dict) -> None:
+    """Load/build Chatterbox voice conditionals in the calling process."""
+    global _chat_ref
+    ref_audio = voice["ref_audio"]
+    if _chat_ref == ref_audio:
+        return
+    if not os.path.exists(ref_audio):
+        raise FileNotFoundError(f"Voice reference audio missing: {ref_audio}")
+    cache_path = _conds_cache_path(ref_audio, "chat")
+    if os.path.exists(cache_path):
+        from chatterbox.tts import Conditionals
+        print(f"  [tts] Loading cached voice reference: {os.path.basename(ref_audio)}", flush=True)
+        model.conds = Conditionals.load(cache_path)
+    else:
+        print(f"  [tts] Preparing voice reference: {ref_audio}", flush=True)
+        model.prepare_conditionals(ref_audio, exaggeration=voice.get("params", {}).get("exaggeration", 0.5))
+        try:
+            model.conds.save(cache_path)
+        except Exception:
+            pass  # cache write is best-effort
+    _chat_ref = ref_audio
 
 
-def _generate_chatterbox(lines: list, voice: dict, audio_dir: str) -> list:
+def _chat_loop(lines: list, voice: dict, audio_dir: str) -> list:
     """Generate voiceover with Chatterbox real-voice cloning (English)."""
     from chatterbox.tts import ChatterboxTTS  # noqa: F401  (type ref only)
-    global _chat_ref
 
     model = _get_chatterbox_model()
-    ref_audio = voice["ref_audio"]
     params = voice.get("params", {})
     exaggeration = params.get("exaggeration", 0.5)
     cfg_weight = params.get("cfg_weight", 0.5)
     temperature = params.get("temperature", 0.8)
     pitch_shift = params.get("pitch_shift", 0.0)
 
-    # Prepare reference conditionals once per voice; reuse across lines.
-    if _chat_ref != ref_audio:
-        if not os.path.exists(ref_audio):
-            raise FileNotFoundError(f"Voice reference audio missing: {ref_audio}")
-        print(f"  [tts] Preparing voice reference: {ref_audio}", flush=True)
-        model.prepare_conditionals(ref_audio, exaggeration=exaggeration)
-        _chat_ref = ref_audio
+    _prep_chat_conds(model, voice)  # no-op if this process already prepared
 
     sr = _chat_sr
     for line in lines:
         line_id = line["id"]
-        text = _clean_text(line["text"])
+        cleaned = _clean_text(line["text"])
+        text = _de_shout(cleaned) if line.get("loud") else cleaned
         path = os.path.join(audio_dir, f"{line_id}.wav")
 
-        print(f"  [tts] Line {line_id}: {text}", flush=True)
+        # First line of the script gets a throwaway lead word ("Okay.") so the
+        # model's weak-start phoneme lands on the buffer, NOT on the real first
+        # word ("Listen"→"isten"). The buffer is stripped right after synthesis;
+        # the real first word arrives mid-stream where onsets are fully voiced.
+        synth_text = text
+        if line.get("is_first") and TTS_LEAD_BUFFER:
+            synth_text = f"{TTS_LEAD_BUFFER} {text}"
+
+        print(f"  [tts] Line {line_id}: {synth_text}", flush=True)
 
         wav = model.generate(
-            text=text,
+            text=synth_text,
             exaggeration=exaggeration,
             cfg_weight=cfg_weight,
             temperature=temperature,
@@ -312,7 +192,15 @@ def _generate_chatterbox(lines: list, voice: dict, audio_dir: str) -> list:
         else:
             combined = np.asarray(wav).squeeze()
 
-        combined = _finalize(combined.astype(np.float32), sr, pitch_shift=pitch_shift, gain=params.get("gain", 1.0), eq=params.get("eq"), speed=params.get("speed", 1.0), attack_pitch=params.get("attack_pitch", 0.0))
+        combined = _enforce_pauses(combined.astype(np.float32), sr, synth_text)
+        if line.get("is_first") and TTS_LEAD_BUFFER:
+            combined = _strip_lead_buffer(combined, sr, TTS_LEAD_BUFFER, synth_text)
+        combined = _normalize_pacing(combined, sr, text, params)
+        gain = LOUD_GAIN if line.get("loud") else params.get("gain", 1.0)
+        # The first line of a video gets a 1s intro pad so the video breathes
+        # before speech begins; every other line keeps the short 120ms head pad.
+        lead_in = 1.0 if line_id == 1 else 0.12
+        combined = _finalize(combined.astype(np.float32), sr, pitch_shift=pitch_shift, gain=gain, eq=params.get("eq"), speed=params.get("speed", 1.0), attack_pitch=params.get("attack_pitch", 0.0), lead_in=lead_in)
         sf.write(path, combined, sr)
         line["audio_path"] = path
         line["actual_duration"] = len(combined) / sr
@@ -320,59 +208,105 @@ def _generate_chatterbox(lines: list, voice: dict, audio_dir: str) -> list:
     return lines
 
 
-def _generate_turbo(lines: list, voice: dict, audio_dir: str) -> list:
-    """Voiceover with Chatterbox-Turbo: 15s conditioning window (2.5x more reference).
+def _effective_workers(n_lines: int) -> int:
+    """Number of parallel render workers (settings.TTS_WORKERS, default 2).
 
-    Turbo is non-CFG — cfg_weight and exaggeration are ignored by the model.
+    Measured on this machine: each worker holds ~4.3GB (own model copy) and a
+    single worker already uses all memory bandwidth, so 2 workers give ~1.9x
+    wall-clock speedup at identical quality; 3+ would exceed RAM on 14GB boxes.
     """
-    global _turbo_ref
+    if not n_lines or n_lines < 2:
+        return 1
+    return min(TTS_WORKERS, 2, n_lines)
 
-    model = _get_turbo_model()
-    ref_audio = voice["ref_audio"]
-    params = voice.get("params", {})
-    temperature = params.get("temperature", 0.8)
-    pitch_shift = params.get("pitch_shift", 0.0)
 
-    # Reference must exceed 5s (turbo asserts this); reuse across lines.
-    if _turbo_ref != ref_audio:
-        if not os.path.exists(ref_audio):
-            raise FileNotFoundError(f"Voice reference audio missing: {ref_audio}")
-        print(f"  [tts] Preparing turbo voice reference: {ref_audio}", flush=True)
-        import tempfile
-        import librosa as _librosa
-        # turbo's norm_loudness uses pyloudnorm which coerces to float64 and breaks
-        # the S3 tokenizer's float32 mel filters, so we normalize + cast ourselves.
-        wav, _sr = _librosa.load(ref_audio, sr=24000)
-        with tempfile.TemporaryDirectory() as td:
-            tmp = os.path.join(td, "ref.wav")
-            sf.write(tmp, wav.astype(np.float32), 24000)
-            model.prepare_conditionals(tmp, norm_loudness=False)
-        _turbo_ref = ref_audio
+def _split_chunks(lines: list, workers: int) -> list:
+    """Balanced contiguous chunks preserving original line order."""
+    n = len(lines)
+    if n <= workers:
+        return [[line] for line in lines]
+    base, rem = divmod(n, workers)
+    chunks, i = [], 0
+    for w in range(workers):
+        size = base + (1 if w < rem else 0)
+        chunks.append(lines[i:i + size])
+        i += size
+    return chunks
 
-    sr = _chat_sr
-    for line in lines:
-        line_id = line["id"]
-        text = _clean_text(line["text"])
-        path = os.path.join(audio_dir, f"{line_id}.wav")
 
-        print(f"  [tts] Line {line_id}: {text}", flush=True)
+def _setup_worker_rng(seed: int, threads: int) -> None:
+    """Cap each worker's torch threads and re-seed RNG so concurrent lines
+    get independent samples without oversubscribing the CPU."""
+    import numpy as _np
+    import torch as _torch
+    _torch.set_num_threads(threads)
+    _torch.manual_seed(seed)
+    _np.random.seed(seed)
 
-        wav = model.generate(
-            text=text,
-            temperature=temperature,
-        )
 
-        if hasattr(wav, 'numpy'):
-            combined = wav.squeeze(0).numpy()
+def _worker_chatterbox(idx, chunk, voice, audio_dir, seed, threads, queue):
+    try:
+        _setup_worker_rng(seed, threads)
+        out = _chat_loop(chunk, voice, audio_dir)  # model + conds inherited via fork
+        queue.put((False, idx, out))
+    except Exception as exc:
+        queue.put((True, idx, f"{exc!r}"))
+
+
+def _parallel_lines(workers, worker_fn, lines, voice, audio_dir) -> list:
+    """Render `workers` disjoint chunks of lines in parallel subprocesses.
+
+    Uses spawn: each worker is a fresh interpreter that loads the model itself
+    and shares nothing mutable with the parent. Torch is not fork-safe once its
+    thread pools exist (forking the parent's loaded model caused hangs), and two
+    full model copies still fit comfortably in RAM on this box.
+    """
+    ctx = mp.get_context("spawn")
+    queue = ctx.SimpleQueue()
+    procs = []
+    threads = max(1, (os.cpu_count() or 4) // workers)
+    for idx, chunk in enumerate(_split_chunks(lines, workers)):
+        seed = ((os.getpid() << 16) ^ ((idx + 1) * 7919)) & 0xFFFFFFFF
+        p = ctx.Process(target=worker_fn,
+                        args=(idx, chunk, voice, audio_dir, seed, threads, queue))
+        p.start()
+        procs.append(p)
+    for p in procs:
+        p.join()
+    errors, results = [], {}
+    for _ in procs:
+        err, idx, payload = queue.get()
+        if err:
+            errors.append(payload)
         else:
-            combined = np.asarray(wav).squeeze()
-
-        combined = _finalize(combined.astype(np.float32), sr, pitch_shift=pitch_shift, gain=params.get("gain", 1.0), eq=params.get("eq"), speed=params.get("speed", 1.0), attack_pitch=params.get("attack_pitch", 0.0))
-        sf.write(path, combined, sr)
-        line["audio_path"] = path
-        line["actual_duration"] = len(combined) / sr
-
+            results[idx] = payload
+    if errors:
+        raise RuntimeError("; ".join(str(e) for e in errors))
+    out_lines = []
+    for idx in sorted(results):
+        out_lines.extend(results[idx])
+    # Workers return deep copies (pickled across processes); fold the new
+    # audio_path/actual_duration back into the original dict objects so callers
+    # that rely on in-place mutation keep working.
+    for orig, upd in zip(lines, out_lines):
+        orig.update(upd)
     return lines
+
+
+def _generate_chatterbox(lines: list, voice: dict, audio_dir: str) -> list:
+    """Chatterbox voiceover with parallel line rendering (same model, same params).
+
+    With workers > 1 the parent does NOT load the model itself; each worker loads
+    its own copy so the two concurrent renders stay memory-safe (~8.5GB peak).
+    """
+    workers = _effective_workers(len(lines))
+    if workers > 1:
+        try:
+            return _parallel_lines(workers, _worker_chatterbox, lines, voice, audio_dir)
+        except Exception as exc:
+            print(f"  [tts] Parallel render failed ({exc}); falling back to sequential.", flush=True)
+    _prep_chat_conds(_get_chatterbox_model(), voice)  # sequential: load once here
+    return _chat_loop(lines, voice, audio_dir)
 
 
 def generate_audio(lines: list, voice: dict = None) -> list:
@@ -387,6 +321,4 @@ def generate_audio(lines: list, voice: dict = None) -> list:
     engine = (voice or {}).get("engine", "pocket")
     if engine == "chatterbox":
         return _generate_chatterbox(lines, voice, audio_dir)
-    if engine == "turbo":
-        return _generate_turbo(lines, voice, audio_dir)
     return _generate_pocket(lines, audio_dir)

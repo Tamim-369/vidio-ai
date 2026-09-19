@@ -26,26 +26,32 @@ from src.config.settings import (
 from src.services.channel_miner import fetch_channel_candidates
 from src.services.gemini_topics import brainstorm_topics
 
-# Niche-focused Reddit subs (secondary source, currently unreliable on this ISP).
-# Crime (serial killers, missing persons) and paranormal subs are deliberately excluded.
-# Pure photo-caption subs (tankporn, WarshipPorn) are excluded too — they produce
-# "tank in a garden" titles, not stories.
+# War-story subreddits (secondary source, currently unreliable on this ISP).
+# Trending straight to the new niche: modern conflicts (US–Iran 2026), Iraq,
+# Vietnam, Cold War, and weird military experiments. Crime and paranormal subs
+# stay excluded.
 REDDIT_SUBREDDITS = [
-    "MilitaryHistory",     # military history
-    "AskHistorians",       # deep history answers
-    "TheGrittyPast",       # dark / grim history
-    "WeirdWings",          # experimental aircraft (great for "weird experiments")
-    "WeirdWeapons",        # experimental / strange weapons
+    "CombatFootage",      # modern conflict (raw, story material in comments)
+    "militaryhistory",    # military history
+    "HistoryWhatIf",      # story-driven military history discussions
+    "WarCollege",         # serious military analysis
+    "TheGrittyPast",      # dark / grim history
+    "veterobreakfast",    # veteran stories
+    "talesfromthefront",  # first-hand deployment stories
+    "military",           # serving + veteran stories
+    "soldierstories",     # deployment anecdotes
 ]
 
 # Subreddits whose content is inherently contested -> flag for manual check
 CONTESTED_SUBREDDITS = set()
 
 # Crime / serial-killer / missing-person content to exclude from the niche.
+# "was killed" / "death of" are intentionally ABSENT — casualty and destruction
+# language is the substance of war-story topics.
 CRIME_BLOCK_KEYWORDS = [
     "serial killer", "serial killer", "murder", "killer", "rapist", "stalker",
-    "cctv", "kidnap", "abduction", "missing person", "body found", "death of",
-    "was killed", "school shooting", "mass shooter", "investigation", "arrested",
+    "cctv", "kidnap", "abduction", "missing person", "body found",
+    "school shooting", "mass shooter", "investigation", "arrested",
     "police", "criminal", "manslaughter",
 ]
 
@@ -71,15 +77,20 @@ NON_TOPIC_PATTERNS = [
 
 # Subs that reliably produce story-driven material -> slight ranking boost
 STORY_SUBS = {
-    "MilitaryHistory", "TheGrittyPast", "WeirdWings", "WeirdWeapons",
+    "militaryhistory", "TheGrittyPast", "CombatFootage",
+    "talesfromthefront", "soldierstories", "veterobreakfast",
 }
 
 CATEGORY_MAP = {
-    "MilitaryHistory": "weapon",
-    "WeirdWings": "weapon",
-    "WeirdWeapons": "weapon",
-    "AskHistorians": "experiment",
+    "CombatFootage": "weapon",
+    "militaryhistory": "weapon",
+    "HistoryWhatIf": "weapon",
+    "WarCollege": "weapon",
     "TheGrittyPast": "mystery",
+    "veterobreakfast": "story",
+    "talesfromthefront": "story",
+    "military": "story",
+    "soldierstories": "story",
 }
 
 # ---------------------------------------------------------------- Wikipedia source
@@ -92,32 +103,33 @@ CATEGORY_MAP = {
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 
 # Wikipedia category -> topic category
-# Story-driven only: mysteries, injustice, secrets, scary. No aircraft/weapon
-# catalogs (those produce encyclopedia entries, not viral stories).
+# Story-driven only: named battles, wars, operations, incidents, experiments.
+# No aircraft/weapon catalogs (those produce encyclopedia entries, not stories).
 WIKI_CATEGORIES = {
-    "Category:Unexplained phenomena": "mystery",
-    "Category:Unexplained disappearances": "mystery",
-    "Category:Missing aircraft": "mystery",
-    "Category:UFO sightings": "mystery",
-    "Category:Conspiracy theories": "mystery",
-    "Category:Secret military programs": "mystery",
-    "Category:Military scandals": "mystery",
-    "Category:War crimes": "mystery",
-    "Category:Massacres": "mystery",
-    "Category:Human rights abuses": "mystery",
+    "Category:Iran–United States relations": "conflict",
+    "Category:Iraq War": "conflict",
+    "Category:Military operations of the Iraq War": "conflict",
+    "Category:People of the Iraq War": "conflict",
+    "Category:Vietnam War": "conflict",
+    "Category:Battles and operations of the Vietnam War": "conflict",
+    "Category:Cold War conflicts": "conflict",
+    "Category:Cuban Missile Crisis": "conflict",
+    "Category:Secret military programs": "experiment",
+    "Category:Military scandals": "conflict",
+    "Category:War crimes": "conflict",
     "Category:Biological warfare": "experiment",
     "Category:Chemical warfare": "experiment",
 }
 
 # Search-driven pass (primary). These queries surface SPECIFIC story articles
-# (e.g. "Unit 731", "Battalion 316", "Project MKUltra") far better than the
-# category lists. Each query is one HTTP request, so this stays light.
+# (e.g. "Khe Sanh siege", "Fallujah battle") far better than the category
+# lists. Each query is one HTTP request, so this stays light.
 WIKI_SEARCH_QUERIES = [
-    "secret military experiment", "military mystery", "disappeared soldiers",
-    "unexplained disappearance", "military cover-up", "human experimentation",
-    "mind control program", "mysterious death", "classified project",
-    "lost expedition", "secret underground base", "experimental aircraft program",
-    "weapon test site", "psychic research", "forgotten war", "hidden history",
+    "2026 US Iran war", "US strikes Iran 2026", "Houthi Red Sea 2026",
+    "Iran missile attack US base", "Iraq war battle", "Fallujah",
+    "Vietnam war battle", "Khe Sanh siege", "Cold war nuclear close call",
+    "secret military experiment", "military cover-up", "downed aircraft war",
+    "ambushed convoy war", "forgotten battle", "hidden history", "war story",
 ]
 
 # Generic concept/list pages that aren't specific stories.
@@ -127,10 +139,10 @@ WIKI_GENERIC_BLOCKS = {
     "list of", "disappeared person", "state terrorism", "political repression",
     "extrajudicial killing", "genocide", "mass killing", "military scandal",
     "covert operation", "psychological warfare", "chemical weapon",
-    "nuclear weapon", "battle of", "campaign of", "war in", "history of",
-    "human sexual activity", "human subject research", "human evolution",
-    "animal testing", "human anatomy", "human body", "human genetics",
-    "mental illness", "brainwashing", "mind control", "human", "human behavior",
+    "nuclear weapon", "history of", "human sexual activity",
+    "human subject research", "human evolution", "animal testing",
+    "human anatomy", "human body", "human genetics", "mental illness",
+    "brainwashing", "mind control", "human", "human behavior",
     "classified information", "ghost hunting", "trump", "president",
     "presidential", "election", "politician", "political party",
     "enforced disappearance", "aircraft nuclear propulsion", "nuclear propulsion",
@@ -188,6 +200,10 @@ WIKI_STORY_SIGNALS = [
     "buried", "hidden", "silence", "denied", "controversial", "scandal",
     "weaponized", "radiation", "nuclear", "chemical", "biological",
     "program", "project", "testing", "experimented",
+    "battle", "battled", "ambush", "siege", "invaded", "invasion", "raid",
+    "assault", "airstrike", "air strike", "struck", "downed", "crashed",
+    "surrounded", "outnumbered", "veteran", "combat", "firefight", "war",
+    "armed conflict", "occupation", "insurgency", "guerrilla",
 ]
 
 # Intros that describe the article as media ("is a 2022 American film").
@@ -428,7 +444,7 @@ MIN_UPRATIO = 0.85
 
 # Subs that are mostly images/links (no selftext) -> lower selftext floor + lower score floor
 TITLE_BASED_SUBS = {
-    "WeirdWings", "WeirdWeapons",
+    "CombatFootage",
 }
 
 # Keywords that ALONE prove the topic is on-niche: weird/scary/unknown mystery
@@ -446,6 +462,10 @@ NICHE_STRONG = [
     "exhumed", "executed", "massacre", "holocaust", "legend", "myth", "mythical",
     "forgotten", "x-plane", "stealth", "bunker", "warhead", "conspiracy",
     "ancient", "medieval", "roman", "viking", "egyptian", "ruins", "artifact",
+    "ambush", "ambushed", "siege", "firefight", "combat", "invasion",
+    "invaded", "occupied", "war story", "war stories", "operation", "raid",
+    "air strike", "airstrike", "assault", "battalion", "squad", "outnumbered",
+    "last stand", "kill zone", "counterattack", "guerrilla", "veteran",
 ]
 
 # Military context alone is NOT enough — a story/experiment keyword must also match.
@@ -455,6 +475,8 @@ NICHE_CONTEXT = [
     "tank", "fighter", "bomber", "submarine", "battleship", "weapon", "bomb",
     "missile", "nazi", "hitler", "soldier", "war", "battle", "soviet",
     "german", "japanese", "british", "american", "korea", "vietnam",
+    "iraq", "iran", "yemen", "houthi", "helicopter", "drone", "marine",
+    "infantry", "platoon", "patrol", "convoy", "campaign", "conflict",
 ]
 
 

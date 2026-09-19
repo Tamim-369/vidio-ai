@@ -20,15 +20,18 @@ from src.config.settings import GEMINI_API_KEY, GEMINI_MODEL
 
 PROMPT = """You brainstorm viral topic ideas for a faceless YouTube Shorts channel.
 
-NICHE: documented dark history / secret military experiments / engineering
-disasters / forgotten events. The 3 money angles are: MYSTERY (secrets,
-cover-ups, unsolved unknowns), SCARY (horror and terror in the story itself),
-INJUSTICE (institutional betrayal, innocent victims, cruel neglect). A 4th
-acceptable angle is HEROIC (underdog soldiers, impossible stands).
+NICHE: modern and historical WAR STORIES — the current 2026 US–Iran war and the
+Middle East crisis it triggered (Houthi strikes, Strait of Hormuz blockade),
+plus Iraq War battles, Vietnam War firefights and sieges, Cold War nuclear close
+calls and spy incidents, and weird/secret military experiments. The money angles
+are: SCARY (the horror and terror of combat), INJUSTICE (soldiers betrayed by
+their own commanders, ignored warnings, needless deaths), HEROIC (outnumbered
+stands, impossible rescues), and MYSTERY (secret programs, cover-ups of what
+really happened).
 
 RULES:
-- Each topic must be a CONCRETE named subject: a specific person, operation,
-  place, event, or experiment. No vague concepts like "secrets of the CIA".
+- Each topic must be a CONCRETE named subject: a specific battle, operation,
+  incident, unit, person, or experiment. No vague concepts like "the Iraq war".
 - It must be REAL and DOCUMENTED. Use your search grounding to verify each one
   actually happened and has a factual record. Never invent or embellish.
 - NEVER repeat any title in the BLOCKLIST below (exact or near-identical).

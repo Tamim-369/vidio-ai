@@ -1,34 +1,15 @@
 import json
+import os
 import re
-import time
-from groq import Groq
-import ollama  # <-- added
-from src.config.settings import GROQ_API_KEY, GROQ_API_KEY_BACKUP, GROQ_MODEL
 from src.config.prompt import get_raw_script_prompt
+from src.config.settings import TEMP_DIR
 
-# Initialize primary client
-client = Groq(api_key=GROQ_API_KEY)
-backup_client = None
-using_backup = False
+# LLM plumbing (client lifecycle, retries, Ollama fallback chain) lives in llm.py.
+from src.services.llm import LOCAL_OLLAMA_FALLBACKS, call_groq, call_ollama
 
-def _get_groq_client():
-    """Get the current Groq client (primary or backup)."""
-    global client, backup_client, using_backup
-    
-    if using_backup and backup_client:
-        return backup_client
-    return client
-
-def _switch_to_backup():
-    """Switch to backup API key if available."""
-    global backup_client, using_backup
-    
-    if GROQ_API_KEY_BACKUP and not using_backup:
-        print("    [groq] Switching to backup API key...")
-        backup_client = Groq(api_key=GROQ_API_KEY_BACKUP)
-        using_backup = True
-        return True
-    return False
+# Backwards-compatible aliases so importers that used the private names keep working.
+_call_groq = call_groq
+_call_ollama = call_ollama
 
 # Prompt for converting raw script to structured JSON
 JSON_STRUCTURE_PROMPT = """You are a JSON converter. Your ONLY job is to convert a raw video script into structured JSON.
@@ -71,9 +52,9 @@ Format:
 Rules:
 - Create one object per numbered line from the raw script
 - text: The original sentence WITHOUT the number prefix (e.g., "1. " or "2. ")
-- search_term: 3-8 words MAX. Pure keywords for image search
-- image_expectation: 15-20 words. Describe the visual that matches the drama
-- image_type: "search" for specific things, "stock" for generic scenes
+- search_term: 2-5 words MAX of a REAL, PHOTOGRAPHABLE subject that an image search would actually return. Use real places, monuments, memorials, battle sites, named historical events, period photos, real equipment, museums, reenactments, maps. NEVER turn a story into keywords ("1,200 km concrete beast" is unusable), NEVER use metaphors/abstract concepts, NEVER lead with numbers instead of the subject. If the moment has no specific real subject, pick a real adjacent generic scene that stock sites have (e.g. "WW2 Russian front winter" not "3.3 million men on the front"). Example: 'Maginot Line' not '1200 km concrete fortifications'; 'Gallipoli 1915 landing' not '400000 troops marched into peninsula'.
+- image_expectation: 12-20 words describing the concrete PHOTOGRAPHIC SUBJECT the camera should see — foreground, setting, mood. It MUST be a real, photographable scene, not a fantasy: no ghosts, holo-overlays, weight bars, or impossible compositions. Describe what an actual photo of this thing looks like.
+- image_type: "search" when a specific named real thing or period photo exists (a monument, battle site, artifact, historical photo). "stock" only for generic atmospheric scenes (snow, fog, empty landscape, flags, crowds) that clearly exist as stock photos
 - duration: How long it takes to speak (3-7 seconds)
 - loud: true ONLY for explosive, dramatic, anger or exclamatory lines that should be SHOUTED (e.g. "they burned them alive!!"). false for normal narration. Default false, and only raise the volume if the sentence genuinely calls for it.
 - Do NOT skip any lines - convert ALL of them"""
@@ -91,8 +72,8 @@ def _normalize_raw(raw: str) -> str:
             raw = raw[4:]
         raw = raw.strip()
 
-    # Remove thinking tags
-    raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL)
+# Remove thinking tags
+    raw = re.sub(r' thinking.*?response', '', raw, flags=re.DOTALL)
     raw = re.sub(r'<thinking>.*?</thinking>', '', raw, flags=re.DOTALL)
     raw = raw.strip()
 
@@ -106,21 +87,118 @@ def _normalize_raw(raw: str) -> str:
     }
     for src, dst in replacements.items():
         raw = raw.replace(src, dst)
+
     return raw
 
 
+# Catchphrases often tacked on to the END of a spoken line by the LLM when
+# channeling a persona (Trump especially) — never necessary, always filler.
+_FILLER_TAILS = (
+    "believe me",
+    "listen to me",
+    "let me tell you",
+    "folks",
+    "i mean it",
+    "trust me",
+    "you know what",
+    "you know",
+    "let me be clear",
+    "plain and simple",
+    "no question about it",
+)
+
+
+def _strip_ending_filler(text: str) -> str:
+    """Remove a filler catchphrase glued to the END of a sentence/line.
+
+    Targets "Believe me." / "… believe me" as an unneeded trailing tag, not the
+    same words used mid-sentence where they might be story-level. Applied per
+    line so blank lines / number prefixes are preserved.
+    """
+    out_lines = []
+    for ln in (text or "").splitlines():
+        if not ln.strip():
+            out_lines.append(ln)
+            continue
+        stripped = ln.strip()
+        while True:
+            lowered = stripped.lower()
+            matched = False
+            for phrase in _FILLER_TAILS:
+                m = re.search(
+                    r"(?:[,.;!?:…-]|\s|^)\s*" + re.escape(phrase) + r"\s*([.!?…]*)\s*$",
+                    lowered,
+                )
+                if m:
+                    head = stripped[: m.start()].rstrip(" ,.;!?:…-")
+                    trailing = m.group(1)
+                    stripped = (head.rstrip(" \t-") + trailing).strip()
+                    matched = True
+                    break
+            if not matched:
+                break
+        out_lines.append(stripped)
+    return "\n".join(out_lines)
+
+
+def _missing_closers(text: str) -> str:
+    """If `text` was truncated by the LLM, return the braces/brackets needed to
+    close the still-open scopes, in the right nesting order. Returns '' when the
+    scopes are balanced (or text is broken, not just truncated)."""
+    stack = []
+    in_str, esc = False, False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            pair = {"}": "{", "]": "["}.get(ch)
+            if stack and stack[-1] == pair:
+                stack.pop()
+    closing = {"{": "}", "[": "]"}
+    return "".join(closing[c] for c in reversed(stack))
+
+
 def _safe_json_loads(text: str) -> dict:
-    """Parse JSON with common LLM-output repairs."""
+    """Parse JSON with common LLM-output repairs (bad inner quotes, trailing
+    commas, missing commas, and mid-string truncation)."""
+    def attempts(candidate):
+        for transform in (
+            lambda s: s,
+            lambda s: re.sub(r",\s*([}\]])", r"\1", s),
+            lambda s: re.sub(r"\}\s*\{", "},{", s),
+            lambda s: re.sub(r"\]\s*\[", "],[", s),
+            lambda s: s + _missing_closers(s),
+            lambda s: re.sub(r",\s*([}\]])", r"\1", s) + _missing_closers(re.sub(r",\s*([}\]])", r"\1", s)),
+            _recover_truncated,
+        ):
+            try:
+                return json.loads(transform(candidate))
+            except (json.JSONDecodeError, ValueError):
+                continue
+        raise json.JSONDecodeError("unrepairable JSON", candidate, 0)
+
     try:
-        return json.loads(text)
+        return attempts(text)
     except json.JSONDecodeError:
         pass
 
+    # Fall back to the doc's outermost {...} block (helps when the LLM wrapped
+    # the JSON in prose/markdown).
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end != -1 and end > start:
         candidate = text[start:end + 1]
         try:
-            return json.loads(candidate)
+            return attempts(candidate)
         except json.JSONDecodeError:
             text = candidate
 
@@ -130,10 +208,9 @@ def _safe_json_loads(text: str) -> dict:
         return f'"{key}": "{value}"'
 
     repaired = re.sub(r'"(\w+)":\s*"(.*?)"(?=\s*[,}\]])', fix_inner_quotes, text, flags=re.DOTALL)
-    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
 
     try:
-        return json.loads(repaired)
+        return attempts(repaired)
     except json.JSONDecodeError as e:
         ln = getattr(e, "lineno", 0)
         lines = repaired.splitlines()
@@ -141,59 +218,42 @@ def _safe_json_loads(text: str) -> dict:
         raise json.JSONDecodeError(f"{e.msg}: {snippet!r}", repaired, e.pos) from e
 
 
-def _call_groq(messages: list, temperature: float = 0.7, model: str = None, max_retries: int = 3) -> str:
-    if model is None:
-        model = GROQ_MODEL
-
-    for attempt in range(max_retries):
+def _recover_truncated(text: str) -> str:
+    """Try salvaging a truncated response: chop a small unterminated tail
+    (e.g. a string cut mid-word) and close the remaining scopes. Returns the
+    repaired JSON text, or raises if no chop repairs it."""
+    for k in range(64):
+        if k == 0:
+            continue
+        c = text[:-k] if k < len(text) else ""
+        if not c or c[-1] not in '"}]0123456789truefals':
+            continue
+        repaired = c + _missing_closers(c)
         try:
-            current_client = _get_groq_client()
-            response = current_client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-            )
-            return response.choices[0].message.content.strip()
-            
-        except Exception as e:
-            error_msg = str(e).lower()
-            print(f"    [groq] Attempt {attempt + 1}/{max_retries}: {e}")
-
-            # Handle rate limit errors
-            if "rate_limit" in error_msg or "413" in error_msg or "tokens" in error_msg:
-                # Try switching to backup key on first rate limit
-                if attempt == 0 and not using_backup:
-                    if _switch_to_backup():
-                        print(f"    [groq] Retrying with backup key...")
-                        continue  # Retry immediately with backup
-                
-                # If backup also fails or no backup, wait
-                if attempt < max_retries - 1:
-                    wait_time = (2 ** attempt) * 1  # Exponential backoff: 1s, 2s, 4s
-                    print(f"    [groq] Rate limit hit, waiting {wait_time}s before retry...")
-                    time.sleep(wait_time)
-                    continue
-                raise e
-            # For other errors, don't retry
-            raise e
-
-    raise Exception(f"Failed after {max_retries} retries")
+            json.loads(repaired)
+            return repaired
+        except (json.JSONDecodeError, ValueError):
+            continue
+    raise json.JSONDecodeError("unrepairable truncated JSON", text, 0)
 
 
-def _call_ollama(messages: list, temperature: float = 0.3, model: str = "minimax-m3:cloud") -> str:
-    """Call Ollama (used for JSON structuring). Falls back to Groq on any failure."""
-    try:
-        response = ollama.chat(
-            model=model,
-            messages=messages,
-            options={
-                "temperature": temperature,
-            }
-        )
-        return response["message"]["content"].strip()
-    except Exception as e:
-        print(f"    [ollama] failed ({str(e)[:120]}) — falling back to Groq")
-        return _call_groq(messages, temperature=temperature)
+# NOTE: LLM call helpers are defined in src/services/llm.py.
+# `_call_groq` / `_call_ollama` above are aliases kept for importers.
+
+
+def _extract_numbered_script(text: str) -> str:
+    """Keep only the numbered script lines, dropping any reasoning/preamble the
+    model emitted before line 1 or commentary tacked on after the last line."""
+    lines = (text or "").splitlines()
+    start = end = None
+    for i, ln in enumerate(lines):
+        if re.match(r"^\s*\d{1,3}\s*[.)]", ln):
+            if start is None:
+                start = i
+            end = i + 1
+    if start is None:
+        return text
+    return "\n".join(lines[start:end])
 
 
 def _generate_raw_script(topic: str, raw_data: str, style: dict = None) -> str:
@@ -204,25 +264,34 @@ def _generate_raw_script(topic: str, raw_data: str, style: dict = None) -> str:
         {"role": "user", "content": f"{prompt}\n\nResearch data:\n{raw_data}"}
     ], temperature=0.9)  # Higher temp for more creative scripts
 
-    return _normalize_raw(raw_script)
+    return _strip_ending_filler(_extract_numbered_script(_normalize_raw(raw_script)))
 
 
 def _convert_to_json(raw_script: str, topic: str) -> dict:
     """Convert raw viral script to structured JSON with search terms and image expectations.
-    Now uses Ollama + minimax-m3:cloud instead of Groq.
+    Falls back to Groq on any Ollama failure; retries once on unparsable JSON.
     """
-    raw_json = _call_ollama([
+    messages = [
         {"role": "system", "content": JSON_STRUCTURE_PROMPT},
         {"role": "user", "content": f"Raw script:\n{raw_script}\n\nTopic: {topic}\n\nConvert to structured JSON now."}
-    ], temperature=0.3)
+    ]
 
-    raw_json = _normalize_raw(raw_json)
-    
-    # Save the JSON response for debugging
-    with open("./raw_json_response.txt", "w") as f:
-        f.write(raw_json)
-    
-    return _safe_json_loads(raw_json)
+    for attempt in range(2):
+        raw_json = _call_ollama(messages, temperature=0.3, max_tokens=8192) if attempt == 0 else _call_groq(messages, temperature=0.3, max_tokens=8192)
+        raw_json = _normalize_raw(raw_json)
+
+        with open(os.path.join(TEMP_DIR, "raw_json_response.txt"), "w") as f:
+            f.write(raw_json)
+
+        try:
+            return _safe_json_loads(raw_json)
+        except json.JSONDecodeError as e:
+            if attempt == 0:
+                print(f"    [script] JSON parse failed ({e.msg[:80]} at char {e.pos}) — retrying via Groq")
+                continue
+            raise e
+
+    raise json.JSONDecodeError("conversion failed", raw_json, 0)
 
 
 def build_script(topic: str, raw_data: str, style: dict = None) -> dict:
@@ -239,11 +308,16 @@ def build_script(topic: str, raw_data: str, style: dict = None) -> dict:
     raw_script = _generate_raw_script(topic, raw_data, style=style)
 
     # Save raw script for debugging
-    with open("./raw_script.txt", "w") as f:
+    with open(os.path.join(TEMP_DIR, "raw_script.txt"), "w") as f:
         f.write(raw_script)
 
     # Step 2: Convert to structured JSON
     print("    [script] Converting to structured JSON (via Ollama)...")
     script = _convert_to_json(raw_script, topic)
+
+    # Catch filler that slipped past the raw-script pass (e.g. added by the
+    # JSON structuring model) — strip it from each line's spoken text.
+    for line in script.get("lines", []):
+        line["text"] = _strip_ending_filler(line.get("text", "")).strip()
 
     return script

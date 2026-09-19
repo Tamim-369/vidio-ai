@@ -6,7 +6,7 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_KEY_BACKUP = os.getenv("GROQ_API_KEY_BACKUP")  # Backup key for rate limits
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
-GROQ_MODEL = "openai/gpt-oss-120b"
+GROQ_MODEL = "qwen/qwen3.8-27b"
 GROQ_VISION_MODEL = "qwen/qwen3.8-27b"
 
 # Ollama settings
@@ -30,6 +30,44 @@ POCKET_VOICE_STATE = "voices/narrator.safetensors"
 POCKET_VOICE_REF = "voice_tests/chatterbox_ref.wav"
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+# --- TTS ---
+# Parallel chatterbox render workers (1-2). Each worker holds its own ~4.3GB
+# model copy; 2 gives ~1.9x wall-clock speedup and 3+ risks RAM on 14GB boxes.
+TTS_WORKERS = int(os.getenv("TTS_WORKERS", "2"))
+# Speaking-rate band (words per second), measured over SPEECH-ONLY time
+# (silence gaps subtracted) so deliberate pauses/dramatic lines are not
+# punished. Only lines whose actual speech bursts fall outside the band are
+# corrected (whole-line uniform tempo): faster than TTS_MAX_WPS → slowed to it,
+# slower than TTS_MIN_WPS → picked up to it. Tuned to natural human delivery
+# (~2.6-3.4 wps in burst speech); 0 disables.
+TTS_MIN_WPS = float(os.getenv("TTS_MIN_WPS", "2.6"))
+TTS_MAX_WPS = float(os.getenv("TTS_MAX_WPS", "3.4"))
+# Throwaway word(s) prepended to the FIRST line's TTS prompt and then stripped
+# from the audio. Chatterbox voices the first phoneme of a fresh synthesis
+# weakly ("Listen"→"isten"); the buffer absorbs that artifact and the real
+# first word is then synthesized mid-stream where onsets are full. 0/empty = off.
+#
+# Default is OFF now: scripts are written to open with a strong hook word
+# ("Hey" for Arnold, a promise-hook like "I am about to tell you..." for
+# others), so the model's first phoneme is a vowel/strong onset and no buffer
+# is needed. An audible buffer word would leak "okay".
+TTS_LEAD_BUFFER = os.getenv("TTS_LEAD_BUFFER", "")
+
+# --- Asset fetching ---
+ASSET_MAX_PARALLEL_WORKERS = int(os.getenv("ASSET_MAX_PARALLEL_WORKERS", "8"))
+ASSET_IMAGES_PER_LINE = int(os.getenv("ASSET_IMAGES_PER_LINE", "3"))
+ASSET_MAX_REFINE_ATTEMPTS = int(os.getenv("ASSET_MAX_REFINE_ATTEMPTS", "4"))
+ASSET_MAX_ASPECT_RATIO = float(os.getenv("ASSET_MAX_ASPECT_RATIO", "1.5"))
+# Min seconds between Groq vision calls (free tier ~7000 input tokens/min).
+ASSET_VERIFY_MIN_INTERVAL = float(os.getenv("ASSET_VERIFY_MIN_INTERVAL", "19.0"))
+
+# --- Captions / subtitles ---
+# Styled word-by-word "karaoke" captions burned into the frames (matches the
+# video vibe via VIDEO_STYLE accent color). Disable to render caption-free.
+CAPTIONS_ENABLED = os.getenv("CAPTIONS_ENABLED", "1") == "1"
+# Optional accent override (hex, e.g. "#FFC94D"). Empty = auto from VIDEO_STYLE.
+CAPTION_ACCENT = os.getenv("CAPTION_ACCENT", "")
 
 # Image resolution based on format
 VIDEO_RESOLUTIONS = {

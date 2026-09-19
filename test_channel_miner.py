@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 
-from src.services.script_builder import _call_ollama
+from src.services.llm import call_ollama
 
 CHANNELS = [
     ("DarkDocs", "https://www.youtube.com/@DarkDocs/videos"),
@@ -81,7 +81,7 @@ def resolve_topic(vid, title, transcript):
         "man-eating creatures, monsters). Stick to documented history.\n"
         f"Video title: {title}\nTranscript (first 6000 chars):\n{transcript[:6000]}"
     )
-    raw = _call_ollama([{"role": "user", "content": prompt}], temperature=0.3)
+    raw = call_ollama([{"role": "user", "content": prompt}], temperature=0.3)
     try:
         m = re.search(r"\{.*\}", raw, re.S)
         return json.loads(m.group(0))

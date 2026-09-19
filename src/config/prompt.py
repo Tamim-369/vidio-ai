@@ -17,7 +17,7 @@ def get_raw_script_prompt(topic, style: dict = None):
     if style.get("rules"):
         rules = "\n".join(f"- {r}" for r in style["rules"])
         rules_block = f"""
-VOICE RULES (this voice's real speech signatures — follow them in some shape or form)
+VOICE RULES (the voice's style signatures — apply them only where they fit naturally, never as forced filler)
 {rules}
 """
 
@@ -26,6 +26,28 @@ VOICE RULES (this voice's real speech signatures — follow them in some shape o
 Topic: {topic}
 
 Write the script exactly as it should be spoken by the narrator. No JSON. No explanations. No markdown. No titles. No timestamps. Just the pure script.
+
+===== THINK FIRST (reason through all of this in your head BEFORE writing — think silently, then output ONLY the numbered script) =====
+STEP 1 — Mine the topic for its strongest REAL specifics.
+- Pull the most concrete, citable facts the topic gives you: exact numbers, dates, names, places, distances, body counts, dollar figures. The hook and every big line must be built from these facts, never from vague adjectives.
+- EXACT-NUMBERS RULE (non-negotiable): whenever a quantity matters — troops, deaths, casualties, distance, cost — state the precise figure from the topic/research. NEVER express it as a vague fraction or impression such as "half their army", "most of them", "countless", "the vast majority", "tons of", "thousands" when the real number is known. A line that swaps a number for a hand-wave FAILS.
+- Identify the single most shocking, ironic, or "how did this even happen" detail. It belongs in the hook or the final big beat.
+
+STEP 2 — Select and sequence the body.
+- Choose the strongest 4-7 specific examples that genuinely fit THIS topic, then order them so tension RISES. Save one shocking or controversial beat for near the end. Do not pad with filler entries.
+- Each line must be one stand-alone spoken thought a viewer can follow without re-listening.
+
+STEP 3 — Decide the delivery line by line BEFORE writing.
+- Mark in your mind which single moment is the peak (THAT line gets ALL-CAPS or "!!"). Mark 1-2 lines as tense, quiet drops (ellipsis, short words). Everything else stays conversational. A script that shouts in every line has no volume curve.
+- The volume changes must land exactly where a real narrator would raise their voice or lean in — never at random, never just for show.
+
+STEP 4 — Draft the hook and the closer before the body.
+- Hook: an open loop built from one specific, surprising image or fact. Not the topic name, not "today we will...".
+- Closer: a question or unresolved beat that invites comments or rewatching.
+
+THINKING RULES
+- Do ALL reasoning mentally. Do NOT write your thinking, planning, notes, headings, or "here is the script" in the output.
+- The numbered lines ARE the entire output.
 
 Follow these rules strictly:
 
@@ -52,6 +74,8 @@ DELIVERY & DYNAMICS (important — the narrator reads these literally)
 - Use ALL-CAPS sparingly — at most 1-2 lines per script, reserved for the single biggest moment. Every line shouting is as bad as no line shouting.
 - Normal lines should sound conversational; let volume only change when the moment genuinely demands it.
 - Do NOT use instruction words like "[shout]" or "(loud)" — the punctuation and caps ARE the instruction.
+- Periods, question marks, and exclamation marks create REAL PAUSES in the narration. Write each line as a complete thought that breathes at its punctuation. Do not jam two ideas into one line separated only by a comma or dash.
+- Never write staccato single-word fragments (a period after each isolated word). Say it as one complete phrase, e.g. "Total disaster." The period already gives the pause the narrator needs.
 
 ACCURACY & SPECIFICITY
 - Only include real, well-known examples that actually fit the topic.
@@ -62,6 +86,7 @@ PACING
 - Every line must be speakable in 3–7 seconds.
 - Total script should feel tight (ideally 25–45 seconds when spoken).
 - Zero fluff. Cut every unnecessary word.
+- NEVER end a line with a connective phrase like "and let me tell you", "and here's the thing", "but wait", or "so guess what" — those must START the next line instead.
 
 RETENTION TRIGGERS
 - Keep open loops alive throughout the list.

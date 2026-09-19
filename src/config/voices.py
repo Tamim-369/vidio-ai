@@ -26,10 +26,11 @@ VOICES = {
         "name": "Donald Trump",
         "engine": "chatterbox",
         "ref_audio": "src/voices_to_clone/candidates/donald-trump/donald-trump_ref.wav",
-        # clearer + brighter presence without being louder; slower + higher temp = more prosody variety.
-        "params": {"exaggeration": 0.5, "cfg_weight": 0.5, "temperature": 0.95, "gain": 1.0,
+        # Lower temp = stable speaker identity/emotion across lines; the script's
+        # own "loud" lines still get a deterministic volume emphasis in TTS.
+        "params": {"exaggeration": 0.5, "cfg_weight": 0.5, "temperature": 0.75, "gain": 1.15,
                    "eq": ["highpass 100", "equalizer 3000 1 2.5", "equalizer 6500 1 1.5"],
-                   "speed": 0.95},
+                   "speed": 1.0},
         "writing_style": "trump",
         "enabled": True,
     },
@@ -38,7 +39,10 @@ VOICES = {
         "name": "Arnold Schwarzenegger",
         "engine": "chatterbox",
         "ref_audio": "src/voices_to_clone/candidates/arnold-schwarzenegger/arnold-schwarzenegger_ref.wav",
-        "params": {"exaggeration": 0.9, "cfg_weight": 0.7, "temperature": 0.85, "gain": 1.02},
+        # Lower exaggeration + temperature → emotional but consistent, no random
+        # angry swings between lines; loud peaks come from the TTS loud flag.
+        "params": {"exaggeration": 0.65, "cfg_weight": 0.7, "temperature": 0.72, "gain": 1.02,
+                   "speed": 1.0},
         "writing_style": "arnold",
         "enabled": True,
     },
