@@ -16,7 +16,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from src.services.llm import call_ollama
+from src.services.llm import call_text
 
 # Competitor channels (NuttyHistory is frequently blocked — it simply yields nothing).
 CHANNELS = [
@@ -90,7 +90,7 @@ def _resolve_topic(vid, title, transcript):
         "man-eating creatures, monsters). Stick to documented history.\n"
         f"Video title: {title}\nTranscript (first 6000 chars):\n{transcript[:6000]}"
     )
-    raw = call_ollama([{"role": "user", "content": prompt}], temperature=0.3)
+    raw = call_text([{"role": "user", "content": prompt}], temperature=0.3)
     try:
         m = re.search(r"\{.*\}", raw, re.S)
         seed = json.loads(m.group(0))

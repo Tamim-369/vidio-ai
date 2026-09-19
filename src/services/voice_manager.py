@@ -6,7 +6,7 @@ Responsibilities:
 - Resolve a voice's writing style for script generation.
 """
 
-from src.config.voices import get_all_voices, get_enabled_voices
+from src.config.voices import get_all_voices, get_enabled_voices, get_voice
 from src.config.writing_styles import get_style
 
 # Round-robin cursor: modulo by the number of enabled voices.

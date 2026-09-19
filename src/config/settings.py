@@ -3,6 +3,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Cloudflare Workers AI (primary LLM)
+CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "")
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
+# Primary TEXT model (script gen / JSON structuring). llama-3.3-70b-instruct
+# is FREE on Workers AI, ~2x faster than gemma-4-26b, produces no empty-content
+# retries (gemma's reasoning mode frequently ate the token budget and blanked),
+# and its viral-shorts output is stronger (measured: 8.2s vs 16.1s+ on the same
+# Arnold-style prompt).
+CLOUDFLARE_MODEL = os.getenv("CLOUDFLARE_MODEL", "@cf/meta/llama-3.3-70b-instruct-fp8-fast")
+# Vision model for image verify/refine. This is the hot path (every candidate
+# image) — llama-4-scout-17b is ~5x faster than gemma-4-26b on vision tasks
+# while returning correct per-image verdicts, so multi-image batches complete
+# in ~1s instead of ~4.5s.
+CLOUDFLARE_VISION_MODEL = os.getenv("CLOUDFLARE_VISION_MODEL", "@cf/meta/llama-4-scout-17b-16e-instruct")
+
+# Groq settings (secondary)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_KEY_BACKUP = os.getenv("GROQ_API_KEY_BACKUP")  # Backup key for rate limits
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
@@ -59,8 +75,11 @@ ASSET_MAX_PARALLEL_WORKERS = int(os.getenv("ASSET_MAX_PARALLEL_WORKERS", "8"))
 ASSET_IMAGES_PER_LINE = int(os.getenv("ASSET_IMAGES_PER_LINE", "3"))
 ASSET_MAX_REFINE_ATTEMPTS = int(os.getenv("ASSET_MAX_REFINE_ATTEMPTS", "4"))
 ASSET_MAX_ASPECT_RATIO = float(os.getenv("ASSET_MAX_ASPECT_RATIO", "1.5"))
-# Min seconds between Groq vision calls (free tier ~7000 input tokens/min).
-ASSET_VERIFY_MIN_INTERVAL = float(os.getenv("ASSET_VERIFY_MIN_INTERVAL", "19.0"))
+# Min seconds between vision LLM calls (image verify/refine). Kept as a light
+# throttle: verification is now batched (all candidates per line in ONE call)
+# and cached by content hash, so far fewer calls happen. Cloudflare Workers AI
+# (primary vision provider) tolerates ~1s spacing comfortably.
+ASSET_VERIFY_MIN_INTERVAL = float(os.getenv("ASSET_VERIFY_MIN_INTERVAL", "1.0"))
 
 # --- Captions / subtitles ---
 # Styled word-by-word "karaoke" captions burned into the frames (matches the

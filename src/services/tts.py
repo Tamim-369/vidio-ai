@@ -197,9 +197,11 @@ def _chat_loop(lines: list, voice: dict, audio_dir: str) -> list:
             combined = _strip_lead_buffer(combined, sr, TTS_LEAD_BUFFER, synth_text)
         combined = _normalize_pacing(combined, sr, text, params)
         gain = LOUD_GAIN if line.get("loud") else params.get("gain", 1.0)
-        # The first line of a video gets a 1s intro pad so the video breathes
-        # before speech begins; every other line keeps the short 120ms head pad.
-        lead_in = 1.0 if line_id == 1 else 0.12
+        # Every line keeps the same short 120ms head pad. A longer first-line
+        # lead-in produced a ~1s dead-silence pause before the narrator's first
+        # word (huge dead air at the vide head) — scripts already open with a
+        # strong hook ("Hey, listen to me...") so no extra breathing room needed.
+        lead_in = 0.12
         combined = _finalize(combined.astype(np.float32), sr, pitch_shift=pitch_shift, gain=gain, eq=params.get("eq"), speed=params.get("speed", 1.0), attack_pitch=params.get("attack_pitch", 0.0), lead_in=lead_in)
         sf.write(path, combined, sr)
         line["audio_path"] = path

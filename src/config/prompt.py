@@ -53,7 +53,8 @@ Follow these rules strictly:
 
 HOOK (Line 1)
 - Start with a strong, shocking, or curiosity-driven opening related to this specific topic.
-- Never start with the topic name, “Today we will look at…”, or a calm fact.
+- If a greeting/interjection ("Hey", "Listen...", "Stop scrolling...") is used, it MUST be fused with the hook in the same breath — "Hey, listen to me. The Maginot Line...", "Stop scrolling. France spent 3 billion francs on a wall that did nothing." — and followed immediately by the concrete story. NEVER a bare greeting that drifts into a calm sentence.
+- Never open with weak filler hooks like "Hey, you want to know why...", "Hey, did you know...", "Today we will look at…", or a calm fact.
 - Create an open loop immediately.
 
 STRUCTURE

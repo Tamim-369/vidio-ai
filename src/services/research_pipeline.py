@@ -16,7 +16,7 @@ import os
 import re
 import time
 
-from src.services.llm import call_ollama
+from src.services.llm import call_text
 from src.services.topic_generator import (
     _load_used,
     _scan_made_videos,
@@ -351,7 +351,7 @@ def _generate_ideas(niche: str, sources: list, max_ideas: int = 10) -> list:
             niche=NICHES[niche]["prompt"], raw=raw
         )
         try:
-            raw_out = call_ollama(
+            raw_out = call_text(
                 [{"role": "user", "content": prompt}], temperature=0.7
             )
         except Exception as e:

@@ -11,14 +11,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.config.settings import (
     TEMP_DIR,
     PEXELS_API_KEY,
-    GROQ_VISION_MODEL,
     ASSET_MAX_PARALLEL_WORKERS,
     ASSET_IMAGES_PER_LINE,
     ASSET_MAX_REFINE_ATTEMPTS,
     ASSET_MAX_ASPECT_RATIO,
     ASSET_VERIFY_MIN_INTERVAL,
 )
-from src.services.llm import call_groq
+from src.services.llm import call_text
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 BLOCKED_DOMAINS = ["shutterstock", "gettyimages", "alamy", "istockphoto", "dreamstime"]
@@ -101,8 +100,8 @@ Search term: <new_search_term>"""},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
             ]
         }]
-        answer = call_groq(messages, temperature=0.0, max_tokens=50,
-                           model=GROQ_VISION_MODEL, tag="verify").lower()
+        answer = call_text(messages, temperature=0.0, max_tokens=400,
+                           tag="verify", vision=True).lower()
 
         # Strict parsing: 'valid' only when the model explicitly says so.
         first_line = (answer.splitlines()[0] if answer else "").lower()
@@ -125,8 +124,104 @@ Search term: <new_search_term>"""},
         return (True, None)  # fallback: accept the image if verification fails
 
 
+# ---- Batch verification + verdict cache ------------------------------------
+# Verifying every candidate image in its own LLM round-trip was the dominant
+# cost of the fetch phase (~95 serialized calls + rate-limit gates). Now all
+# candidate images for a line are sent in ONE vision call, and verdicts are
+# cached by content hash so a re-downloaded image is never re-verified.
+
+_verdict_cache = {}
+_verdict_lock = threading.Lock()
+
+
+def _file_hash(path: str) -> str:
+    """Cheap content hash (size + first/last 64KB) for dedup cache keys."""
+    with open(path, "rb") as f:
+        data = f.read()
+    size = len(data)
+    sample = data[:65536] + data[-65536:]
+    return f"{size}:{hash(sample)}"
+
+
+def _cached_verdict(path: str, expectation: str, topic: str) -> tuple or None:
+    """Return (is_valid, new_search_term) from cache, or None to verify."""
+    key = (_file_hash(path), expectation, topic)
+    with _verdict_lock:
+        return _verdict_cache.get(key)
+
+
+def _store_verdict(path: str, expectation: str, topic: str, result: tuple) -> None:
+    key = (_file_hash(path), expectation, topic)
+    with _verdict_lock:
+        _verdict_cache[key] = result
+
+
+def _verify_images_batch(paths: list, search_term: str, line_text: str,
+                         image_expectation: str, topic: str = "") -> dict:
+    """Verify a batch of images in ONE vision call; returns {path: (valid, term)}.
+
+    Each path gets its own "IMAGE n: valid/invalid" verdict line. Verdicts are
+    cached by content hash so identical re-downloaded images skip re-verification.
+    """
+    results = {}
+
+    # Resolve from cache first.
+    pending = []
+    for p in paths:
+        cached = _cached_verdict(p, image_expectation, topic)
+        if cached is not None:
+            results[p] = cached
+        else:
+            pending.append(p)
+    if pending:
+        _rate_limit_verify()
+    if not pending:
+        return results
+
+    try:
+        topic_block = f"\nVideo topic: {topic}" if topic else ""
+        parts = [{"type": "text", "text": f"""You are validating images for a video script.{topic_block}
+
+Search term used: {search_term}
+Sentence context: {line_text}
+Expected visual concept: {image_expectation}
+
+For EACH image below, decide whether it clearly and specifically shows the expected VISUAL CONCEPT. A matching image shows the actual subject — not just a related or abstract scene.
+
+Rules:
+- 'valid' ONLY if the image genuinely and specifically depicts the expected subject{(' for THIS exact topic' if topic else '')}.
+- 'invalid' if it is a generic/related scene, unrelated, or only vaguely connected.
+
+Format: answer exactly one line per image, in order:
+IMAGE 1: valid/invalid
+IMAGE 2: valid/invalid
+...
+No other text."""}]
+        for path in pending:
+            with open(path, "rb") as f:
+                parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(f.read()).decode()}"}})
+
+        answer = call_text([{"role": "user", "content": parts}], temperature=0.0,
+                           max_tokens=300, tag="verify", vision=True).lower()
+
+        # Parse "IMAGE n: valid/invalid" lines (accept "1: valid", "image 2 valid", etc.)
+        verdicts = {}
+        for m in re.finditer(r"image\s*(\d+)\s*[:.\-]?\s*(valid|invalid)", answer):
+            verdicts[int(m.group(1)) - 1] = m.group(2) == "valid"
+    except Exception as e:
+        print(f"    [verify] Batch error: {e}")
+        verdicts = {}  # fall back to accepting pending images (lenient on failure)
+
+    for i, path in enumerate(pending):
+        is_valid = verdicts.get(i, True)  # unparsed images accepted (lenient)
+        results[path] = (is_valid, None)
+        _store_verdict(path, image_expectation, topic, (is_valid, None))
+
+    return results
+
+
 def _refine_search_term(original_term: str, line_text: str, image_expectation: str, topic: str = "") -> str:
-    """Ask Groq to refine the search term based on what the image expectation is."""
+    """Ask an LLM to refine the search term based on what the image expectation is."""
     try:
         topic_line = f"Video topic: '{topic}'" if topic else ""
         messages = [{
@@ -138,8 +233,8 @@ Expected visual concept: '{image_expectation}'
 
 The original search term didn't find a good image. Provide a better, more specific search term that would find a REAL image of THIS topic (just the term, no explanation):"""
         }]
-        refined = call_groq(messages, temperature=0.7, max_tokens=50,
-                            model=GROQ_VISION_MODEL, tag="refine")
+        refined = call_text(messages, temperature=0.7, max_tokens=200,
+                            tag="refine", vision=True)
         refined = _strip_thinking_tags(refined)
         return refined if refined else original_term
     except Exception as e:
@@ -275,35 +370,44 @@ def _fetch_single_asset(line: dict, keywords: str, assets_dir: str, topic: str =
     if keywords and not any(k in search_term.lower() for k in keywords.split()):
         search_term = f"{keywords} {search_term}"
 
-    base_path = os.path.join(assets_dir, f"{line_id}.jpg")
-
     print(f"  [asset] Line {line_id} [{image_type}]: Fetching {IMAGES_PER_LINE} images for '{search_term}'")
 
     downloaded_paths = []
     attempts = 0
     rounds = 0
+    tried_terms = set()  # search terms already fetched & verified (break circular loops)
     MAX_ROUNDS = MAX_REFINE_ATTEMPTS + IMAGES_PER_LINE * 2  # hard cap on fetch/verify rounds
+
+    # IMPORTANT: every round must write to UNIQUE filenames. The Pexels/DDG
+    # fetchers read a base path and derive `{base}_{i+1}.jpg` names, so we stamp
+    # a per-round token into the base. If rounds reused the same base, a later
+    # round would overwrite an already-validated file and its rejection could
+    # os.remove() that file — leaving dead paths in downloaded_paths (the
+    # "temp/assets/4_2.jpg" FileNotFound crash at assembly time).
+    round_stamp = 0
 
     while len(downloaded_paths) < IMAGES_PER_LINE and attempts <= MAX_REFINE_ATTEMPTS and rounds < MAX_ROUNDS:
         rounds += 1
+        round_stamp += 1
         # Calculate how many more images we need
         needed = IMAGES_PER_LINE - len(downloaded_paths)
         
-        # Try to fetch images (Pexels first for stock, DDG first for search)
+        # Try to fetch images (Pexels first for stock, DDG first for search).
+        # Unique base per round so no filename is ever written twice.
         if image_type == "stock":
-            new_paths = _fetch_pexels(search_term, base_path, needed)
+            new_paths = _fetch_pexels(search_term, os.path.join(assets_dir, f"{line_id}_r{round_stamp}.jpg"), needed)
             if len(new_paths) < needed:
                 # Try DDG as backup
                 remaining = needed - len(new_paths)
                 # Adjust base_path to avoid overwriting
-                backup_base = os.path.join(assets_dir, f"{line_id}_ddg.jpg")
+                backup_base = os.path.join(assets_dir, f"{line_id}_r{round_stamp}_ddg.jpg")
                 new_paths.extend(_fetch_ddg(search_term, backup_base, remaining))
         else:
-            new_paths = _fetch_ddg(search_term, base_path, needed)
+            new_paths = _fetch_ddg(search_term, os.path.join(assets_dir, f"{line_id}_r{round_stamp}.jpg"), needed)
             if len(new_paths) < needed:
                 # Try Pexels as backup
                 remaining = needed - len(new_paths)
-                backup_base = os.path.join(assets_dir, f"{line_id}_pex.jpg")
+                backup_base = os.path.join(assets_dir, f"{line_id}_r{round_stamp}_pex.jpg")
                 new_paths.extend(_fetch_pexels(search_term, backup_base, remaining))
 
         if not new_paths:
@@ -313,52 +417,57 @@ def _fetch_single_asset(line: dict, keywords: str, assets_dir: str, topic: str =
             attempts += 1
             continue
 
-        # Verify EACH candidate individually and keep only the ones that match
-        # the expected visual. One passing image no longer drags the whole batch.
+        # Verify all candidates in ONE vision call (batch) and keep only matches.
+        results = _verify_images_batch(new_paths, search_term, line_text, image_expectation, topic)
+
         gained = 0
-        refined_term = None
+        rejected = 0
         for img_path in new_paths:
-            print(f"    [verify] Line {line_id}: Checking {os.path.basename(img_path)}...")
-            is_valid, nst = _verify_image(img_path, search_term, line_text, image_expectation, topic)
+            is_valid, _ = results.get(img_path, (False, None))
             if is_valid:
                 downloaded_paths.append(img_path)
                 gained += 1
             else:
+                rejected += 1
                 try:
                     os.remove(img_path)
                 except OSError:
                     pass
-                if nst and nst.lower() != search_term.lower():
-                    refined_term = nst
 
         if gained:
             print(f"  [asset] Line {line_id}: ✓ Kept {gained} matching image(s) "
                   f"({len(downloaded_paths)}/{IMAGES_PER_LINE} so far)")
-            if len(downloaded_paths) < IMAGES_PER_LINE:
-                # Need more — prefer any term the verifier suggested for the rest.
-                if refined_term:
-                    print(f"    [verify] Line {line_id}: Using suggested term '{refined_term}' for the rest")
-                    search_term = refined_term
         else:
-            # Nothing matched — use the verifier's suggestion if it had one,
-            # otherwise ask for a fresh search term, then retry.
-            if refined_term:
-                print(f"    [verify] Line {line_id}: ✗ Nothing matched, using suggested term '{refined_term}'")
-                search_term = refined_term
-            else:
-                print(f"    [verify] Line {line_id}: ✗ Nothing matched, refining search term...")
-                search_term = _refine_search_term(search_term, line_text, image_expectation, topic)
-                print(f"    [verify] Line {line_id}: New term: '{search_term}'")
-            attempts += 1
+            print(f"    [verify] Line {line_id}: ✗ Nothing matched for '{search_term}'")
+            if rejected:
+                print(f"      [asset] Line {line_id}: {rejected} candidate(s) rejected by verifier")
+
+        if gained and len(downloaded_paths) >= IMAGES_PER_LINE:
+            break
+
+        # Still need more images. Refine to a term we have NOT already fetched
+        # and searched for — otherwise the same images come back and we loop.
+        # Fall back to a "variation" of the last term only if the refiner keeps
+        # returning something we've already tried.
+        candidate = _refine_search_term(search_term, line_text, image_expectation, topic).strip()
+        if not candidate or candidate.lower() == search_term.lower():
+            # Keep moving: strip an adjective clause or nudge the phrasing so the
+            # search actually differs from the attempt that just failed.
+            candidate = f"{search_term} alternate view" if "alternate view" not in search_term else search_term + " ii"
+        if candidate.lower() in tried_terms:
+            candidate = f"{candidate} alternate view"
+        search_term = candidate or search_term
+        tried_terms.add(search_term.lower())
+        attempts += 1
 
     if len(downloaded_paths) < IMAGES_PER_LINE and not downloaded_paths:
         print(f"  [asset] Line {line_id}: ✗ Failed to fetch any verified images")
     elif len(downloaded_paths) < IMAGES_PER_LINE:
         print(f"  [asset] Line {line_id}: ⚠️  Only kept {len(downloaded_paths)}/{IMAGES_PER_LINE} verified images")
 
-    line["asset_paths"] = downloaded_paths  # Now a list instead of single path
+    line["asset_paths"] = [p for p in downloaded_paths if os.path.exists(p)]
     # Keep backward compatibility
-    line["asset_path"] = downloaded_paths[0] if downloaded_paths else None
+    line["asset_path"] = line["asset_paths"][0] if line["asset_paths"] else None
     return line
 
 

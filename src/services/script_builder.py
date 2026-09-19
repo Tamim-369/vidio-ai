@@ -4,12 +4,11 @@ import re
 from src.config.prompt import get_raw_script_prompt
 from src.config.settings import TEMP_DIR
 
-# LLM plumbing (client lifecycle, retries, Ollama fallback chain) lives in llm.py.
-from src.services.llm import LOCAL_OLLAMA_FALLBACKS, call_groq, call_ollama
+# LLM plumbing (client lifecycle, retries, Cloudflare/Groq fallback) lives in llm.py.
+from src.services.llm import call_text
 
-# Backwards-compatible aliases so importers that used the private names keep working.
-_call_groq = call_groq
-_call_ollama = call_ollama
+# Call seam: Cloudflare primary, Groq secondary.
+_call_text = call_text
 
 # Prompt for converting raw script to structured JSON
 JSON_STRUCTURE_PROMPT = """You are a JSON converter. Your ONLY job is to convert a raw video script into structured JSON.
@@ -238,7 +237,7 @@ def _recover_truncated(text: str) -> str:
 
 
 # NOTE: LLM call helpers are defined in src/services/llm.py.
-# `_call_groq` / `_call_ollama` above are aliases kept for importers.
+# `_call_text` above is the stat-kept seam used by script generation.
 
 
 def _extract_numbered_script(text: str) -> str:
@@ -260,9 +259,9 @@ def _generate_raw_script(topic: str, raw_data: str, style: dict = None) -> str:
     """Generate raw spoken script using the viral script prompt."""
     prompt = get_raw_script_prompt(topic, style=style)
 
-    raw_script = _call_groq([
+    raw_script = _call_text([
         {"role": "user", "content": f"{prompt}\n\nResearch data:\n{raw_data}"}
-    ], temperature=0.9)  # Higher temp for more creative scripts
+    ], temperature=0.9, max_tokens=4096)  # Higher temp for more creative scripts
 
     return _strip_ending_filler(_extract_numbered_script(_normalize_raw(raw_script)))
 
@@ -277,7 +276,7 @@ def _convert_to_json(raw_script: str, topic: str) -> dict:
     ]
 
     for attempt in range(2):
-        raw_json = _call_ollama(messages, temperature=0.3, max_tokens=8192) if attempt == 0 else _call_groq(messages, temperature=0.3, max_tokens=8192)
+        raw_json = _call_text(messages, temperature=0.3, max_tokens=8192)
         raw_json = _normalize_raw(raw_json)
 
         with open(os.path.join(TEMP_DIR, "raw_json_response.txt"), "w") as f:
@@ -287,7 +286,7 @@ def _convert_to_json(raw_script: str, topic: str) -> dict:
             return _safe_json_loads(raw_json)
         except json.JSONDecodeError as e:
             if attempt == 0:
-                print(f"    [script] JSON parse failed ({e.msg[:80]} at char {e.pos}) — retrying via Groq")
+                print(f"    [script] JSON parse failed ({e.msg[:80]} at char {e.pos}) - retrying")
                 continue
             raise e
 
@@ -300,8 +299,8 @@ def build_script(topic: str, raw_data: str, style: dict = None) -> dict:
     style: optional writing-style dict (src/config/writing_styles.py) that
     shapes how the narrator's script sounds for a given voice persona.
 
-    Step 1: Generate raw spoken script using viral script prompt (still Groq)
-    Step 2: Convert raw script to structured JSON format (now Ollama + minimax-m3:cloud)
+    Step 1: Generate raw spoken script using viral script prompt (Cloudflare llama-3.3-70b primary, Groq fallback)
+    Step 2: Convert raw script to structured JSON (Cloudflare llama-3.3-70b primary, Groq fallback)
     """
     # Step 1: Generate raw script
     print("    [script] Generating raw script...")
@@ -312,7 +311,7 @@ def build_script(topic: str, raw_data: str, style: dict = None) -> dict:
         f.write(raw_script)
 
     # Step 2: Convert to structured JSON
-    print("    [script] Converting to structured JSON (via Ollama)...")
+    print("    [script] Converting to structured JSON...")
     script = _convert_to_json(raw_script, topic)
 
     # Catch filler that slipped past the raw-script pass (e.g. added by the

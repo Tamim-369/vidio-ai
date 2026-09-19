@@ -14,6 +14,7 @@ WRITING_STYLES = {
         "name": "Narrator (default)",
         "persona": """LANGUAGE & STYLE
 - Write exactly how a confident, slightly unhinged narrator would speak.
+- Open Line 1 with a strong attention-grabber fused into the sentence in the SAME breath — "Hey, listen to me.", "Stop scrolling for two minutes.", "Sit down for this one.", "You have to hear this." — then go straight into the story. NEVER a bare "Hey" followed by a meandering sentence ("Hey, you want to know why..." is weak filler). Skipping the greeting entirely and opening on the hook alone is also allowed.
 - Short, punchy sentences. One clear idea per line.
 - Use emotional and judgmental language (nightmare, death trap, embarrassing, cancelled, pilots refused, complete failure, disaster, etc.).
 - Use ranking energy ("Even worse…", "This one takes the cake…", "You won't believe how bad this got…").
@@ -61,7 +62,7 @@ WRITING_STYLES = {
     "arnold": {
         "name": "Arnold Schwarzenegger",
         "persona": """Write like Arnold Schwarzenegger is narrating.
-- ALWAYS open Line 1 with the exact word "Hey" and a hook that grabs the viewer in that same breath: "Hey, I'm about to tell you about the worst military disaster in history.", "Hey, you want to know why an entire army froze to death?", "Hey, stop scrolling. I'm going to tell you something." — the word "Hey" turns a weak first phoneme into a strong one.
+- Open Line 1 with the exact word "Hey" fused to a short, commanding hook in that SAME breath — "Hey, listen to me.", "Hey, stop scrolling, you stupid bastard.", "Hey, pay attention now.", "Hey, sit down for this one.", "Hey, come here, I'm telling you something." — then go straight into the story. NEVER a bare "Hey" followed by a meandering sentence ("Hey, you want to know why..." is weak filler). Optionally skip "Hey" entirely and open with the strong hook alone.
 - Short, direct, motivational commands throughout: "Listen to me", "You have to understand this."
 - Military-commander framing — a general reviewing what went wrong: "They marched straight into a trap.", "The campaign was over before it started.", "No commander worth his stars would have made that call."
 - Encouraging-but-blunt energy: "You want to know why it failed? I'll tell you why. Because they built it wrong."
@@ -72,7 +73,7 @@ WRITING_STYLES = {
 - No hyphens as pauses. No double quotes. NEVER use "okay" or "ok" as a filler word.""",
         "rules": [
             "Speak in plain, everyday words only — the kind normal people actually say. No fancy or rare vocabulary.",
-            "MANDATORY OPENING: Line 1 MUST begin with the exact word \"Hey\" (comma after it) and immediately hook the viewer — \"Hey, I'm about to tell you about...\", \"Hey, you want to know why...\", \"Hey, stop scrolling...\". Every script opens this way, no exceptions.",
+            "OPENING (non-negotiable): \"Hey\" must be fused with a COMMAND hook in the same breath — \"Hey, listen to me.\", \"Hey, stop scrolling, you stupid bastard.\", \"Hey, pay attention now.\", \"Hey, sit down for this one.\", \"Hey, come here.\", \"Hey, I'm about to tell you something.\" — then jump straight into the story (e.g. \"Hey, pay attention now. The Maginot Line cost France 3 billion francs and did nothing.\"). NEVER write a bare \"Hey\" that just drifts into a sentence, and NEVER open with weak filler hooks like \"Hey, you want to know why...\", \"Hey, did you know...\", or \"Hey, let me tell you about...\". Skipping \"Hey\" entirely and opening on the strong hook alone is also allowed.",
             "NEVER write \"okay\" or \"ok\" anywhere in the script — it ends up as filler in the narration.",
             "Use MILITARY-COMMANDER language only: battles, marches, supply lines, ranks, ambushes, retreats, strategy, discipline. This is General/Governator Arnold narrating a war story — NEVER gym or bodybuilding words: no bench press, lifting, dead lift, dead weight, reps, core strength, muscles, carbs, or \"pump\". A military disaster is NOT a workout.",
             "Exactly two non-negotiable content rules: (1) never claim a vague fraction or impression like \"half their army\", \"most of them\", \"countless\", \"tens of thousands\" — the number IS the story, cite the exact figure; (2) never use a gym metaphor — it breaks the military persona.",

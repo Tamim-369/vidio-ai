@@ -16,7 +16,7 @@ from src.config.settings import (
     YOUTUBE_TAGS,
     YOUTUBE_TOKEN_FILE,
 )
-from src.services.llm import call_ollama
+from src.services.llm import call_text
 
 
 def get_credentials():
@@ -145,13 +145,13 @@ def generate_metadata(topic: str, script: dict) -> dict:
 
     def _call(prompt: str, temperature: float = 0.6) -> dict:
         try:
-            raw = call_ollama(
+            raw = call_text(
                 [{"role": "user", "content": prompt}],
                 temperature=temperature,
             )
             return _extract_json(raw)
         except Exception as e:
-            print(f"    [youtube] Ollama call failed: {e}")
+            print(f"    [youtube] LLM call failed: {e}")
             return {}
 
     # Pass 1: generate (think-first prompt).
