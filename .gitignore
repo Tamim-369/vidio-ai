@@ -38,3 +38,9 @@ voice_tests/output/*
 /voices
 /channel_cache
 .venv*/
+
+# Node
+node_modules/
+experiments/remotion_test/node_modules/
+experiments/remotion_test/dist/
+experiments/remotion_test/output.mp4
