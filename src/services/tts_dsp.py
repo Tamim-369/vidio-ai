@@ -25,7 +25,7 @@ def _noise_gate(audio: np.ndarray, threshold: float | None = None) -> np.ndarray
 
     The threshold is ADAPTIVE unless one is given: a fixed absolute level (the
     old 0.008) sits right at the hiss floor, so per-voice EQ boosts (Trump's
-    +2.5 dB at 3k/6.5k) push the hiss above the gate and it comes back as
+    +1.5 dB at 3k) push the hiss above the gate and it comes back as
     audible "fog" in the pauses. Instead we derive it from THIS clip's quiet
     floor in envelope terms — safely below speech, clearly above the fog.
     """
@@ -37,11 +37,11 @@ def _noise_gate(audio: np.ndarray, threshold: float | None = None) -> np.ndarray
         # percentile lands at 0 and the threshold collapses to ~peak*0.008.
         non_silent = envelope[envelope > peak * 0.002]
         if len(non_silent):
-            floor = float(np.percentile(non_silent, 25))
+            floor = float(np.percentile(non_silent, 20))  # Lower percentile = more conservative
         else:
             floor = peak * 0.01
-        threshold = max(floor * 1.6, peak * 0.005)
-        threshold = min(threshold, peak * 0.08)
+        threshold = max(floor * 1.8, peak * 0.006)  # Higher multiplier = stricter gate
+        threshold = min(threshold, peak * 0.06)  # Lower ceiling = never catch speech
     gate = (envelope > threshold).astype(np.float32)
     gate = np.convolve(gate, kernel, mode='same')  # attack/release smoothing
     return audio * gate
@@ -49,15 +49,15 @@ def _noise_gate(audio: np.ndarray, threshold: float | None = None) -> np.ndarray
 
 _HOP_S = 0.01                    # RMS envelope hop (s), matches captions timing
 _PUNCT_PAUSE = {
-    '.': 0.20, '!': 0.20, '?': 0.20,       # sentence end → short beat, not dead air
-    ',': 0.12, ';': 0.14, ':': 0.14,
-    '-': 0.15,
-    '\u2013': 0.15, '\u2014': 0.15,
+    '.': 0.18, '!': 0.18, '?': 0.18,       # sentence end → short beat
+    ',': 0.10, ';': 0.12, ':': 0.12,
+    '-': 0.12,
+    '\u2013': 0.12, '\u2014': 0.12,
 }
 _PUNCT_MATCH_W = {                         # max gap-offset (s) for pairing punctuation to a real silence gap
-    '.': 0.25, '!': 0.25, '?': 0.25,
-    ',': 0.12, ';': 0.12, ':': 0.12,       # commas: tight match only — never force-insert
-    '-': 0.12, '\u2013': 0.12, '\u2014': 0.12,
+    '.': 0.20, '!': 0.20, '?': 0.20,
+    ',': 0.10, ';': 0.10, ':': 0.10,       # commas: tight match only — never force-insert
+    '-': 0.10, '\u2013': 0.10, '\u2014': 0.10,
 }
 _TRAILING_QUOTES = "'\"\u2019\u201d\u201c"
 
@@ -225,7 +225,7 @@ def _enforce_pauses(audio: np.ndarray, sr: int, text: str) -> np.ndarray:
                 best_d, best_g = d, (gs, gd)
         if best_g is not None:
             gs, have = best_g
-            if have > target + 0.02:
+            if have > target + 0.05:  # More tolerant of natural pauses
                 # Model left an over-long breath: dead audio + hiss fog between
                 # sentences. Replace the WHOLE gap with `target` clean zeros —
                 # trims the dead air AND zeros out the foggy noise at once.
@@ -241,7 +241,7 @@ def _enforce_pauses(audio: np.ndarray, sr: int, text: str) -> np.ndarray:
                 pad = np.zeros(int(target * sr), dtype=out.dtype)
                 out = np.concatenate([left, pad, right])
                 shift += target - have
-            elif target - have >= 0.04:
+            elif target - have >= 0.05:  # Only extend if meaningfully short
                 at = gs + shift  # extend from the gap's start
                 out = _insert_silence(out, sr, at, target - have)
                 shift += target - have

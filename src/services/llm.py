@@ -101,7 +101,7 @@ def call_cloudflare(messages: list, temperature: float = 0.7, model: str = None,
             # Reasoning model: reserve headroom for reasoning_content. Vision
             # calls (big image prompts) need far more room after the reasoning pass,
             # and empty-content retries double the budget each attempt.
-            floor = 2048 if is_vision else 256
+            floor = 2048 if is_vision else 1024  # Increased floor for structured JSON output
             budget = max(max_tokens or 0, floor) * (2 ** attempt)
             kwargs["max_completion_tokens"] = budget
             resp = requests.post(url, headers=headers, json=kwargs, timeout=180)

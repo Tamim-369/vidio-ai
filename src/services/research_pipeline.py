@@ -352,13 +352,36 @@ def _generate_ideas(niche: str, sources: list, max_ideas: int = 10) -> list:
         )
         try:
             raw_out = call_text(
-                [{"role": "user", "content": prompt}], temperature=0.7
+                [{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=2000,  # Ensure enough budget for JSON array output
             )
         except Exception as e:
             print(f"    [llm] chunk {start//IDEAS_CHUNK_SOURCES + 1} failed: {str(e)[:80]}")
             continue
 
-        for idea in _parse_idea_json(raw_out):
+        # Retry once with repair prompt if JSON parse fails
+        parsed = _parse_idea_json(raw_out)
+        if not parsed:
+            repair_prompt = (
+                "Your previous response was not valid JSON. Output ONLY a valid JSON array "
+                "matching the schema exactly. No prose, no markdown fences."
+            )
+            try:
+                raw_out = call_text(
+                    [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": raw_out},
+                        {"role": "user", "content": repair_prompt},
+                    ],
+                    temperature=0.3,  # Lower temp for structured repair
+                    max_tokens=2000,
+                )
+                parsed = _parse_idea_json(raw_out)
+            except Exception as e:
+                print(f"    [llm] repair attempt failed: {str(e)[:80]}")
+
+        for idea in parsed:
             key = idea["title"].strip().lower()
             if key in seen:
                 continue

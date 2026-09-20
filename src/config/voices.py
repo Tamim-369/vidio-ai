@@ -28,8 +28,9 @@ VOICES = {
         "ref_audio": "src/voices_to_clone/candidates/donald-trump/donald-trump_ref.wav",
         # Lower temp = stable speaker identity/emotion across lines; the script's
         # own "loud" lines still get a deterministic volume emphasis in TTS.
-        "params": {"exaggeration": 0.5, "cfg_weight": 0.5, "temperature": 0.75, "gain": 1.15,
-                   "eq": ["highpass 100", "equalizer 3000 1 2.5", "equalizer 6500 1 1.5"],
+        # Reduced EQ boosts to prevent hiss fog; removed 6.5k boost entirely.
+        "params": {"exaggeration": 0.5, "cfg_weight": 0.5, "temperature": 0.75, "gain": 1.1,
+                   "eq": ["highpass 100", "equalizer 3000 1 1.5"],
                    "speed": 1.0},
         "writing_style": "trump",
         "enabled": True,

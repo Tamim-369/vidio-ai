@@ -37,3 +37,4 @@ voice_tests/audio/*
 voice_tests/output/*
 /voices
 /channel_cache
+.venv*/
