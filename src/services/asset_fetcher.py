@@ -1,9 +1,28 @@
+"""Per-line query, license-safe image fetching (NO vision verification).
+
+Strategy (validated on wet runs):
+1. QUERY AGENT: one LLM pass turns the whole script + topic into 5 precise
+   search queries PER narration line (exact names, photo/era tokens, exclusions,
+   a variety of visual angles) — never a single topic-level keyword list.
+2. Download candidate images per query from license-safe sources (Pexels,
+   Wikimedia Commons, Openverse, DuckDuckGo restricted to Wikimedia-hosted
+   files only), tagging each file with its origin line.
+3. REJECT TEXT-SLOP deterministically (pytesseract OCR, no LLM): any image whose
+   readable text covers > ASSET_MAX_TEXT_AREA of its area (captions/memes/big
+   watermark blocks) is dropped.
+4. NO PIXEL VERIFICATION: the per-line query engineering replaces vision.
+   Facets/feature gates and model descriptions are gone from this path.
+5. Assign kept images to narration lines origin-first (each line keeps the
+   images its own queries found), with query/checklist text-overlap as tie-break
+   and an LLM plan as an optional refinement. Multi-image per line allowed;
+   every line is guaranteed >= 1 image.
+"""
 import os
-import base64
 import re
-import time
 import threading
+import json
 import requests
+import pytesseract
 from PIL import Image
 from io import BytesIO
 from ddgs import DDGS
@@ -12,47 +31,37 @@ from src.config.settings import (
     TEMP_DIR,
     PEXELS_API_KEY,
     ASSET_MAX_PARALLEL_WORKERS,
-    ASSET_IMAGES_PER_LINE,
-    ASSET_MAX_REFINE_ATTEMPTS,
     ASSET_MAX_ASPECT_RATIO,
-    ASSET_VERIFY_MIN_INTERVAL,
+    ASSET_TARGET_IMAGES,
+    ASSET_MIN_IMAGES,
+    ASSET_REJECT_TEXT_OVERLAY,
+    ASSET_MAX_TEXT_AREA,
+    ASSET_TEXT_MIN_CONF,
 )
-from src.services.llm import call_text
+from src.services.llm import call_groq
+from src.services.query_agent import build_search_queries
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {"User-Agent": "VideoPipeline/1.0 (history/mystery shorts; contact: local)"}
 BLOCKED_DOMAINS = ["shutterstock", "gettyimages", "alamy", "istockphoto", "dreamstime"]
 MAX_ASPECT_RATIO = ASSET_MAX_ASPECT_RATIO
-MAX_REFINE_ATTEMPTS = ASSET_MAX_REFINE_ATTEMPTS
-MAX_PARALLEL_WORKERS = ASSET_MAX_PARALLEL_WORKERS  # Conservative: safe for most PCs
-IMAGES_PER_LINE = ASSET_IMAGES_PER_LINE  # Number of images to fetch per sentence
+MAX_PARALLEL_WORKERS = ASSET_MAX_PARALLEL_WORKERS
+TARGET_IMAGES = ASSET_TARGET_IMAGES  # aim for this many topic images
+MIN_IMAGES = ASSET_MIN_IMAGES        # hard stop: never ship a video with fewer
+MAX_QUERY_SPECS = 18  # cap per-line queries fetched per round (round-robin)
+REJECT_TEXT_OVERLAY = ASSET_REJECT_TEXT_OVERLAY  # OCR slop filter on/off
+MAX_TEXT_AREA = ASSET_MAX_TEXT_AREA              # text coverage => image skipped
+TEXT_MIN_CONF = ASSET_TEXT_MIN_CONF              # OCR word confidence floor
 
-# Rate-limit gate: Groq free-tier ITPM = 7000; each vision call ~2200 input tokens.
-# Max safe throughput ≈ 3 calls/min → 19 s between calls.
-_VERIFY_MIN_INTERVAL = ASSET_VERIFY_MIN_INTERVAL
-_verify_lock = threading.Lock()
-_verify_last_time = 0.0
+N_KEYWORDS = 6
 
-def _rate_limit_verify():
-    """Block until safe to make another vision API call."""
-    global _verify_last_time
-    with _verify_lock:
-        now = time.time()
-        wait = _VERIFY_MIN_INTERVAL - (now - _verify_last_time)
-        if wait > 0:
-            print(f"    [verify] Rate-limit gate: waiting {wait:.0f}s...", flush=True)
-            time.sleep(wait)
-        _verify_last_time = time.time()
-
-# Copyright-safe image sources only
-# Pexels: Free, no attribution required, commercial use OK
-# DuckDuckGo with license filter: Public domain and Creative Commons
+_file_hashes = {}
+_file_hash_lock = threading.Lock()
+_source_meta = {}   # path -> {"license": str, "source": str}
 
 
 def _strip_thinking_tags(text: str) -> str:
-    """Remove thinking tags like <think>...</think> from text."""
     text = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    text = re.sub(r'\s*thinking\s*\n', '', text, flags=re.DOTALL)
     return text.strip()
 
 
@@ -68,74 +77,7 @@ def _is_usable_image(content: bytes) -> bool:
         return False
 
 
-def _verify_image(image_path: str, search_term: str, line_text: str, image_expectation: str, topic: str = "") -> tuple:
-    """Use Groq vision to check if image matches what we want.
-    Returns (is_valid, new_search_term or None).
-    """
-    _rate_limit_verify()
-    try:
-        with open(image_path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode()
-
-        topic_block = f"\nVideo topic: {topic}" if topic else ""
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": f"""You are validating a single image for a video script.{topic_block}
-
-Search term used: {search_term}
-Sentence context: {line_text}
-Expected visual concept: {image_expectation}
-
-Question: Does this image clearly and specifically show the expected VISUAL CONCEPT? A matching image shows the actual subject — not just a related or abstract scene.
-
-Rules:
-- 'valid' ONLY if the image genuinely and specifically depicts the expected subject{(' for THIS exact topic' if topic else '')}.
-- 'invalid' if it is a generic/related scene, unrelated, or only vaguely connected.
-- If invalid, give a better search term (3-5 words) describing a real, findable scene that WOULD match.
-
-Format (MUST include both lines):
-Answer: valid/invalid
-Search term: <new_search_term>"""},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
-            ]
-        }]
-        answer = call_text(messages, temperature=0.0, max_tokens=400,
-                           tag="verify", vision=True).lower()
-
-        # Strict parsing: 'valid' only when the model explicitly says so.
-        first_line = (answer.splitlines()[0] if answer else "").lower()
-        is_valid = ("valid" in first_line) and ("invalid" not in first_line)
-        new_search_term = None
-
-        if not is_valid:
-            # Try to extract new search term
-            if "search term:" in answer:
-                parts = answer.split("search term:", 1)
-                if len(parts) > 1:
-                    new_search_term = parts[1].strip().strip('"\'').split('\n')[0].strip()
-
-                    new_search_term = _strip_thinking_tags(new_search_term)
-
-        return (is_valid, new_search_term)
-
-    except Exception as e:
-        print(f"    [verify] Error: {e}")
-        return (True, None)  # fallback: accept the image if verification fails
-
-
-# ---- Batch verification + verdict cache ------------------------------------
-# Verifying every candidate image in its own LLM round-trip was the dominant
-# cost of the fetch phase (~95 serialized calls + rate-limit gates). Now all
-# candidate images for a line are sent in ONE vision call, and verdicts are
-# cached by content hash so a re-downloaded image is never re-verified.
-
-_verdict_cache = {}
-_verdict_lock = threading.Lock()
-
-
 def _file_hash(path: str) -> str:
-    """Cheap content hash (size + first/last 64KB) for dedup cache keys."""
     with open(path, "rb") as f:
         data = f.read()
     size = len(data)
@@ -143,108 +85,9 @@ def _file_hash(path: str) -> str:
     return f"{size}:{hash(sample)}"
 
 
-def _cached_verdict(path: str, expectation: str, topic: str) -> tuple or None:
-    """Return (is_valid, new_search_term) from cache, or None to verify."""
-    key = (_file_hash(path), expectation, topic)
-    with _verdict_lock:
-        return _verdict_cache.get(key)
-
-
-def _store_verdict(path: str, expectation: str, topic: str, result: tuple) -> None:
-    key = (_file_hash(path), expectation, topic)
-    with _verdict_lock:
-        _verdict_cache[key] = result
-
-
-def _verify_images_batch(paths: list, search_term: str, line_text: str,
-                         image_expectation: str, topic: str = "") -> dict:
-    """Verify a batch of images in ONE vision call; returns {path: (valid, term)}.
-
-    Each path gets its own "IMAGE n: valid/invalid" verdict line. Verdicts are
-    cached by content hash so identical re-downloaded images skip re-verification.
-    """
-    results = {}
-
-    # Resolve from cache first.
-    pending = []
-    for p in paths:
-        cached = _cached_verdict(p, image_expectation, topic)
-        if cached is not None:
-            results[p] = cached
-        else:
-            pending.append(p)
-    if pending:
-        _rate_limit_verify()
-    if not pending:
-        return results
-
-    try:
-        topic_block = f"\nVideo topic: {topic}" if topic else ""
-        parts = [{"type": "text", "text": f"""You are validating images for a video script.{topic_block}
-
-Search term used: {search_term}
-Sentence context: {line_text}
-Expected visual concept: {image_expectation}
-
-For EACH image below, decide whether it clearly and specifically shows the expected VISUAL CONCEPT. A matching image shows the actual subject — not just a related or abstract scene.
-
-Rules:
-- 'valid' ONLY if the image genuinely and specifically depicts the expected subject{(' for THIS exact topic' if topic else '')}.
-- 'invalid' if it is a generic/related scene, unrelated, or only vaguely connected.
-
-Format: answer exactly one line per image, in order:
-IMAGE 1: valid/invalid
-IMAGE 2: valid/invalid
-...
-No other text."""}]
-        for path in pending:
-            with open(path, "rb") as f:
-                parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(f.read()).decode()}"}})
-
-        answer = call_text([{"role": "user", "content": parts}], temperature=0.0,
-                           max_tokens=300, tag="verify", vision=True).lower()
-
-        # Parse "IMAGE n: valid/invalid" lines (accept "1: valid", "image 2 valid", etc.)
-        verdicts = {}
-        for m in re.finditer(r"image\s*(\d+)\s*[:.\-]?\s*(valid|invalid)", answer):
-            verdicts[int(m.group(1)) - 1] = m.group(2) == "valid"
-    except Exception as e:
-        print(f"    [verify] Batch error: {e}")
-        verdicts = {}  # fall back to accepting pending images (lenient on failure)
-
-    for i, path in enumerate(pending):
-        is_valid = verdicts.get(i, True)  # unparsed images accepted (lenient)
-        results[path] = (is_valid, None)
-        _store_verdict(path, image_expectation, topic, (is_valid, None))
-
-    return results
-
-
-def _refine_search_term(original_term: str, line_text: str, image_expectation: str, topic: str = "") -> str:
-    """Ask an LLM to refine the search term based on what the image expectation is."""
-    try:
-        topic_line = f"Video topic: '{topic}'" if topic else ""
-        messages = [{
-            "role": "user",
-            "content": f"""Original search term: '{original_term}'
-Sentence context: '{line_text}'
-Expected visual concept: '{image_expectation}'
-{topic_line}
-
-The original search term didn't find a good image. Provide a better, more specific search term that would find a REAL image of THIS topic (just the term, no explanation):"""
-        }]
-        refined = call_text(messages, temperature=0.7, max_tokens=200,
-                            tag="refine", vision=True)
-        refined = _strip_thinking_tags(refined)
-        return refined if refined else original_term
-    except Exception as e:
-        print(f"    [refine] Error: {e}")
-        return original_term
-
-
 def _download_image(url: str, path: str, headers: dict = HEADERS) -> bool:
     try:
-        r = requests.get(url, timeout=8, headers=headers)
+        r = requests.get(url, timeout=12, headers=headers)
         if r.status_code == 200 and "image" in r.headers.get("Content-Type", ""):
             if _is_usable_image(r.content):
                 with open(path, "wb") as f:
@@ -255,263 +98,555 @@ def _download_image(url: str, path: str, headers: dict = HEADERS) -> bool:
     return False
 
 
-def _fetch_pexels(search_term: str, path: str, count: int = 1) -> list:
-    """Fetch multiple images from Pexels (100% copyright-free, royalty-free).
-    Returns list of successfully downloaded paths."""
+def _remember(path: str, license: str, source: str) -> bool:
+    """Return True iff this is a NEW unique download. Records license+source."""
+    h = _file_hash(path)
+    with _file_hash_lock:
+        if h in _file_hashes:
+            return False
+        _file_hashes[h] = path
+    _source_meta.setdefault(path, {"license": license or "unspecified", "source": source or ""})
+    return True
+
+
+# ---------------------------------------------------------------------------
+# COPYRIGHT-SAFE SOURCES
+# ---------------------------------------------------------------------------
+# Pexels: royalty-free, no attribution, commercial use. Always safe.
+# Wikimedia Commons: explicit licenses; we keep only PD / CC0 / CC BY / CC BY-SA.
+# Openverse: CC/PD index across many providers (Flickr, Wikimedia, Maxpixel...),
+# returns the real license per image.
+# DuckDuckGo: a general image source (not restricted to one host) — we set its
+# license filter to Public/Share and block known watermarked stock aggregators,
+# so only genuinely free photos get through. Never stops the whole source.
+
+_SAFE_LICENSE_PATTERNS = [
+    re.compile(r"^pd[\-a-z0-9]*$", re.I),               # pd, pd-old-70, pd-ineligible...
+    re.compile(r"^public domain$", re.I),
+    re.compile(r"^no restrictions$", re.I),
+    re.compile(r"^cc\s*0$", re.I),                       # CC0
+    re.compile(r"^cc\s*by(?![-a-z])($|$)", re.I),        # CC BY (no NC/ND suffix)
+    re.compile(r"^cc\s*by\s*sa(?![-a-z])$", re.I),       # CC BY-SA
+]
+
+
+def _license_ok(license_str: str) -> bool:
+    lic = (license_str or "").strip().lower()
+    return any(p.search(lic) for p in _SAFE_LICENSE_PATTERNS)
+
+
+def _fetch_pexels(search_term: str, base_path: str, count: int = 1) -> list:
+    """Royalty-free images from Pexels. License: Pexels free license."""
     if not PEXELS_API_KEY:
         return []
-    
     downloaded = []
     try:
         r = requests.get(
             "https://api.pexels.com/v1/search",
             headers={"Authorization": PEXELS_API_KEY},
             params={"query": search_term, "per_page": count * 3, "orientation": "portrait"},
-            timeout=8,
+            timeout=12,
         )
         photos = r.json().get("photos", [])
-        
         for i, photo in enumerate(photos):
             if len(downloaded) >= count:
                 break
-                
             url = photo.get("src", {}).get("large2x") or photo.get("src", {}).get("large")
             if url:
-                # Generate unique path for each image
-                base, ext = os.path.splitext(path)
-                img_path = f"{base}_{i+1}{ext}" if i > 0 else path
-                
-                if _download_image(url, img_path, headers={"Authorization": PEXELS_API_KEY}):
-                    downloaded.append(img_path)
+                path = f"{base_path}_p{i}.jpg"
+                if _download_image(url, path, headers={"Authorization": PEXELS_API_KEY}) \
+                        and _remember(path, "Pexels free license", "Pexels"):
+                    downloaded.append(path)
     except Exception as e:
         print(f"      [pexels] Error: {e}")
-        pass
-    
     return downloaded
 
 
-def _fetch_ddg(search_term: str, path: str, count: int = 1) -> list:
-    """Fetch multiple images from DuckDuckGo with license filtering.
-    Returns list of successfully downloaded paths."""
+def _fetch_wikimedia_commons(search_term: str, base_path: str, count: int = 1) -> list:
+    """Wikimedia Commons images with explicit, allowed licenses (PD/CC0/CC BY/CC BY-SA)."""
+    downloaded = []
+    try:
+        params = {
+            "action": "query",
+            "format": "json",
+            "generator": "search",
+            "gsrsearch": f"filetype:bitmap {search_term}",
+            "gsrnamespace": 6,
+            "gsrlimit": count * 4,
+            "prop": "imageinfo",
+            "iiprop": "url|extmetadata|size",
+            "iiurlwidth": 1400,
+        }
+        r = requests.get("https://commons.wikimedia.org/w/api.php", params=params,
+                         headers={"User-Agent": HEADERS["User-Agent"]}, timeout=15)
+        pages = (r.json().get("query", {}) or {}).get("pages", {}) or {}
+        for key in sorted(pages, key=lambda k: pages[k].get("index", 0)):
+            if len(downloaded) >= count:
+                break
+            page = pages[key]
+            ii = (page.get("imageinfo") or [{}])[0]
+            url = ii.get("thumburl") or ii.get("url")
+            lic = ""
+            for field in ("LicenseShortName", "LicenseSpdx", "UsageTerms"):
+                v = ((ii.get("extmetadata") or {}).get(field) or {}).get("value", "")
+                if v:
+                    lic = v
+                    break
+            if not url or not _license_ok(lic):
+                continue
+            w, h = ii.get("width", 1), ii.get("height", 1)
+            try:
+                if h and (w / h) > MAX_ASPECT_RATIO:
+                    continue
+            except (TypeError, ZeroDivisionError):
+                pass
+            path = f"{base_path}_c{len(downloaded)}.jpg"
+            if _download_image(url, path) and _remember(path, lic, "Wikimedia Commons"):
+                downloaded.append(path)
+    except Exception as e:
+        print(f"      [commons] Error: {e}")
+    return downloaded
+
+
+# Stock aggregators that always need paid licences / watermark their images.
+_DDG_BLOCKED_HOSTS = BLOCKED_DOMAINS + [
+    "alamy.com", "gettyimages.com", "shutterstock.com", "istockphoto.com",
+    "dreamstime.com", "123rf.com", "adobestock.com", "depositphotos.com",
+    "bigstockphoto.com", "corbisimages.com", "agefotostock.com", "graphicstock.com",
+    "pinterest.com", "pinimg.com", "dailymail.co.uk", "dailymail.com",
+    "dailystar.co.uk", "newscom.com", "flash89.com",
+]
+
+# A known-free fallback: if an image eventually has no license info, these
+# hosts are trusted to be free/copyright-safe (Commons + Openverse CDNs).
+_FREE_HOST_SUFFIXES = ("upload.wikimedia.org", "upload.wikimediausercontent.org",
+                       "live.staticflickr.com", "openverse.org")
+
+
+def _fetch_ddg(search_term: str, base_path: str, count: int = 1) -> list:
+    """DuckDuckGo as a general source with license filter + stock blocklist.
+
+    Not restricted to a single host. Uses DDG's `license:` filter for
+    free-to-use photos and drops the known watermark/paid-stock hosts; images
+    that slip through still pass the Groq feature check downstream.
+    """
     downloaded = []
     try:
         with DDGS() as ddgs:
-            # Try with license filter first, fallback to regular if no results
-            try:
-                results = list(ddgs.images(
-                    search_term, 
-                    max_results=count * 5,
-                    license_image='Public'  # Public domain + Creative Commons
-                ))
-            except:
-                # Fallback: regular search but we'll filter manually
-                results = list(ddgs.images(search_term, max_results=count * 5))
-            
-            for i, r in enumerate(results):
+            for lic in ("Public", "Share"):
                 if len(downloaded) >= count:
                     break
-                    
-                url = r.get("image", "")
-                
-                # Skip known copyright/watermarked sources
-                if any(s in url.lower() for s in BLOCKED_DOMAINS):
-                    continue
-                
-                # Skip obvious stock photo sites
-                stock_indicators = ['stock', 'premium', 'watermark', 'preview']
-                if any(indicator in url.lower() for indicator in stock_indicators):
-                    continue
-                    
-                # Check aspect ratio
-                img_w = r.get("width", 1) 
-                img_h = r.get("height", 1)
-                # Ensure both are numbers before comparison
                 try:
-                    img_w = float(img_w) if img_w else 1
-                    img_h = float(img_h) if img_h else 1
-                    if img_h > 0 and (img_w / img_h) > MAX_ASPECT_RATIO:
+                    results = list(ddgs.images(
+                        search_term, max_results=count * 5, license_image=lic))
+                except Exception:
+                    continue
+                for i, r in enumerate(results):
+                    if len(downloaded) >= count:
+                        break
+                    url = r.get("image", "")
+                    if any(host in url.lower() for host in _DDG_BLOCKED_HOSTS):
                         continue
-                except (ValueError, TypeError):
-                    # If width/height aren't valid numbers, skip aspect ratio check
-                    pass
-                
-                # Generate unique path for each image
-                base, ext = os.path.splitext(path)
-                img_path = f"{base}_{i+1}{ext}" if i > 0 else path
-                
-                if url and _download_image(url, img_path):
-                    downloaded.append(img_path)
+                    path = f"{base_path}_d{i}.jpg"
+                    if url and _download_image(url, path) and \
+                            _remember(path, "Free-to-use (search)", url[:120]):
+                        downloaded.append(path)
     except Exception as e:
         print(f"      [ddg] Error: {e}")
-        pass
-    
     return downloaded
 
 
-def _topic_keywords(topic: str) -> str:
-    stopwords = {"what", "makes", "a", "an", "the", "and", "or", "why", "how",
-                 "is", "are", "do", "does", "in", "on", "at", "to", "of", "for",
-                 "your", "my", "our", "their", "its", "this", "that", "these", "those",
-                 "always", "common", "look", "aren't", "isn't", "don't", "not",
-                 "top", "5", "4", "3", "2", "1", "dark", "truth", "about", "human"}
-    words = [w for w in topic.lower().split() if w.strip(".,?!'\"") not in stopwords]
-    return " ".join(words[:4])
+def _fetch_openverse(search_term: str, base_path: str, count: int = 1) -> list:
+    """Openverse: CC/PD images from many providers with real license per result."""
+    downloaded = []
+    try:
+        r = requests.get(
+            "https://api.openverse.org/v1/images/",
+            params={
+                "q": search_term,
+                "license": "by,by-sa,cc0,pdm",
+                "license_type": "commercial",
+                "page_size": count * 4,
+            },
+            headers={"User-Agent": HEADERS["User-Agent"]},
+            timeout=15,
+        )
+        for it in r.json().get("results", []):
+            if len(downloaded) >= count:
+                break
+            url = it.get("url") or ""
+            w = it.get("width") or 0
+            h = it.get("height") or 0
+            if not url or (h and (w / h) > MAX_ASPECT_RATIO):
+                continue
+            lic = it.get("license") or "cc0"
+            ver = it.get("license_version") or ""
+            label = f"{lic} {ver}".strip()
+            path = f"{base_path}_o{len(downloaded)}.jpg"
+            if _download_image(url, path) and _remember(path, label, it.get("provider", "Openverse")):
+                downloaded.append(path)
+    except Exception as e:
+        print(f"      [openverse] Error: {e}")
+    return downloaded
 
 
-def _fetch_single_asset(line: dict, keywords: str, assets_dir: str, topic: str = "") -> dict:
-    """Fetch multiple assets for a single line. Returns the line with asset_paths list."""
-    line_id = line["id"]
-    original_search_term = line["search_term"]
-    image_expectation = line.get("image_expectation", original_search_term)
-    image_type = line.get("image_type", "stock")
-    line_text = line.get("text", "")
+# ---------------------------------------------------------------------------
+# 1. KEYWORDS + TOPIC FACETS
+# ---------------------------------------------------------------------------
 
-    search_term = original_search_term
-    # Always prepend core topic keywords (first 3) so topic dominates image search,
-    # not the sentence-specific term. This ensures images are about the TOPIC,
-    # not just the sentence's specific wording.
-    if keywords:
-        core = " ".join(keywords.split()[:3])
-        search_term = f"{core} {search_term}"
+_STOPWORDS = {"what", "makes", "a", "an", "the", "and", "or", "why", "how",
+              "is", "are", "do", "does", "in", "on", "at", "to", "of", "for",
+              "your", "my", "our", "their", "its", "this", "that", "these", "those",
+              "always", "common", "look", "aren't", "isn't", "don't", "not",
+              "top", "5", "4", "3", "2", "1", "dark", "truth", "about", "human"}
+_GENERIC = {"photo", "image", "picture", "people", "person", "view", "scene",
+            "day", "night", "outdoor", "group", "crowd", "man", "woman", "building",
+            "walking", "standing", "showing", "old", "big", "large", "two", "one"}
 
-    print(f"  [asset] Line {line_id} [{image_type}]: Fetching {IMAGES_PER_LINE} images for '{search_term}'")
 
-    downloaded_paths = []
-    attempts = 0
-    rounds = 0
-    tried_terms = set()  # search terms already fetched & verified (break circular loops)
-    MAX_ROUNDS = MAX_REFINE_ATTEMPTS + IMAGES_PER_LINE * 2  # hard cap on fetch/verify rounds
+def _topic_keywords_heuristic(topic: str) -> list:
+    words = [w for w in topic.lower().split() if w.strip(".,?!'\"") not in _STOPWORDS]
+    core = " ".join(words[:4])
+    return [core] if core else [topic]
 
-    # IMPORTANT: every round must write to UNIQUE filenames. The Pexels/DDG
-    # fetchers read a base path and derive `{base}_{i+1}.jpg` names, so we stamp
-    # a per-round token into the base. If rounds reused the same base, a later
-    # round would overwrite an already-validated file and its rejection could
-    # os.remove() that file — leaving dead paths in downloaded_paths (the
-    # "temp/assets/4_2.jpg" FileNotFound crash at assembly time).
-    round_stamp = 0
 
-    while len(downloaded_paths) < IMAGES_PER_LINE and attempts <= MAX_REFINE_ATTEMPTS and rounds < MAX_ROUNDS:
-        rounds += 1
-        round_stamp += 1
-        # Calculate how many more images we need
-        needed = IMAGES_PER_LINE - len(downloaded_paths)
-        
-        # Try to fetch images (Pexels first for stock, DDG first for search).
-        # Unique base per round so no filename is ever written twice.
-        if image_type == "stock":
-            new_paths = _fetch_pexels(search_term, os.path.join(assets_dir, f"{line_id}_r{round_stamp}.jpg"), needed)
-            if len(new_paths) < needed:
-                # Try DDG as backup
-                remaining = needed - len(new_paths)
-                # Adjust base_path to avoid overwriting
-                backup_base = os.path.join(assets_dir, f"{line_id}_r{round_stamp}_ddg.jpg")
-                new_paths.extend(_fetch_ddg(search_term, backup_base, remaining))
-        else:
-            new_paths = _fetch_ddg(search_term, os.path.join(assets_dir, f"{line_id}_r{round_stamp}.jpg"), needed)
-            if len(new_paths) < needed:
-                # Try Pexels as backup
-                remaining = needed - len(new_paths)
-                backup_base = os.path.join(assets_dir, f"{line_id}_r{round_stamp}_pex.jpg")
-                new_paths.extend(_fetch_pexels(search_term, backup_base, remaining))
+def _generate_topic_keywords(topic: str) -> list:
+    """LLM: topic -> 6 findable keyword phrases covering its visual facets."""
+    try:
+        messages = [{
+            "role": "user",
+            "content": (
+                f'Video topic: "{topic}"\n\n'
+                "I need search keywords to find REAL photos for this video. Generate "
+                f"{N_KEYWORDS} DISTINCT keyword phrases (2-5 words each) that an image "
+                "search would actually return, all specifically about THIS topic. Use real, "
+                "photographable subject matter: named people, places, monuments, artifacts, "
+                "equipment, historical photos, period scenes, buildings, weapons, vehicles, "
+                "uniforms, maps.\n\n"
+                "- Every keyword must be ON-TOPIC. Nothing generic, decorative, or unrelated.\n"
+                "- Cover different facets (the person/thing itself, the place, key artifacts, "
+                "the event, the era).\n"
+                "- Plain phrase per line, no numbering, no explanation."
+            )
+        }]
+        out = call_groq(messages, temperature=0.6, max_tokens=300, tag="kw")
+        out = _strip_thinking_tags(out)
+        kws = [ln.strip().strip('"').strip('-').strip('.') for ln in out.splitlines()]
+        kws = [k for k in kws if k and len(k.split()) <= 8]
+        if len(kws) >= 4:
+            return kws[:N_KEYWORDS]
+    except Exception as e:
+        print(f"    [kw] Error: {e}")
+    return _topic_keywords_heuristic(topic)
 
-        if not new_paths:
-            # No images fetched, refine search term
-            search_term = _refine_search_term(search_term, line_text, image_expectation)
-            print(f"    [verify] Line {line_id}: No images found, new term: '{search_term}'")
-            attempts += 1
-            continue
 
-        # Verify all candidates in ONE vision call (batch) and keep only matches.
-        results = _verify_images_batch(new_paths, search_term, line_text, image_expectation, topic)
+# ---------------------------------------------------------------------------
+# 2. DOWNLOAD
+# ---------------------------------------------------------------------------
 
-        gained = 0
-        rejected = 0
-        for img_path in new_paths:
-            is_valid, _ = results.get(img_path, (False, None))
-            if is_valid:
-                downloaded_paths.append(img_path)
-                gained += 1
-            else:
-                rejected += 1
-                try:
-                    os.remove(img_path)
-                except OSError:
-                    pass
+def _fetch_for_keyword(keyword: str, kw_idx: int, assets_dir: str, per_kw: int) -> list:
+    base = os.path.join(assets_dir, f"kw{kw_idx}")
+    paths = _fetch_pexels(keyword, base, per_kw)
+    paths.extend(_fetch_wikimedia_commons(keyword, f"{base}c", per_kw))
+    paths.extend(_fetch_openverse(keyword, f"{base}o", per_kw))
+    paths.extend(_fetch_ddg(keyword, f"{base}d", per_kw))
+    return paths
 
-        if gained:
-            print(f"  [asset] Line {line_id}: ✓ Kept {gained} matching image(s) "
-                  f"({len(downloaded_paths)}/{IMAGES_PER_LINE} so far)")
-        else:
-            print(f"    [verify] Line {line_id}: ✗ Nothing matched for '{search_term}'")
-            if rejected:
-                print(f"      [asset] Line {line_id}: {rejected} candidate(s) rejected by verifier")
 
-        if gained and len(downloaded_paths) >= IMAGES_PER_LINE:
+def _round_robin_specs(specs: list, max_specs: int) -> list:
+    """Take at most max_specs (query, line_id) specs while keeping every line's
+    queries interleaved, so no line starves on download budget."""
+    if len(specs) <= max_specs:
+        return specs
+    queues = {}
+    for q, lid in specs:
+        queues.setdefault(lid, []).append(q)
+    out, idx = [], 0
+    while len(out) < max_specs:
+        progressed = False
+        for lid in queues:
+            if idx < len(queues[lid]):
+                out.append((queues[lid][idx], lid))
+                progressed = True
+                if len(out) >= max_specs:
+                    return out
+        if not progressed:
             break
+        idx += 1
+    return out
 
-        # Still need more images. Refine to a term we have NOT already fetched
-        # and searched for — otherwise the same images come back and we loop.
-        # Fall back to a "variation" of the last term only if the refiner keeps
-        # returning something we've already tried.
-        candidate = _refine_search_term(search_term, line_text, image_expectation, topic).strip()
-        if not candidate or candidate.lower() == search_term.lower():
-            # Keep moving: strip an adjective clause or nudge the phrasing so the
-            # search actually differs from the attempt that just failed.
-            candidate = f"{search_term} alternate view" if "alternate view" not in search_term else search_term + " ii"
-        if candidate.lower() in tried_terms:
-            candidate = f"{candidate} alternate view"
-        search_term = candidate or search_term
-        tried_terms.add(search_term.lower())
-        attempts += 1
 
-    if len(downloaded_paths) < IMAGES_PER_LINE and not downloaded_paths:
-        print(f"  [asset] Line {line_id}: ✗ Failed to fetch any verified images")
-    elif len(downloaded_paths) < IMAGES_PER_LINE:
-        print(f"  [asset] Line {line_id}: ⚠️  Only kept {len(downloaded_paths)}/{IMAGES_PER_LINE} verified images")
+def _download_candidates(query_specs: list, assets_dir: str) -> dict:
+    """Download candidates for each (query, line_id) spec in parallel.
+    Returns {path: (query, line_id)} so assignment keeps the origin-line context."""
+    per_q = max(1, int(round(TARGET_IMAGES * 1.6 / max(1, len(query_specs)))))
+    candidates = {}
+    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_WORKERS, len(query_specs))) as ex:
+        futs = {ex.submit(_fetch_for_keyword, q, i, assets_dir, per_q): (q, lid)
+                for i, (q, lid) in enumerate(query_specs)}
+        for fut in as_completed(futs):
+            q, lid = futs[fut]
+            try:
+                for p in fut.result():
+                    candidates[p] = (q, lid)
+            except Exception as e:
+                print(f"      [asset] query '{q}' error: {e}")
+    return candidates
 
-    line["asset_paths"] = [p for p in downloaded_paths if os.path.exists(p)]
-    # Keep backward compatibility
-    line["asset_path"] = line["asset_paths"][0] if line["asset_paths"] else None
-    return line
 
+# ---------------------------------------------------------------------------
+# 3. FILTER (deterministic OCR text-overlay rejection) — no vision
+# ---------------------------------------------------------------------------
+
+def _image_has_text_overlay(path: str) -> bool:
+    """Deterministic OCR text-overlay check (pytesseract, no LLM).
+    True if readable words cover > MAX_TEXT_AREA fraction of the image — catches
+    photos ruined by captions/memes/big watermarks. Tiny credit marks pass."""
+    if not REJECT_TEXT_OVERLAY:
+        return False
+    try:
+        img = Image.open(path).convert("RGB")
+        w, h = img.size
+        area = float(w * h)
+        if area <= 0:
+            return False
+        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT,
+                                         config="--oem 3 --psm 11")
+        covered = 0.0
+        for conf, txt, l, t, bw, bh in zip(
+                data["conf"], data["text"], data["left"], data["top"],
+                data["width"], data["height"]):
+            if txt and txt.strip() and float(conf) >= TEXT_MIN_CONF:
+                covered += float(bw) * float(bh)
+        return covered / area > MAX_TEXT_AREA
+    except Exception as e:
+        return False
+
+
+def _describe_and_filter_candidates(candidates: dict, facets_tokens: set | None = None, topic: str = "") -> dict:
+    """Deterministic filter only (OCR text-overlay rejection) — no vision.
+    candidates: {path: (query, line_id)}. Returns {path: (query, query, line_id)}
+    in insertion order; the query doubles as the image's feature text. Pixels are
+    never described or verified: the per-line query agent pins images to topic."""
+    """Deterministic filter only (OCR text-overlay rejection) — no vision.
+    candidates: {path: (query, line_id)}. Returns {path: (query, query, line_id)}
+    in insertion order; the query doubles as the image's feature text.
+    The facets_tokens gate is intentionally removed: the per-line query agent
+    already pins images to the topic, so pixel-level verification is gone."""
+    kept = {}
+    for p, (q, lid) in candidates.items():
+        if _image_has_text_overlay(p):
+            print(f"      [text] ✗ text overlay (> {MAX_TEXT_AREA:.0%} area) — skip: {os.path.basename(p)}")
+            continue
+        kept[p] = (q, q, lid)
+    return kept
+
+
+# ---------------------------------------------------------------------------
+# 4. ASSIGN (query / origin + checklist overlap) — images -> narration lines
+# ---------------------------------------------------------------------------
+
+def _tokens(s: str):
+    return set(re.findall(r"[a-z0-9]{3,}", s.lower())) - _GENERIC
+
+
+def _greedy_assign(images: list, lines: list) -> dict:
+    """images: [(path, feature_str, label, best_line_default)] -> {line_id: [paths]}."""
+    mapping = {ln["id"]: [] for ln in lines}
+    used = set()
+    for ln in lines:
+        want = _tokens(ln.get("image_features", "") or ln.get("image_expectation", "") or ln.get("search_term", ""))
+        if not want:
+            continue
+        ranked = sorted(images, key=lambda im: -len(want & _tokens(im[1])))
+        for im in ranked:
+            if im[2] in used:
+                continue
+            if want & _tokens(im[1]):
+                mapping[ln["id"]].append(im[2])
+                used.add(im[2])
+                break
+    for im in images:
+        if im[2] not in used and im[3] is not None:
+            mapping[im[3]].append(im[2])
+            used.add(im[2])
+    return mapping
+
+
+def _assign_images_to_lines(images: dict, lines: list, topic: str) -> dict:
+    """images: {path: (features, query, line_id)}. Returns {line_id: [paths]}.
+    ONE LLM call for the match plan; greedy (feature token overlap) fallback."""
+    if not images or not lines:
+        return {ln["id"]: list(images.keys()) for ln in lines}
+
+    paths = list(images.keys())
+    catalog = "\n".join(f"image {i + 1}: {images[p][0] or images[p][1]}"
+                        for i, p in enumerate(paths))
+    expectations = "\n".join(
+        f'line {ln["id"]}: {ln.get("image_features", "") or ln.get("image_expectation", "")}'
+        for ln in lines)
+
+    prompt = (
+        f'Video topic: "{topic}"\n\n'
+        "I have images downloaded for the topic via targeted per-line searches "
+        "(each image tagged with the search query that found it) and a narration "
+        "script. Assign images to narration lines so each line's on-screen photo "
+        "matches its required feature checklist.\n\n"
+        "Image catalog (search query that found the photo):\n"
+        f"{catalog}\n\n"
+        "Script lines (the feature checklist the on-screen image must satisfy):\n"
+        f"{expectations}\n\n"
+        "Rules:\n"
+        "- EVERY line MUST get at least one image. Never leave a line empty.\n"
+        "- Prefer the image that was searched for with that line in mind, but a "
+        "clearly better visual for another line wins.\n"
+        "- A line may get 1-2 images if the visual demands it.\n"
+        "- An image may be reused, but spread them out where possible.\n"
+        '- Reply ONLY with JSON, no markdown, using the 1-based image numbers above: '
+        '{"line_id": ["image number", ...], ...} Example: {"3": ["1","3"], "5": ["2"]}'
+    )
+    mapping = {}
+    try:
+        answer = _strip_thinking_tags(call_groq(
+            [{"role": "user", "content": prompt}], temperature=0.3,
+            max_tokens=500, tag="assign"))
+        m = re.search(r"\{.*\}", answer, flags=re.DOTALL)
+        if not m:
+            raise ValueError("no JSON block")
+        data = json.loads(m.group(0))
+        if not isinstance(data, dict):
+            raise ValueError("not a dict")
+        for lid, val in data.items():
+            key = str(lid)
+            try:
+                key = int(lid)
+            except (TypeError, ValueError):
+                pass
+            idxs = val if isinstance(val, list) else [val]
+            for i in idxs:
+                if not isinstance(i, int):
+                    try:
+                        i = int(i)
+                    except (TypeError, ValueError):
+                        continue
+                j = min(max(i - 1, 0), len(paths) - 1)
+                mapping.setdefault(key, []).append(paths[j])
+    except Exception as e:
+        print(f"    [assign] LLM failed ({str(e)[:100]}), using greedy fallback")
+
+    if not any(v for v in mapping.values()):
+        print("    [assign] Greedy feature-match fallback (origin-line default)")
+        ids = {ln["id"] for ln in lines}
+        imgs = []
+        for p in paths:
+            best = None
+            best_score = -1
+            for ln in lines:
+                want = _tokens(ln.get("image_features", "") or ln.get("image_expectation", "") or ln.get("search_term", ""))
+                score = len(_tokens(images[p][0] or images[p][1]) & want)
+                if score > best_score:
+                    best_score = score
+                    best = ln["id"]
+            if best is None and images[p][2] in ids:
+                best = images[p][2]
+            imgs.append((p, images[p][0] or images[p][1], p, best))
+        mapping = _greedy_assign(imgs, lines)
+
+    # Spread unused images onto empty lines.
+    assigned = {p for deck in mapping.values() for p in deck}
+    unassigned = [p for p in paths if p not in assigned]
+    empty_lines = [ln for ln in lines if not mapping.get(ln["id"])]
+    if unassigned and empty_lines:
+        for img_path in unassigned:
+            if not empty_lines:
+                break
+            ln = empty_lines.pop(0)
+            mapping.setdefault(ln["id"], []).append(img_path)
+
+    return mapping
+
+
+# ---------------------------------------------------------------------------
+# MAIN ENTRY
+# ---------------------------------------------------------------------------
 
 def fetch_assets(lines: list, topic: str = "") -> list:
-    """Fetch assets for all lines in parallel using ThreadPoolExecutor."""
+    """Per-line query, OCR-clean, license-safe asset fetch (no vision)."""
     assets_dir = os.path.join(TEMP_DIR, "assets")
-    keywords = _topic_keywords(topic) if topic else ""
+    os.makedirs(assets_dir, exist_ok=True)
 
-    print(f"  [asset] Starting parallel fetch with {MAX_PARALLEL_WORKERS} workers...")
-    
-    # Create a dictionary to maintain line order
-    line_results = {}
-    
-    # Use ThreadPoolExecutor for parallel execution
-    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as executor:
-        # Submit all tasks
-        future_to_line = {
-            executor.submit(_fetch_single_asset, line, keywords, assets_dir, topic): line["id"]
-            for line in lines
-        }
-        
-        # Collect results as they complete
-        for future in as_completed(future_to_line):
-            line_id = future_to_line[future]
-            try:
-                result_line = future.result()
-                line_results[result_line["id"]] = result_line
-            except Exception as e:
-                print(f"  [asset] Line {line_id}: ✗ Error: {e}")
-                # Find the original line and mark it as failed
-                for line in lines:
-                    if line["id"] == line_id:
-                        line["asset_path"] = None
-                        line_results[line_id] = line
-                        break
-    
-    # Rebuild lines list in original order with updated asset paths
+    print(f"  [asset] Topic: {topic}")
+    print("  [asset] Query agent: one search-query set per narration line...")
+    query_map = build_search_queries(lines, topic)
+
+    specs, seen = [], set()
+    for ln in lines:
+        for q in ln.get("search_queries", []) or []:
+            if q and q not in seen:
+                seen.add(q)
+                specs.append((q, ln["id"]))
+    if len(specs) < 4:
+        print("  [asset] Query agent thin - supplementing with topic keywords")
+        for kw in _generate_topic_keywords(topic):
+            if kw not in seen:
+                seen.add(kw)
+                specs.append((kw, None))
+    specs = _round_robin_specs(specs, MAX_QUERY_SPECS)
+    print(f"  [asset] {len(specs)} queries across {len(query_map)} line(s)")
+
+    print(f"  [asset] Downloading candidates (Pexels/Commons/Openverse/DDG-commons)...")
+    candidates = _download_candidates(specs, assets_dir)
+    print(f"  [asset] Downloaded {len(candidates)} candidate(s)")
+
+    kept = _describe_and_filter_candidates(candidates)
+    print(f"  [asset] OCR-clean, kept: {len(kept)}")
+
+    rounds = 0
+    while len(kept) < MIN_IMAGES and rounds < 3:
+        rounds += 1
+        print(f"  [asset] Only {len(kept)} images — refetch round {rounds}...")
+        extra = _download_candidates(specs, assets_dir)
+        for p, v in _describe_and_filter_candidates(extra).items():
+            if p not in kept:
+                kept[p] = v
+        print(f"  [asset] Kept now: {len(kept)}")
+
+    if len(kept) < MIN_IMAGES:
+        print(f"  [asset] ⚠️  Only {len(kept)} images (wanted >= {MIN_IMAGES})")
+
+    print(f"  [asset] Assigning {len(kept)} image(s) to {len(lines)} line(s)...")
+    mapping = _assign_images_to_lines(kept, lines, topic)
+
+    used = set()
     for i, line in enumerate(lines):
-        if line["id"] in line_results:
-            lines[i] = line_results[line["id"]]
-    
-    print(f"  [asset] Parallel fetch complete!")
+        deck = [p for p in mapping.get(line["id"], []) if p in kept and os.path.exists(p)]
+        line["asset_paths"] = deck
+        line["asset_path"] = deck[0] if deck else None
+        for p in deck:
+            used.add(p)
+        lic = _source_meta.get(deck[0], {}).get("license", "") if deck else ""
+        if lic:
+            line["image_license"] = lic
+        print(f"  [asset] Line {line['id']}: {len(deck)} image(s) [{lic}]")
+
+    # Safety net: no line ships without a visual — reuse a kept image.
+    pool = list(kept.keys())
+    if pool:
+        cursor = 0
+        for i, line in enumerate(lines):
+            if not line.get("asset_paths"):
+                prev = lines[i - 1].get("asset_paths") if i > 0 else None
+                if prev:
+                    pick = prev[0]
+                else:
+                    pick = pool[cursor % len(pool)]
+                    cursor += 1
+                line["asset_paths"] = [pick]
+                line["asset_path"] = pick
+                lic = _source_meta.get(pick, {}).get("license", "")
+                if lic:
+                    line["image_license"] = lic
+                print(f"  [asset] Line {line['id']}: backfilled 1 image [{lic}]")
+
+    print(f"  [asset] Done — {len(used)}/{len(kept)} images used across lines")
     return lines

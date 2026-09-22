@@ -32,6 +32,7 @@ Format:
       "text": "<original text from line 1, without the number prefix>",
       "search_term": "<3-8 word search query>",
       "image_expectation": "<15-20 word visual description>",
+      "image_features": "<3-6 concrete visual features, comma-separated>",
       "image_type": "<stock|search>",
       "duration": <3-7 seconds as integer>,
       "loud": false
@@ -41,6 +42,7 @@ Format:
       "text": "<original text from line 2, without the number prefix>",
       "search_term": "<3-8 word search query>",
       "image_expectation": "<15-20 word visual description>",
+      "image_features": "<3-6 concrete visual features, comma-separated>",
       "image_type": "<stock|search>",
       "duration": <3-7 seconds as integer>,
       "loud": false
@@ -53,6 +55,7 @@ Rules:
 - text: The original sentence WITHOUT the number prefix (e.g., "1. " or "2. ")
 - search_term: 2-5 words MAX of a REAL, PHOTOGRAPHABLE subject that an image search would actually return. Use real places, monuments, memorials, battle sites, named historical events, period photos, real equipment, museums, reenactments, maps. NEVER turn a story into keywords ("1,200 km concrete beast" is unusable), NEVER use metaphors/abstract concepts, NEVER lead with numbers instead of the subject. If the moment has no specific real subject, pick a real adjacent generic scene that stock sites have (e.g. "WW2 Russian front winter" not "3.3 million men on the front"). Example: 'Maginot Line' not '1200 km concrete fortifications'; 'Gallipoli 1915 landing' not '400000 troops marched into peninsula'.
 - image_expectation: 12-20 words describing the concrete PHOTOGRAPHIC SUBJECT the camera should see — foreground, setting, mood. It MUST be a real, photographable scene, not a fantasy: no ghosts, holo-overlays, weight bars, or impossible compositions. Describe what an actual photo of this thing looks like.
+- image_features: the SAME subject, but as a CHECKLIST of 3-6 concrete, photographable visual features a photo of it MUST show (subject, key objects, materials, setting). Comma-separated, no prose, no judgement words. NOT "a plane like an F-35"; instead "twin jet engines under wings, grey metal fuselage, cockpit canopy, swept wings". Used to validate candidate photos feature-by-feature.
 - image_type: "search" when a specific named real thing or period photo exists (a monument, battle site, artifact, historical photo). "stock" only for generic atmospheric scenes (snow, fog, empty landscape, flags, crowds) that clearly exist as stock photos
 - duration: How long it takes to speak (3-7 seconds)
 - loud: true ONLY for explosive, dramatic, anger or exclamatory lines that should be SHOUTED (e.g. "they burned them alive!!"). false for normal narration. Default false, and only raise the volume if the sentence genuinely calls for it.
@@ -318,5 +321,8 @@ def build_script(topic: str, raw_data: str, style: dict = None) -> dict:
     # JSON structuring model) — strip it from each line's spoken text.
     for line in script.get("lines", []):
         line["text"] = _strip_ending_filler(line.get("text", "")).strip()
+        if not line.get("image_features"):
+            line["image_features"] = (line.get("image_expectation")
+                                      or line.get("search_term") or "")
 
     return script

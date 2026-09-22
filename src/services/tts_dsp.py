@@ -102,6 +102,85 @@ def _detect_silence_gaps(audio: np.ndarray, sr: int) -> list:
     return gaps
 
 
+def _remove_micro_gaps(audio: np.ndarray, sr: int,
+                       min_gap_ms: float = 8.0, max_gap_ms: float = 52.0) -> np.ndarray:
+    """Bridge the random sub-60ms near-silent dropouts Chatterbox leaves mid-speech.
+
+    The cloned voices occasionally drop out for a few tens of ms mid-sentence
+    (a "millisecond break" that jars the flow). Only tiny quiet runs that are
+    FLANKED BY clearly-voiced audio qualify as dropouts to bridge; quiet regions
+    that touch a big real pause (>max) or an edge are left untouched, so the
+    deliberate punctuation pauses and lead/lead-out pads never move. The bridge
+    KEEPS every speech sample — the region is closed up with a ~2.5ms crossfade
+    at the junction — so timbre, pitch and pacing are otherwise untouched.
+    """
+    if len(audio) < sr // 8 or max_gap_ms <= min_gap_ms:
+        return audio
+    hop = max(1, int(sr * 0.002))  # ~2ms frames for sub-10ms resolution
+    n = len(audio) // hop
+    if n < 4:
+        return audio
+    frame = audio[:n * hop].reshape(n, hop)
+    env = np.sqrt(np.mean(frame ** 2, axis=1) + 1e-12)
+    peak = float(env.max())
+    if peak <= 0:
+        return audio
+    thr = max(peak * 0.02, 0.004)       # "silent" frame
+    voiced_thr = peak * 0.13            # clearly-speaking neighbor
+    active = env > thr
+
+    min_f, max_f = min_gap_ms / 1000 / (hop / sr), max_gap_ms / 1000 / (hop / sr)
+    look = int(0.045 / (hop / sr))      # 45ms neighbor lookaround
+    guard_f = int(0.015 / (hop / sr))   # 15ms clearance from any REAL pause
+
+    # Frames too close to a real (>=60ms) pause: micro-gaps there are just the
+    # ragged edge of a deliberate breath — bridging them would eat the pause.
+    near_big = np.zeros(n, dtype=bool)
+    i = 0
+    while i < n:
+        if not active[i]:
+            j = i
+            while j < n and not active[j]:
+                j += 1
+            if (j - i) * (hop / sr) >= 0.06:
+                lo, hi = max(i - guard_f, 0), min(j + guard_f, n)
+                near_big[lo:hi] = True
+            i = j
+        else:
+            i += 1
+
+    gaps = []
+    i = 0
+    while i < n:
+        if not active[i]:
+            j = i
+            while j < n and not active[j]:
+                j += 1
+            nf = j - i
+            if min_f <= nf <= max_f and not near_big[i:j].any():
+                lo, hi = max(i - look, 0), min(j + look, n)
+                if env[lo:i].max() > voiced_thr and env[j:hi].max() > voiced_thr:
+                    gaps.append((i * hop, j * hop))  # sample-exact [start, end)
+            i = j
+        else:
+            i += 1
+    if not gaps:
+        return audio
+
+    out = audio
+    fade = int(0.0025 * sr)
+    for i0, i1 in reversed(gaps):       # back-to-front keeps earlier indices valid
+        left = out[:i0].astype(np.float32)
+        right = out[i1:].astype(np.float32)
+        if fade and len(left) >= fade and len(right) >= fade:
+            t = np.linspace(0.0, 1.0, fade)
+            left[-fade:] = left[-fade:] * (1 - t) + right[:fade] * t
+            out = np.concatenate([left, right[fade:]])
+        else:
+            out = np.concatenate([left, right])
+    return out
+
+
 def _insert_silence(audio: np.ndarray, sr: int, at_s: float, dur_s: float) -> np.ndarray:
     """Insert `dur_s` seconds of pure silence just before timestamp `at_s`.
 

@@ -21,6 +21,7 @@ from src.services.tts_dsp import (
     _enforce_pauses,
     _finalize,
     _normalize_pacing,
+    _remove_micro_gaps,
     _strip_lead_buffer,
     postprocess_line,
 )
@@ -192,7 +193,8 @@ def _chat_loop(lines: list, voice: dict, audio_dir: str) -> list:
         else:
             combined = np.asarray(wav).squeeze()
 
-        combined = _enforce_pauses(combined.astype(np.float32), sr, synth_text)
+        combined = _remove_micro_gaps(combined.astype(np.float32), sr)
+        combined = _enforce_pauses(combined, sr, synth_text)
         if line.get("is_first") and TTS_LEAD_BUFFER:
             combined = _strip_lead_buffer(combined, sr, TTS_LEAD_BUFFER, synth_text)
         combined = _normalize_pacing(combined, sr, text, params, is_first=line.get("is_first", False))

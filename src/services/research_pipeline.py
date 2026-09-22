@@ -296,38 +296,100 @@ IDEAS_SOURCE_CHARS = 500
 
 
 def _parse_idea_json(raw_out: str) -> list:
-    """Strip fences/prose, grab the JSON array, normalize to idea dicts."""
-    m = re.search(r"\[.*\]", raw_out, re.S)
-    if not m:
-        print(f"    [llm] no JSON in response")
-        return []
-    try:
-        data = json.loads(m.group(0))
-    except Exception:
-        print(f"    [llm] unparseable JSON")
-        return []
+    """Strip fences/prose, grab the JSON array, normalize to idea dicts.
 
-    ideas = []
-    for item in data if isinstance(data, list) else []:
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("title", "")).strip()
-        if not title:
-            continue
-        confidence = 0
+    Prefers the outermost top-level JSON array; falls back to line-by-line JSONL
+    so a TRUNCATED array / interrupted response still yields completed ideas.
+    """
+    if not raw_out:
+        return []
+    raw = raw_out.strip()
+    if raw.startswith("```"):  # strip markdown fences
+        raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
+        raw = re.sub(r"\n?```\s*$", "", raw).strip()
+
+    if raw.startswith("["):
         try:
-            confidence = min(10, max(1, int(item.get("confidence", 5))))
-        except (TypeError, ValueError):
-            confidence = 5
-        ideas.append({
-            "title": title,
-            "hook": str(item.get("hook", "")).strip(),
-            "why_viral": str(item.get("why_viral", "")).strip(),
-            "outline": item.get("outline", []),
-            "source_url": str(item.get("source_url", "")).strip(),
-            "confidence": confidence,
-        })
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return [x for x in (_normalize_idea_item(i) for i in data) if x]
+        except Exception:
+            pass
+    # JSONL first (line-aligned objects) — before the outermost-array scan so an
+    # inner helper array (e.g. "outline": [...]) never shadows real idea objects.
+    ideas = _jsonl_fallback(raw)
+    if ideas:
+        return ideas
+    # Outermost balanced array (model wrapped the array in prose).
+    outer = _outermost_array(raw)
+    if outer:
+        try:
+            data = json.loads(outer)
+            if isinstance(data, list):
+                return [x for x in (_normalize_idea_item(i) for i in data) if x]
+        except Exception:
+            pass
+    return []
+
+
+def _outermost_array(text: str):
+    """Return the OUTERMOST [...] block as a string (ignores inner arrays)."""
+    start = text.find("[")
+    if start < 0:
+        return None
+    depth, i = 0, start
+    while i < len(text):
+        ch = text[i]
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+        i += 1
+    return None
+
+
+def _jsonl_fallback(raw_out: str) -> list:
+    """Parse one JSON object per line when no complete array exists."""
+    ideas = []
+    for line in raw_out.splitlines():
+        line = line.strip()
+        if not (line.startswith("{") or line.startswith("[")):
+            continue
+        for cand in (line, line.rstrip(",")):
+            try:
+                item = json.loads(cand)
+                break
+            except Exception:
+                item = None
+        if isinstance(item, list) and item:
+            item = item[0]
+        idea = _normalize_idea_item(item)
+        if idea:
+            ideas.append(idea)
     return ideas
+
+
+def _normalize_idea_item(item) -> dict:
+    """Coerce one raw JSON dict into a valid idea dict (None if unusable)."""
+    if not isinstance(item, dict):
+        return None
+    title = str(item.get("title", "")).strip()
+    if not title:
+        return None
+    try:
+        confidence = min(10, max(1, int(item.get("confidence", 5))))
+    except (TypeError, ValueError):
+        confidence = 5
+    return {
+        "title": title,
+        "hook": str(item.get("hook", "")).strip(),
+        "why_viral": str(item.get("why_viral", "")).strip(),
+        "outline": item.get("outline", []),
+        "source_url": str(item.get("source_url", "")).strip(),
+        "confidence": confidence,
+    }
 
 
 def _generate_ideas(niche: str, sources: list, max_ideas: int = 10) -> list:
@@ -391,6 +453,149 @@ def _generate_ideas(niche: str, sources: list, max_ideas: int = 10) -> list:
             break
         time.sleep(1.5)
     return ideas[:max_ideas]
+
+
+# ---------------------------------------------------------------- light mode
+#
+# First-principles topic gen: a script is just an interesting combination of
+# sentences, and interestingness comes from how it is WRITTEN (hooks, the
+# writing-style techniques), not from ranking sources to find a "viral idea".
+# So the light path does zero source scraping, zero scoring, zero ranking,
+# zero channel mining: one LLM call per niche proposes titles, we take the
+# FIRST `target` titles we have not already made a video about, and produce.
+
+LIGHT_SUBJECTS = {
+    "iran_360": "the Iran-Iraq war",
+    "iraq_war": "the Iraq War",
+    "vietnam_war": "the Vietnam War",
+    "cold_war": "the Cold War",
+    "war_experiments": "mid-century military science and experiments",
+}
+
+LIGHT_IDEAS_PROMPT = """List documentary video titles about {subject}.
+Titles must be under 70 characters, use strong action verbs, and name specific, real, confirmed events, units, or figures from documented history (no supernatural or tabloid claims). Prefer stories a general audience has not already seen everywhere.
+Return ONLY a JSON array of strings, e.g. ["Title one", "Title two"], and nothing else.
+"""
+
+
+def _parse_titles(raw_out: str) -> list:
+    """Parse a JSON string-array reply (with fences/prose stripped)."""
+    if not raw_out:
+        return []
+    raw = raw_out.strip()
+    raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
+    raw = re.sub(r"\n?```\s*$", "", raw).strip()
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [str(x).strip() for x in data if str(x) and str(x).strip()]
+    except Exception:
+        pass
+    outer = _outermost_array(raw)
+    if outer:
+        try:
+            data = json.loads(outer)
+            if isinstance(data, list):
+                return [str(x).strip() for x in data if str(x) and str(x).strip()]
+        except Exception:
+            pass
+    return []
+
+
+def _propose_topics(niche: str, k: int = 8) -> list:
+    """ONE LLM call for one niche -> list of {"title": ...} candidates."""
+    prompt = LIGHT_IDEAS_PROMPT.format(subject=LIGHT_SUBJECTS.get(niche, niche), k=k)
+    try:
+        raw = call_text([{"role": "user", "content": prompt}],
+                        temperature=0.8, max_tokens=1200)
+    except Exception as e:
+        print(f"    [light] idea call failed for {niche}: {str(e)[:90]}")
+        return []
+    titles = _parse_titles(raw)
+    if not titles:
+        if raw:
+            print(f"    [light] unparseable reply for {niche}: {raw[:120]!r}")
+        else:
+            print(f"    [light] empty reply for {niche}")
+        try:
+            raw = call_text(
+                [{"role": "user", "content": prompt},
+                 {"role": "assistant", "content": raw},
+                 {"role": "user", "content": "Return ONLY a JSON array of strings, nothing else."}],
+                temperature=0.3, max_tokens=1200)
+            titles = _parse_titles(raw)
+            if not titles and raw:
+                print(f"    [light] still unparseable for {niche}: {raw[:120]!r}")
+        except Exception as e:
+            print(f"    [light] repair failed for {niche}: {str(e)[:90]}")
+            return []
+    return [{"title": t} for t in titles]
+
+
+def generate_first_topics(target: int = 2, k_per_niche: int = 8) -> list:
+    """Pick the FIRST `target` topics we haven't already made. No ranking.
+
+    Walks niches in order, one cheap LLM call each for candidate titles, stops
+    as soon as `target` fresh (not-already-made) titles are collected. Writes
+    the same batch_*.json the pipeline reads.
+    """
+    os.makedirs(TOPICS_OUTPUT_DIR, exist_ok=True)
+    used = list(dict.fromkeys(_load_used() + _scan_made_videos()))
+
+    accepted, seen_titles = [], []
+    for niche in NICHES:
+        if len(accepted) >= target:
+            break
+        print(f"\n=== {niche} ===")
+        proposals = _propose_topics(niche, k=max(k_per_niche, target))
+        fresh = 0
+        for prop in proposals:
+            if len(accepted) >= target:
+                break
+            title = prop["title"]
+            if _is_duplicate(title, used + seen_titles, fuzzy=True):
+                print(f"  skip (already made): {title}")
+                continue
+            vetted = _vet_idea({**prop, "title": title})
+            if vetted is None:
+                print(f"  skip (vet-block): {title}")
+                continue
+            accepted.append({
+                "title": title,
+                "hook": title,
+                "category": niche,
+                "angle": vetted["angle"],
+                "source_urls": [],
+                "summary": title,
+                "content": f"{title}\n(story researched on demand at script time)",
+                "novelty_score": 50,
+                "est_video_length_min": 3,
+                "source": f"research:first:{niche}",
+                "score": 50,
+                "upvote_ratio": 1.0,
+                "confidence": 5,
+                "outline": [],
+            })
+            seen_titles.append(title)
+            fresh += 1
+        print(f"  +{fresh} fresh (total {len(accepted)}/{target})")
+
+    if not accepted:
+        print("\n  No fresh topics — run the deep research pipeline instead.\n")
+        return []
+
+    print(f"\nSelected {len(accepted)} topics:")
+    for i, t in enumerate(accepted, 1):
+        print(f"{i:2d}. [{t['category'][:16]:16} |{t.get('angle','?'):>8}] {t['title']}")
+
+    batch_file = os.path.join(
+        TOPICS_OUTPUT_DIR, f"batch_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    )
+    with open(batch_file, "w") as f:
+        json.dump(accepted, f, indent=2)
+    print(f"\nQueue saved to {batch_file}")
+
+    return accepted
 
 
 # ---------------------------------------------------------------- scoring

@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Cloudflare Workers AI (primary LLM)
+# Cloudflare Workers AI (last-resort LLM)
 CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "")
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 # Primary TEXT model (script gen / JSON structuring). llama-3.3-70b-instruct
@@ -12,27 +12,35 @@ CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 # and its viral-shorts output is stronger (measured: 8.2s vs 16.1s+ on the same
 # Arnold-style prompt).
 CLOUDFLARE_MODEL = os.getenv("CLOUDFLARE_MODEL", "@cf/meta/llama-3.3-70b-instruct-fp8-fast")
-# Vision model for image verify/refine. This is the hot path (every candidate
-# image) — llama-4-scout-17b is ~5x faster than gemma-4-26b on vision tasks
-# while returning correct per-image verdicts, so multi-image batches complete
-# in ~1s instead of ~4.5s.
-CLOUDFLARE_VISION_MODEL = os.getenv("CLOUDFLARE_VISION_MODEL", "@cf/meta/llama-4-scout-17b-16e-instruct")
 
-# Groq settings (secondary)
+# Groq settings (secondary) — 3 keys: rotate on failure, fall back to Gemini
+# when all three are exhausted.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_API_KEY_BACKUP = os.getenv("GROQ_API_KEY_BACKUP")  # Backup key for rate limits
+GROQ_API_KEY_SECOND = os.getenv("GROQ_API_KEY_SECOND")
+GROQ_API_KEY_THIRD = os.getenv("GROQ_API_KEY_THIRD")
+GROQ_API_KEY_BACKUP = os.getenv("GROQ_API_KEY_BACKUP")  # Legacy alias
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
-GROQ_MODEL = "qwen/qwen3.8-27b"
-GROQ_VISION_MODEL = "qwen/qwen3.8-27b"
+# TEXT model (script/research): gpt-oss-20b is a fast, standard service model.
+# gpt-oss-120b returns empty completions on this Groq org, so it is avoided
+# (the retry chain now treats empty content as a failure and rotates keys).
+GROQ_MODEL = "openai/gpt-oss-20b"
 
 # Ollama settings
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "minimax-m3:cloud")
 
-# Gemini (topic generation). Flash is the free-tier workhorse (~15 RPM,
-# ~1500 RPD) — plenty for a handful of brainstorm calls per day.
+# Gemini (topic generation + final fallback after the 3 Groq keys).
+# Flash is the free-tier workhorse (~15 RPM, ~1500 RPD) — plenty for a
+# handful of brainstorm calls per day. Rotated in key order ONE..FIVE.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_KEYS = []
+for _k in ("GEMINI_API_KEY_ONE", "GEMINI_API_KEY_TWO", "GEMINI_API_KEY_THREE",
+           "GEMINI_API_KEY_FOUR", "GEMINI_API_KEY_FIVE"):
+    if os.getenv(_k):
+        GEMINI_KEYS.append(os.getenv(_k))
+if GEMINI_API_KEY and GEMINI_API_KEY not in GEMINI_KEYS:
+    GEMINI_KEYS.append(GEMINI_API_KEY)
 
 VIDEO_FORMAT = "9:16"         # "9:16" for Shorts/Reels, "16:9" for YouTube
 VIDEO_STYLE = "attraction"    # educational | motivational | ad | storytelling | attraction
@@ -77,11 +85,16 @@ ASSET_MAX_PARALLEL_WORKERS = int(os.getenv("ASSET_MAX_PARALLEL_WORKERS", "8"))
 ASSET_IMAGES_PER_LINE = int(os.getenv("ASSET_IMAGES_PER_LINE", "3"))
 ASSET_MAX_REFINE_ATTEMPTS = int(os.getenv("ASSET_MAX_REFINE_ATTEMPTS", "4"))
 ASSET_MAX_ASPECT_RATIO = float(os.getenv("ASSET_MAX_ASPECT_RATIO", "1.5"))
-# Min seconds between vision LLM calls (image verify/refine). Kept as a light
-# throttle: verification is now batched (all candidates per line in ONE call)
-# and cached by content hash, so far fewer calls happen. Cloudflare Workers AI
-# (primary vision provider) tolerates ~1s spacing comfortably.
-ASSET_VERIFY_MIN_INTERVAL = float(os.getenv("ASSET_VERIFY_MIN_INTERVAL", "1.0"))
+# Topic-first asset strategy: per-line search queries from the query agent, keep
+# at least MIN OCR-clean images, then assign them to lines (multi per line ok).
+ASSET_TARGET_IMAGES = int(os.getenv("ASSET_TARGET_IMAGES", "6"))
+ASSET_MIN_IMAGES = int(os.getenv("ASSET_MIN_IMAGES", "4"))
+# Deterministic text-overlay slop filter (pytesseract OCR, no LLM): reject any
+# image whose readable text covers more than ASSET_MAX_TEXT_AREA fraction of its
+# area (photos with captions/memes/watermark blocks - not tiny credit marks).
+ASSET_REJECT_TEXT_OVERLAY = os.getenv("ASSET_REJECT_TEXT_OVERLAY", "1") == "1"
+ASSET_MAX_TEXT_AREA = float(os.getenv("ASSET_MAX_TEXT_AREA", "0.04"))
+ASSET_TEXT_MIN_CONF = int(os.getenv("ASSET_TEXT_MIN_CONF", "50"))
 
 # --- Captions / subtitles ---
 # Styled word-by-word "karaoke" captions burned into the frames (matches the
