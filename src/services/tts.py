@@ -159,6 +159,9 @@ def _chat_loop(lines: list, voice: dict, audio_dir: str) -> list:
     exaggeration = params.get("exaggeration", 0.5)
     cfg_weight = params.get("cfg_weight", 0.5)
     temperature = params.get("temperature", 0.8)
+    repetition_penalty = params.get("repetition_penalty", 1.2)
+    min_p = params.get("min_p", 0.05)
+    top_p = params.get("top_p", 1.0)
     pitch_shift = params.get("pitch_shift", 0.0)
 
     _prep_chat_conds(model, voice)  # no-op if this process already prepared
@@ -185,6 +188,9 @@ def _chat_loop(lines: list, voice: dict, audio_dir: str) -> list:
             exaggeration=exaggeration,
             cfg_weight=cfg_weight,
             temperature=temperature,
+            repetition_penalty=repetition_penalty,
+            min_p=min_p,
+            top_p=top_p,
         )
 
         if hasattr(wav, 'numpy'):

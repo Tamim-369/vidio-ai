@@ -40,9 +40,25 @@ VOICES = {
         "name": "Arnold Schwarzenegger",
         "engine": "chatterbox",
         "ref_audio": "src/voices_to_clone/candidates/arnold-schwarzenegger/arnold-schwarzenegger_ref.wav",
-        # Lower exaggeration + temperature → emotional but consistent, no random
-        # angry swings between lines; loud peaks come from the TTS loud flag.
-        "params": {"exaggeration": 0.65, "cfg_weight": 0.7, "temperature": 0.72, "gain": 1.02,
+        # Measured sweeps (word-end pitch droop + identity drift on 24k ref):
+        # final pick = exag 0.65 / cfg 0.9 / temp 0.55 with a 72s ref of 37 clean
+        # vocals-stem segments. cfg 0.85–0.9 anchors identity through line ends;
+        # temp 0.5–0.55 keeps the delivery steady without robotic monotone.
+        "params": {"exaggeration": 0.65, "cfg_weight": 0.9, "temperature": 0.55, "gain": 1.02,
+                   "repetition_penalty": 1.2, "min_p": 0.05, "top_p": 1.0,
+                   "speed": 1.0},
+        "writing_style": "arnold",
+        "enabled": True,
+    },
+
+    "andrew-tate": {
+        "name": "Andrew Tate",
+        "engine": "chatterbox",
+        "ref_audio": "src/voices_to_clone/candidates/andrew-tate/andrew-tate_ref.wav",
+        # A/B selected: prime 103.5–114.0s (119Hz conversational register).
+        # Mod-low temp keeps the aggro-but-composed take. Script style = Arnold's.
+        "params": {"exaggeration": 0.65, "cfg_weight": 0.85, "temperature": 0.55, "gain": 1.02,
+                   "repetition_penalty": 1.2, "min_p": 0.05, "top_p": 1.0,
                    "speed": 1.0},
         "writing_style": "arnold",
         "enabled": True,
