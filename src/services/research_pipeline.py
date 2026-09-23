@@ -16,7 +16,7 @@ import os
 import re
 import time
 
-from src.services.llm import call_text
+from src.services.script_lab.llm import _local as _llm
 from src.services.topic_generator import (
     _load_used,
     _scan_made_videos,
@@ -413,11 +413,7 @@ def _generate_ideas(niche: str, sources: list, max_ideas: int = 10) -> list:
             niche=NICHES[niche]["prompt"], raw=raw
         )
         try:
-            raw_out = call_text(
-                [{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=2000,  # Ensure enough budget for JSON array output
-            )
+            raw_out = _llm(prompt, temperature=0.7, tag="research")
         except Exception as e:
             print(f"    [llm] chunk {start//IDEAS_CHUNK_SOURCES + 1} failed: {str(e)[:80]}")
             continue
@@ -430,14 +426,10 @@ def _generate_ideas(niche: str, sources: list, max_ideas: int = 10) -> list:
                 "matching the schema exactly. No prose, no markdown fences."
             )
             try:
-                raw_out = call_text(
-                    [
-                        {"role": "user", "content": prompt},
-                        {"role": "assistant", "content": raw_out},
-                        {"role": "user", "content": repair_prompt},
-                    ],
+                raw_out = _llm(
+                    f"{prompt}\n\n(previous response: {raw_out[:800]})\n{repair_prompt}",
                     temperature=0.3,  # Lower temp for structured repair
-                    max_tokens=2000,
+                    tag="research",
                 )
                 parsed = _parse_idea_json(raw_out)
             except Exception as e:
@@ -506,8 +498,7 @@ def _propose_topics(niche: str, k: int = 8) -> list:
     """ONE LLM call for one niche -> list of {"title": ...} candidates."""
     prompt = LIGHT_IDEAS_PROMPT.format(subject=LIGHT_SUBJECTS.get(niche, niche), k=k)
     try:
-        raw = call_text([{"role": "user", "content": prompt}],
-                        temperature=0.8, max_tokens=1200)
+        raw = _llm(prompt, temperature=0.8, tag="research")
     except Exception as e:
         print(f"    [light] idea call failed for {niche}: {str(e)[:90]}")
         return []
@@ -518,11 +509,11 @@ def _propose_topics(niche: str, k: int = 8) -> list:
         else:
             print(f"    [light] empty reply for {niche}")
         try:
-            raw = call_text(
-                [{"role": "user", "content": prompt},
-                 {"role": "assistant", "content": raw},
-                 {"role": "user", "content": "Return ONLY a JSON array of strings, nothing else."}],
-                temperature=0.3, max_tokens=1200)
+            raw = _llm(
+                f"{prompt}\n\n(previous response: {raw[:800]})\nReturn ONLY a JSON array of strings, nothing else.",
+                temperature=0.3,
+                tag="research",
+            )
             titles = _parse_titles(raw)
             if not titles and raw:
                 print(f"    [light] still unparseable for {niche}: {raw[:120]!r}")

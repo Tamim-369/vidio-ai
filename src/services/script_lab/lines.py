@@ -31,11 +31,27 @@ def to_lines(prose: str) -> list[dict]:
         ln = dict(lines[i])
         while ln["text"].endswith(":") and i + 1 < len(lines):  # label dropped its sentence
             i += 1
-            ln["text"] = ln["text"] + " " + (lines[i].get("text") or "").strip()
-            ln["beat"] = lines[i].get("beat", ln.get("beat"))
+            tail = _text_of(lines[i].get("text"))
+            ln["text"] = ln["text"] + " " + tail if tail else ln["text"]
+            ln["beat"] = _text_of(lines[i].get("beat")) or ln.get("beat")
         merged.append(ln)
         i += 1
     return merged
+
+
+def _text_of(v) -> str:
+    """Flatten any model-provided field to a trimmed string (never crashes)."""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, list):
+        return " ".join(p for p in (_text_of(x) for x in v) if p).strip()
+    if isinstance(v, dict):
+        return _text_of(next((v[k] for k in ("text", "value", "beat") if k in v), ""))
+    return str(v).strip()
 
 
 def _parse_lines(out: str) -> list[dict]:
@@ -48,12 +64,16 @@ def _parse_lines(out: str) -> list[dict]:
         lines = lines[0]
     out_list = []
     for ln in lines:
-        if isinstance(ln, dict) and ln.get("text"):
-            ln = dict(ln)
-            ln["text"] = (ln.get("text") or "").strip()
-            ln.setdefault("beat", "setup")
-            ln.setdefault("tone", "normal")
-            out_list.append(ln)
+        if not isinstance(ln, dict):
+            continue
+        text = _text_of(ln.get("text"))
+        if not text:
+            continue
+        ln = dict(ln)
+        ln["text"] = text
+        ln["beat"] = _text_of(ln.get("beat")) or "setup"
+        ln["tone"] = _text_of(ln.get("tone")) or "normal"
+        out_list.append(ln)
     if not out_list:
         raise ValueError(f"json stage: no usable line objects: {out[:160]!r}")
     return out_list

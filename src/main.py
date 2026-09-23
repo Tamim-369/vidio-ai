@@ -1,5 +1,6 @@
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -12,7 +13,6 @@ from src.services.video_assembler import assemble
 from src.services.youtube_upload import publish_video
 from src.services import voice_manager
 from src.services.script_lab import build_lab_script, theme_for_style
-from src.services.script_builder import build_script as _build_script_cloud
 
 
 def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: str = ""):
@@ -27,6 +27,9 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
     if publish is None:
         publish = True
 
+    t0 = time.monotonic()
+    timing = {}
+
     voice_id, voice_cfg = voice_manager.pick_voice(preferred=voice)
     style = voice_manager.get_writing_style(voice_id, voice_cfg)
     print(f"\n🗣️  Voice: {voice_cfg['name']} ({voice_id}) — style: {style['name']}")
@@ -38,8 +41,10 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
     else:
         print(f"\n🔍 Researching: {topic}")
         raw_data = research(topic)
+    timing["research"] = time.monotonic() - t0
 
-    print(f"\n📝 Building script...")
+    print(f"\n📝 Building script (100% local, Ollama phi4-mini)...")
+    t = time.monotonic()
     try:
         script = build_lab_script(
             topic,
@@ -47,29 +52,44 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
             theme=theme_for_style(style),
         )
     except Exception as e:
-        print(f"   ⚠️  Local script lab failed ({str(e)[:120]}) — falling back to cloud build_script")
-        script = _build_script_cloud(topic, raw_data, style=style)
+        print(f"   ❌ Local script lab failed: {e}")
+        raise
     print(f"   {len(script['lines'])} lines generated")
+    timing["script"] = time.monotonic() - t
 
     print(f"\n🖼️  Fetching images...")
+    t = time.monotonic()
     script["lines"] = fetch_assets(script["lines"], topic=topic)
+    timing["assets"] = time.monotonic() - t
 
     print(f"\n🎙️  Generating voiceover...")
+    t = time.monotonic()
     script["lines"] = generate_audio(script["lines"], voice=voice_cfg)
+    timing["audio"] = time.monotonic() - t
 
     print(f"\n🎬 Assembling video...")
+    t = time.monotonic()
     output = assemble(script)
+    timing["assemble"] = time.monotonic() - t
 
     # Record the topic as done so it is never regenerated (fuzzy + exact dedup).
     from src.services.topic_generator import record_made_video
     record_made_video(topic)
 
     if publish:
+        t = time.monotonic()
         publish_video(output, script["topic"], script)
+        timing["publish"] = time.monotonic() - t
     else:
         print("\n⏭️  Skipping YouTube upload (pass --no-upload to keep it local)")
 
     cleanup_temp()
+    timing["total"] = time.monotonic() - t0
+    parts = "  ".join(
+        f"{k}={f'{v/60:.1f}m' if v >= 120 else f'{v:.0f}s'}"
+        for k, v in timing.items() if v > 0
+    )
+    print(f"\n⏱️  Build time: {parts}")
     print(f"\n✅ Done! Video saved to: {output}\n")
     return output
 
@@ -99,8 +119,17 @@ def run_batch(generate: bool = True, limit: int = 100, target: int = 24, publish
     from src.services.topic_generator import load_latest_topics
 
     if generate:
-        print(f"\n🎯 Grabbing first {target} fresh topic(s)...")
-        topics = generate_first_topics(target=target)
+        print(f"\n🎯 Topic agent: picking {target} fresh topic(s)...")
+        try:
+            from src.services.topic_agent.agent import run_topic_agent
+
+            topics = run_topic_agent(target=target)
+        except Exception as e:
+            print(f"⚠️  Topic agent failed ({e}) — falling back")
+            topics = []
+        if not topics:
+            print("Topic agent empty — falling back to light idea pass")
+            topics = generate_first_topics(target=target)
         if not topics:
             print("Light idea pass empty — falling back to deep research pipeline")
             topics = run_research_pipeline(target=target)
@@ -115,14 +144,24 @@ def run_batch(generate: bool = True, limit: int = 100, target: int = 24, publish
     voice_manager.list_voices()
 
     print(f"\n🎬 Processing {len(topics)} topics...")
+    batch_t0 = time.monotonic()
+    per_video = []
     for i, topic in enumerate(topics, 1):
         print(f"\n{'=' * 60}\n[{i}/{len(topics)}] {topic['title']}")
+        v_t0 = time.monotonic()
         try:
             # Round-robin across enabled voices: trim → arnold → trim → arnold...
             vid, _ = voice_manager.pick_voice(preferred=voice)
             create_video_from_topic(topic, publish=publish, voice=vid)
         except Exception as e:
             print(f"❌ Failed on topic {i}: {e}")
+        per_video.append((topic["title"], time.monotonic() - v_t0))
+
+    batch_el = time.monotonic() - batch_t0
+    print(f"\n{'=' * 60}\n⏱️  Batch: {batch_el/60:.1f}m total across {len(per_video)} topic(s)")
+    for title, dt in per_video:
+        print(f"    {dt/60:5.1f}m  {title[:64]}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

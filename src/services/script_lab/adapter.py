@@ -7,7 +7,9 @@ maps a voice writing-style dict onto a supported theme.
 """
 from __future__ import annotations
 
+from src.services.script_lab.lines import _text_of
 from src.services.script_lab.pipeline import run_pipeline
+from src.services.script_lab.queries import _coerce
 
 
 def theme_for_style(style: dict | None) -> str:
@@ -39,11 +41,11 @@ def build_lab_script(topic: str, story: str, theme: str = "") -> dict:
 
     lines = []
     for i, ln in enumerate(result["lines"], 1):
-        queries = list(ln.get("queries") or [])
-        text = (ln.get("text") or "").strip()
+        queries = _coerce(ln.get("queries"))
+        text = _text_of(ln.get("text"))
         features = " ".join(queries) or text
-        beat = ln.get("beat") or ("hook" if i == 1 else "closer" if i == len(result["lines"]) else "setup")
-        tone = ln.get("tone") or "normal"
+        beat = _text_of(ln.get("beat")) or ("hook" if i == 1 else "closer" if i == len(result["lines"]) else "setup")
+        tone = _text_of(ln.get("tone")) or "normal"
         lines.append({
             "id": i,
             "text": text,

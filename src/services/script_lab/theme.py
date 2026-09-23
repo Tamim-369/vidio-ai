@@ -22,6 +22,39 @@ from src.services.script_lab.numbers import (
 from src.services.script_lab.text import _count_sentences, _render
 
 
+def _shingles(text: str) -> set:
+    """Lowercased word bigrams + trigrams: the unit we compare for 'does this
+    line repeat an earlier line's phrasing?' 2+3-grams catch short recycled
+    chunks ("over two thousand", "a huge failure") in otherwise diverging lines.
+    """
+    words = re.findall(r"[a-z0-9']+", (text or "").lower())
+    if len(words) < 2:
+        return set(words)
+    bigrams = {" ".join(t) for t in zip(words, words[1:])}
+    if len(words) < 3:
+        return bigrams
+    trigrams = {" ".join(t) for t in zip(words, words[1:], words[2:])}
+    return bigrams | trigrams
+
+
+def _echo_overlap(line: str, prior: list) -> float:
+    """Best Jaccard-like trigram overlap of `line` against any already-voiced
+    line (normalized by the shorter set). 0.0 if there is nothing to compare.
+    """
+    if not prior:
+        return 0.0
+    a = _shingles(line)
+    if not a:
+        return 0.0
+    best = 0.0
+    for p in prior:
+        b = _shingles(p)
+        if not b:
+            continue
+        best = max(best, len(a & b) / min(len(a), len(b)))
+    return best
+
+
 def apply_theme(prose: str, theme: str, facts: list[dict] | None = None) -> str:
     if theme not in THEMES:
         return prose
@@ -70,6 +103,19 @@ def apply_theme(prose: str, theme: str, facts: list[dict] | None = None) -> str:
                 frag = re.split(r"(?<=[.!?])\s+", out.strip())
                 out = " ".join(frag[:2])
         line = out.strip()
+        if _echo_overlap(line, re_voiced) >= 0.4:
+            print(f"    [theme] line {i+1} repeats an earlier line's phrasing - dedup retry")
+            fresh = _local(
+                prompt
+                + "\n\nYour line nearly repeats an earlier line's phrasing. Rewrite COMPLETELY - "
+                "new words, no recycled filler, keep THIS line's facts and numbers.",
+                temperature=0.3, tag="theme", repeat_penalty=1.3,
+            ).strip()
+            if fresh and _numbers_survived(s, fresh, fact_need):
+                frag = re.split(r"(?<=[.!?])\s+", fresh.strip())
+                if len(frag) > 2:
+                    fresh = " ".join(frag[:2])
+                line = fresh.strip()
         re_voiced.append(line)
     themed = "\n".join(re_voiced)
     got = _count_sentences(themed)

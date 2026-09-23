@@ -27,6 +27,11 @@ urllib3
 ddgs
 wikipedia
 
+# --- Topic agent scraping (src/services/topic_agent/) ---
+beautifulsoup4    # HTML index/scrape parsing
+lxml              # strict XML/RSS/Atom parse via bs4 "xml" parser
+feedparser        # optional: pleasant RSS/Atom parsing; agent uses stdlib+bs4 today
+
 # --- LLM APIs (src/services/llm.py, topic_generator.py) ---
 groq
 ollama

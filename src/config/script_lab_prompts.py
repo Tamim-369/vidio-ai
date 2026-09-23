@@ -31,12 +31,12 @@ STORY:
 
 ANGLE_PROMPT = """Read the facts below and find the story's ENGINE before writing anything. You are planning ONLY - no prose, no sentences for the video yet.
 
-Answer exactly:
-- "reversal": the surprising gap at the heart of the story, in one short clause with no numbers ("a tiny crew made a superpower see an army that was not there").
-- "fooled": who believed what - one short clause ("the Germans believed they faced an army of 30,000").
+Answer exactly, in your own words - never copy or rearrange the wording of these instructions:
+- "reversal": the surprising gap at the heart of the story, in one short clause with no numbers.
+- "fooled": who believed what - one short clause.
 - "hook_ticket": the single most shocking thing a first sentence could state that is 100% true per the facts (one short clause).
-- "contrast_pairs": exactly 3 number/twist contrasts ordered so the third is the most damning, e.g. ["1,100 men vs a vision of 30,000", "...", "..."].
-- "beat_order": 4 to 7 short rising-tension labels for the scenes, the last one the reveal, e.g. ["open on the leap of faith", "show the tiny crew", "climax on the believed army", "reveal smoke and cloth"].
+- "contrast_pairs": exactly 3 number/twist contrasts ordered so the third is the most damning.
+- "beat_order": 4 to 7 short rising-tension labels for the scenes, the last one the reveal.
 
 Return ONLY JSON:
 {{
@@ -46,16 +46,16 @@ Return ONLY JSON:
   "contrast_pairs": ["...", "...", "..."],
   "beat_order": ["...", "...", "..."]
 }}
-No markdown, no prose.
+No markdown, no prose. All five fields come from the FACTS below, nothing else.
 
 FACTS:
 {facts}"""
 
-GOLD_PATTERNS = """GOLD PATTERNS TO IMITATE (imitate the FORM, never reuse the topic or any example's wording)
-- Hook: "Imagine an army that didn't exist. It fooled an entire nation." / "The safest ship ever built sank on its maiden voyage."
-- Number-kill beat: "1,100 men. Germany saw 30,000." - two numbers, no filler, the gap IS the sentence.
-- Escalation beat: a short image first, then the scale that makes it terrifying: "Inflatable tanks in the dark. From 500 yards, they were real."
-- Closer: a question that makes someone type in the comments: "What else is out there we are not being told?" - exactly ONE question line, never a stack."""
+GOLD_PATTERNS = """GOLD PATTERNS TO IMITATE (only the SHAPE these recipes describe - the words are forbidden; never reprint an example, never reuse their topics)
+- Hook: one flat, specific, surprising image or number from the facts, stated like a plain verdict. No greeting, no throat-clearing.
+- Number-kill beat: exactly TWO numbers side by side with no filler words - the gap between them IS the sentence.
+- Escalation beat: a small, concrete image first, then the scale that makes it terrifying.
+- Closer: exactly ONE question that points back at the hook, OR the reveal made flat. Never a stack of questions."""
 
 STORY_PROMPT = """Write a short spoken narration for a faceless war-story video. A viewer is mid-scroll with their thumb 3 cm from the next video - the first sentence decides whether they stop. Your job is to make them stop and keep them watching.
 
@@ -71,7 +71,8 @@ RULES
 - One sentence per line. 8 to 12 lines total - never fewer than 8, never more than 12. Every sentence is one short, spoken thought (3-7 seconds when read aloud).
 - The NARRATOR VOICE is a confident, slightly unhinged war-storyteller who talks like a real person, never like Wikipedia.
 - LINE 1 is the hook: one specific, surprising image or number built from the hook ticket. Never a greeting, never "today we will", never "did you know", never a calm fact. Create an open loop immediately.
-- Use the EXACT numbers from the facts. The number is the story - never "lots of them", "countless", "half the army", "thousands" when the real figure is known. Feature TWO big numbers close together at least once (the contrast beats are the scene).
+- Use the EXACT numbers from the facts, WRITTEN AS DIGITS ("2,000", "70") - never spelled out ("two thousand", "seventy"), never "lots of them", "countless", "half the army", "thousands" when the real figure is known. Feature TWO big numbers close together at least once (the contrast beats are the scene).
+- EACH NUMBER AT MOST ONCE: never repeat a number that an earlier sentence already used. Spread the facts across the script so every sentence adds something the audience has not heard yet - repeated figures ("over two thousand" over and over) read as broken filler. The hook may state the biggest number first, and the closer may reference it once more - that is the only allowed echo.
 - Short, staccato beats for quiet moments. One line can carry the biggest moment with caps or "!!" (AT MOST one line).
 - FINAL LINE: the closer. Use the contrast-pair reveal or one earned question that points back at the hook. AT MOST ONE question line in the whole script - a stack of questions is a fail. Do not invent a threat the facts never established.
 - ABSOLUTE RULE: do not invent ANY fact, number, place, event, or twist that is not in the FACTS list - including inside the hook and the closer. Every sentence must trace back to the facts.
@@ -82,6 +83,35 @@ FACTS:
 {facts}
 
 Output ONLY the narration: one sentence per line, no numbering, no headings, no JSON, no explanations."""
+
+# Per-beat story generation: one bounded call per beat. A small local model
+# compresses a whole-story ask into 1-2 sentences; writing beat-by-beat (like
+# the theme stage) gives a deterministically long, fact-spread narration.
+STORY_BEAT_PROMPT = """You are writing a faceless war-story video, ONE sentence at a time. Write EXACTLY ONE short spoken sentence (3-7 seconds when read aloud) for the beat named below. A viewer is mid-scroll - the opening sentence decides whether they stop.
+
+VOICE: a confident, slightly unhinged war-storyteller who talks like a real person, never like Wikipedia.
+
+STORY FRAME (the engine of the whole script - every sentence serves it):
+- REVERSAL: {reversal_hint}
+- FOOLED: {fooled_hint}
+
+BEAT YOU ARE WRITING: {beat}. {first_flag}
+
+FACTS:
+{facts}
+
+PREVIOUS SENTENCES (already written - continue the story, do not repeat what they said):
+{prior}
+
+REQUIREMENTS
+- Exactly ONE sentence. Short and concrete - one clear image or number.
+- Write fact numbers AS DIGITS ("2,000", "70"), never spelled out.
+- {demand}
+- Do not invent ANY fact, number, place, or date that is not in the FACTS.
+- Do not repeat any number that already appears in PREVIOUS SENTENCES.
+- {closer_rule}
+
+Output ONLY the single sentence. No labels, no quotes, no JSON, no explanations."""
 
 # ---------------------------------------------------------------- 3. theme
 #
@@ -114,7 +144,8 @@ STRICT
 - Keep THIS sentence's facts and numbers EXACTLY. Never add an outcome (won, lost, infiltrated, failed) the sentence does not show.
 - Output EXACTLY ONE sentence - one period, question mark, or exclamation at the end. Never two sentences.
 - Never bend a catchphrase into a lie about the facts.
-- Never say "okay" or "ok". Never gym or bodybuilding language."""
+- Never say "okay" or "ok". Never gym or bodybuilding language.
+- NO REPEATING YOURSELF: every line of the narration must sound new. Never reuse a phrase (e.g. "wasn't even close", "perpetual war", "across borders", "scars on...") that any earlier line already used, and never restate a fact as filler."""
 
 _TRUMP_BLOCK = """Re-voice ONE narration sentence so it sounds like DONALD TRUMP: a bragging storyteller ranking a huge failure.
 
@@ -139,7 +170,8 @@ STRICT
 - Keep THIS sentence's facts and numbers EXACTLY. Never add an outcome (won, lost, infiltrated, failed) the sentence does not show.
 - Output EXACTLY ONE sentence - one period, question mark, or exclamation at the end. Never two sentences.
 - Never bend a catchphrase into a lie about the facts.
-- Never say "okay" or "ok". Catchphrases at most once per line."""
+- Never say "okay" or "ok". Catchphrases at most once per line.
+- NO REPEATING YOURSELF: every line of the narration must sound new. Never reuse a phrase (e.g. "believe me", "wasn't even close", "perpetual war", "across borders", "scars on...") that any earlier line already used, and never restate a fact as filler."""
 
 THEME_LINE_PROMPT = """Re-voice the narration sentence below in the given voice. Output ONLY the re-voiced sentence(s).
 

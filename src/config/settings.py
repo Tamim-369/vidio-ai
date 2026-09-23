@@ -80,6 +80,12 @@ TTS_MAX_WPS = float(os.getenv("TTS_MAX_WPS", "3.4"))
 # is needed. An audible buffer word would leak "okay".
 TTS_LEAD_BUFFER = os.getenv("TTS_LEAD_BUFFER", "")
 
+# Chatterbox flow-matching integration steps. The S3Gen vocoder defaults to 10;
+# at 10 the mel is undersampled and fine voices (Trump) break pitch — single-frame
+# f0 jumps of 100->150 Hz read as "voice cracks". Higher steps integrate the flow
+# more finely (smoother mel) at linear compute cost. 10 = model default.
+TTS_CFM_STEPS = int(os.getenv("TTS_CFM_STEPS", "10"))
+
 # --- Asset fetching ---
 ASSET_MAX_PARALLEL_WORKERS = int(os.getenv("ASSET_MAX_PARALLEL_WORKERS", "8"))
 ASSET_IMAGES_PER_LINE = int(os.getenv("ASSET_IMAGES_PER_LINE", "3"))

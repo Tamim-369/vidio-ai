@@ -4,8 +4,8 @@
 Instead of re-running the whole main pipeline (research + LLM script gen +
 asset fetch + upload), each voice test file:
 
-1. GENERATES its test script ONCE with the real script generator
-   (src/services/script_builder.build_script + the voice's writing style) and
+1. GENERATES its test script ONCE with the local script lab
+   (src/services/script_lab.build_lab_script + the voice's theme) and
    saves it (plus images, when fetched) into this folder.
 2. On every later run, REUSES the cached script so only TTS rendering
    (chatterbox) and video assembly run — no research, no LLM, no downloads.
@@ -37,7 +37,7 @@ sys.path.insert(0, str(_ROOT))
 from src.config.voices import get_voice
 from src.config.writing_styles import get_style
 from src.services.data_source import research
-from src.services.script_builder import build_script
+from src.services.script_lab import build_lab_script, theme_for_style
 from src.services.asset_fetcher import fetch_assets
 from src.services.tts import generate_audio, _clean_text
 from src.services.video_assembler import assemble
@@ -161,8 +161,12 @@ def generate_script(voice_id: str, topic: str, fetch_images: bool = False) -> di
     print(f"\n🔍 Researching: {topic}")
     raw_data = research(topic)
 
-    print("\n📝 Building script (LLM)...")
-    script = build_script(topic, raw_data, style=style)
+    print("\n📝 Building script (local Ollama script lab)...")
+    script = build_lab_script(
+        topic,
+        str(raw_data or ""),
+        theme=theme_for_style(style),
+    )
     script.setdefault("topic", topic)
     print(f"   {len(script['lines'])} lines generated")
 
@@ -195,7 +199,7 @@ def _audio_cache(script: dict, voice_id: str, force: bool = False) -> None:
     """
     import soundfile as sf
 
-    POST_VERSION = "11"  # pacing post-processing fully removed; key now includes params/ref_audio + lead-buffer marker
+    POST_VERSION = "12"  # watermark disabled + _declick crackle removal added
 
     _, _, audio_dir, _ = _voice_paths(voice_id)
     audio_dir.mkdir(parents=True, exist_ok=True)

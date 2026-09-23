@@ -1,14 +1,19 @@
 """Query Agent: turns script lines into precise, on-topic image search queries.
 
-Separate LLM pass after script generation. Reads the whole script + topic,
+Separate LOCAL pass after script generation. Reads the whole script + topic,
 applies the image-search query rules below, and returns, for EVERY line, a
 handful of ready-to-search query strings. The prompt is written like a lesson
 plan so the model builds each query step by step instead of guessing.
+
+Runs on the local model (Ollama via the staged lab's `_local`) — the full
+lesson-plan prompt is kept verbatim; only the provider changed from Groq/Gemini
+to local. If the local model is down, per-line `search_term`/narration text is
+the fallback so asset fetching never blocks.
 """
 import json
 import re
 
-from src.services.llm import call_text
+from src.services.script_lab.llm import _local
 
 QUERIES_PER_LINE = 5
 MAX_LINES = 40
@@ -119,6 +124,41 @@ air-defense missiles" looks like:
 """
 
 
+def _strip_thinking_tags(text: str) -> str:
+    text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL)
+    text = re.sub(r"\s*thinking\s*\n", "", text)
+    return text.strip()
+
+
+def _extract_queries(raw: str, line_ids: list) -> dict:
+    """Robustly pull {line_id: [query, ...]} out of a local model reply.
+
+    The small local model frequently writes its own escaped-quote scheme
+    (``""phrase""`` instead of ``"phrase"``) and empty placeholder strings. We
+    collapse runs of quotes to a single quote and then scan ``"line": [...]``
+    buckets with a tolerant pattern, so malformed bits just drop out instead of
+    failing the whole pass. Real queries always survive; empties are filtered
+    by the caller.
+    """
+    block = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+    if not block:
+        return {}
+    block = block.group(0).replace('\\"', '"')
+    block = re.sub(r'"{2,}', '"', block)
+
+    out: dict = {}
+    valid = {int(lid) for lid in line_ids if str(lid).isdigit()} or set(line_ids)
+    for m in re.finditer(r'"(\d+)"\s*:\s*\[(.*?)\]', block, flags=re.DOTALL):
+        lid = int(m.group(1))
+        if lid not in valid:
+            continue
+        arr = m.group(2)
+        tok = re.findall(r'"([^"]*)"', arr)
+        qs = [t.strip() for t in tok if t.strip() and t.strip() != ","]
+        out[str(lid)] = qs
+    return out
+
+
 def _clean_queries(raw_list: list) -> list:
     out = []
     for q in raw_list:
@@ -138,12 +178,12 @@ def build_search_queries(lines: list, topic: str = "") -> dict:
     """One LLM pass -> {line_id: [query, query, ...]} for every line.
 
     Also attaches ``line["search_queries"]`` onto the dict for each input line.
-    Falls back to the existing ``search_term`` when the LLM pass fails,
+    Falls back to the existing ``search_term`` when the model pass fails,
     so asset fetching never blocks on this agent.
 
     If every line already carries search_queries (the staged lab pipeline fills
     these locally during script generation), those are reused directly - no
-    redundant cloud call.
+    redundant model call.
     """
     if lines and all(ln.get("search_queries") for ln in lines):
         for ln in lines:
@@ -160,21 +200,15 @@ def build_search_queries(lines: list, topic: str = "") -> dict:
         f"{script}"
     )
     try:
-        raw = call_text(
-            [
-                {"role": "system", "content": SYSTEM_QUERY_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
+        raw = _local(
+            f"{SYSTEM_QUERY_PROMPT}\n\n{user_prompt}",
             temperature=0.2,
-            max_tokens=3500,
             tag="queries",
         )
-        m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-        if not m:
-            raise ValueError(f"no JSON block in query-agent reply: {raw[:200]}")
-        data = json.loads(m.group(0))
-        if not isinstance(data, dict):
-            raise ValueError("query-agent reply not a dict")
+        raw = _strip_thinking_tags(raw)
+        data = _extract_queries(raw, [ln["id"] for ln in lines])
+        if not data:
+            raise ValueError(f"no usable mapping in query-agent reply: {raw[:200]}")
     except Exception as e:
         print(f"    [queries] agent failed ({str(e)[:120]}) - using per-line search_term")
         data = {}

@@ -1,9 +1,11 @@
 """Per-line query, license-safe image fetching (NO vision verification).
 
 Strategy (validated on wet runs):
-1. QUERY AGENT: one LLM pass turns the whole script + topic into 5 precise
-   search queries PER narration line (exact names, photo/era tokens, exclusions,
-   a variety of visual angles) — never a single topic-level keyword list.
+1. QUERY AGENT (local): the 10-lesson query agent (src/services/query_agent.py,
+   now on Ollama) turns the whole script + topic into 5 precise search queries
+   PER narration line (exact names, photo/era tokens, exclusions, a variety of
+   visual angles) — never a single topic-level keyword list. No Groq/Gemini
+   anywhere in this file.
 2. Download candidate images per query from license-safe sources (Pexels,
    Wikimedia Commons, Openverse, DuckDuckGo restricted to Wikimedia-hosted
    files only), tagging each file with its origin line.
@@ -14,13 +16,13 @@ Strategy (validated on wet runs):
    Facets/feature gates and model descriptions are gone from this path.
 5. Assign kept images to narration lines origin-first (each line keeps the
    images its own queries found), with query/checklist text-overlap as tie-break
-   and an LLM plan as an optional refinement. Multi-image per line allowed;
-   every line is guaranteed >= 1 image.
+   and a local agentic plan (propose -> validate -> repair once) as the refined
+   path; the deterministic greedy matcher is the fallback. Multi-image per line
+   allowed; every line is guaranteed >= 1 image.
 """
 import os
 import re
 import threading
-import json
 import requests
 import pytesseract
 from PIL import Image
@@ -38,7 +40,8 @@ from src.config.settings import (
     ASSET_MAX_TEXT_AREA,
     ASSET_TEXT_MIN_CONF,
 )
-from src.services.llm import call_groq
+from src.services.asset_agent import assign as local_assign
+from src.services.asset_agent import keywords as local_keywords
 from src.services.query_agent import build_search_queries
 
 HEADERS = {"User-Agent": "VideoPipeline/1.0 (history/mystery shorts; contact: local)"}
@@ -52,17 +55,9 @@ REJECT_TEXT_OVERLAY = ASSET_REJECT_TEXT_OVERLAY  # OCR slop filter on/off
 MAX_TEXT_AREA = ASSET_MAX_TEXT_AREA              # text coverage => image skipped
 TEXT_MIN_CONF = ASSET_TEXT_MIN_CONF              # OCR word confidence floor
 
-N_KEYWORDS = 6
-
 _file_hashes = {}
 _file_hash_lock = threading.Lock()
 _source_meta = {}   # path -> {"license": str, "source": str}
-
-
-def _strip_thinking_tags(text: str) -> str:
-    text = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
-    text = re.sub(r'\s*thinking\s*\n', '', text, flags=re.DOTALL)
-    return text.strip()
 
 
 def _is_usable_image(content: bytes) -> bool:
@@ -294,50 +289,14 @@ def _fetch_openverse(search_term: str, base_path: str, count: int = 1) -> list:
 # 1. KEYWORDS + TOPIC FACETS
 # ---------------------------------------------------------------------------
 
-_STOPWORDS = {"what", "makes", "a", "an", "the", "and", "or", "why", "how",
-              "is", "are", "do", "does", "in", "on", "at", "to", "of", "for",
-              "your", "my", "our", "their", "its", "this", "that", "these", "those",
-              "always", "common", "look", "aren't", "isn't", "don't", "not",
-              "top", "5", "4", "3", "2", "1", "dark", "truth", "about", "human"}
 _GENERIC = {"photo", "image", "picture", "people", "person", "view", "scene",
             "day", "night", "outdoor", "group", "crowd", "man", "woman", "building",
             "walking", "standing", "showing", "old", "big", "large", "two", "one"}
 
 
-def _topic_keywords_heuristic(topic: str) -> list:
-    words = [w for w in topic.lower().split() if w.strip(".,?!'\"") not in _STOPWORDS]
-    core = " ".join(words[:4])
-    return [core] if core else [topic]
-
-
 def _generate_topic_keywords(topic: str) -> list:
-    """LLM: topic -> 6 findable keyword phrases covering its visual facets."""
-    try:
-        messages = [{
-            "role": "user",
-            "content": (
-                f'Video topic: "{topic}"\n\n'
-                "I need search keywords to find REAL photos for this video. Generate "
-                f"{N_KEYWORDS} DISTINCT keyword phrases (2-5 words each) that an image "
-                "search would actually return, all specifically about THIS topic. Use real, "
-                "photographable subject matter: named people, places, monuments, artifacts, "
-                "equipment, historical photos, period scenes, buildings, weapons, vehicles, "
-                "uniforms, maps.\n\n"
-                "- Every keyword must be ON-TOPIC. Nothing generic, decorative, or unrelated.\n"
-                "- Cover different facets (the person/thing itself, the place, key artifacts, "
-                "the event, the era).\n"
-                "- Plain phrase per line, no numbering, no explanation."
-            )
-        }]
-        out = call_groq(messages, temperature=0.6, max_tokens=300, tag="kw")
-        out = _strip_thinking_tags(out)
-        kws = [ln.strip().strip('"').strip('-').strip('.') for ln in out.splitlines()]
-        kws = [k for k in kws if k and len(k.split()) <= 8]
-        if len(kws) >= 4:
-            return kws[:N_KEYWORDS]
-    except Exception as e:
-        print(f"    [kw] Error: {e}")
-    return _topic_keywords_heuristic(topic)
+    """Local agent: topic -> 6 findable keyword phrases (heuristic fallback)."""
+    return local_keywords.topic_keywords(topic)
 
 
 # ---------------------------------------------------------------------------
@@ -475,70 +434,19 @@ def _greedy_assign(images: list, lines: list) -> dict:
 
 def _assign_images_to_lines(images: dict, lines: list, topic: str) -> dict:
     """images: {path: (features, query, line_id)}. Returns {line_id: [paths]}.
-    ONE LLM call for the match plan; greedy (feature token overlap) fallback."""
+    Local agent proposes the plan (with one repair pass); the deterministic
+    greedy token-overlap matcher fills in entirely when no usable plan came
+    back. No Groq/Gemini is involved in assignment anymore."""
     if not images or not lines:
         return {ln["id"]: list(images.keys()) for ln in lines}
 
-    paths = list(images.keys())
-    catalog = "\n".join(f"image {i + 1}: {images[p][0] or images[p][1]}"
-                        for i, p in enumerate(paths))
-    expectations = "\n".join(
-        f'line {ln["id"]}: {ln.get("image_features", "") or ln.get("image_expectation", "")}'
-        for ln in lines)
-
-    prompt = (
-        f'Video topic: "{topic}"\n\n'
-        "I have images downloaded for the topic via targeted per-line searches "
-        "(each image tagged with the search query that found it) and a narration "
-        "script. Assign images to narration lines so each line's on-screen photo "
-        "matches its required feature checklist.\n\n"
-        "Image catalog (search query that found the photo):\n"
-        f"{catalog}\n\n"
-        "Script lines (the feature checklist the on-screen image must satisfy):\n"
-        f"{expectations}\n\n"
-        "Rules:\n"
-        "- EVERY line MUST get at least one image. Never leave a line empty.\n"
-        "- Prefer the image that was searched for with that line in mind, but a "
-        "clearly better visual for another line wins.\n"
-        "- A line may get 1-2 images if the visual demands it.\n"
-        "- An image may be reused, but spread them out where possible.\n"
-        '- Reply ONLY with JSON, no markdown, using the 1-based image numbers above: '
-        '{"line_id": ["image number", ...], ...} Example: {"3": ["1","3"], "5": ["2"]}'
-    )
-    mapping = {}
-    try:
-        answer = _strip_thinking_tags(call_groq(
-            [{"role": "user", "content": prompt}], temperature=0.3,
-            max_tokens=500, tag="assign"))
-        m = re.search(r"\{.*\}", answer, flags=re.DOTALL)
-        if not m:
-            raise ValueError("no JSON block")
-        data = json.loads(m.group(0))
-        if not isinstance(data, dict):
-            raise ValueError("not a dict")
-        for lid, val in data.items():
-            key = str(lid)
-            try:
-                key = int(lid)
-            except (TypeError, ValueError):
-                pass
-            idxs = val if isinstance(val, list) else [val]
-            for i in idxs:
-                if not isinstance(i, int):
-                    try:
-                        i = int(i)
-                    except (TypeError, ValueError):
-                        continue
-                j = min(max(i - 1, 0), len(paths) - 1)
-                mapping.setdefault(key, []).append(paths[j])
-    except Exception as e:
-        print(f"    [assign] LLM failed ({str(e)[:100]}), using greedy fallback")
+    mapping = local_assign.plan_assignment(images, lines, topic)
 
     if not any(v for v in mapping.values()):
         print("    [assign] Greedy feature-match fallback (origin-line default)")
         ids = {ln["id"] for ln in lines}
         imgs = []
-        for p in paths:
+        for p in images:
             best = None
             best_score = -1
             for ln in lines:
@@ -554,7 +462,7 @@ def _assign_images_to_lines(images: dict, lines: list, topic: str) -> dict:
 
     # Spread unused images onto empty lines.
     assigned = {p for deck in mapping.values() for p in deck}
-    unassigned = [p for p in paths if p not in assigned]
+    unassigned = [p for p in images if p not in assigned]
     empty_lines = [ln for ln in lines if not mapping.get(ln["id"])]
     if unassigned and empty_lines:
         for img_path in unassigned:

@@ -1,0 +1,92 @@
+{
+  "donald-trump": {
+    "voice": "Donald Trump",
+    "lines": [
+      {
+        "id": "donaldtrump_sim_1",
+        "text": "Nobody says this part out loud, but the subsidy is the reason the price never fell.",
+        "loud": false,
+        "dur_from_pipeline": 4.413,
+        "valid": true,
+        "metrics": {
+          "duration_s": 4.413,
+          "peak": 0.95,
+          "rms": 0.1676,
+          "longest_silence_ms": 184.6
+        }
+      },
+      {
+        "id": "donaldtrump_sim_2",
+        "text": "The audit found two million missing and the boss answered: account error, no further comment.",
+        "loud": false,
+        "dur_from_pipeline": 4.412,
+        "valid": true,
+        "metrics": {
+          "duration_s": 4.412,
+          "peak": 0.95,
+          "rms": 0.1678,
+          "longest_silence_ms": 181.3
+        }
+      },
+      {
+        "id": "donaldtrump_sim_3",
+        "text": "She inherited the office at thirty-one, ran it for twelve years, and left with profit at one point two billion.",
+        "loud": true,
+        "dur_from_pipeline": 6.34,
+        "valid": true,
+        "metrics": {
+          "duration_s": 6.34,
+          "peak": 0.7109,
+          "rms": 0.1811,
+          "longest_silence_ms": 197.8
+        }
+      }
+    ],
+    "all_ok": true
+  },
+  "arnold-schwarzenegger": {
+    "voice": "Arnold Schwarzenegger",
+    "lines": [
+      {
+        "id": "arnoldschwarzenegger_sim_1",
+        "text": "By the time the team arrived, the site had been stripped, and the paperwork showed a full inventory.",
+        "loud": false,
+        "dur_from_pipeline": 5.172,
+        "valid": true,
+        "metrics": {
+          "duration_s": 5.172,
+          "peak": 0.95,
+          "rms": 0.153,
+          "longest_silence_ms": 147.7
+        }
+      },
+      {
+        "id": "arnoldschwarzenegger_sim_2",
+        "text": "In 1969 the review board demanded the files, and every single page came back blank.",
+        "loud": true,
+        "dur_from_pipeline": 5.604,
+        "valid": true,
+        "metrics": {
+          "duration_s": 5.604,
+          "peak": 0.8076,
+          "rms": 0.1806,
+          "longest_silence_ms": 181.9
+        }
+      },
+      {
+        "id": "arnoldschwarzenegger_sim_3",
+        "text": "The engineers found the fault in 1987, buried it in 1988, and we paid for it in 2023.",
+        "loud": true,
+        "dur_from_pipeline": 6.495,
+        "valid": true,
+        "metrics": {
+          "duration_s": 6.495,
+          "peak": 0.7829,
+          "rms": 0.1807,
+          "longest_silence_ms": 212.5
+        }
+      }
+    ],
+    "all_ok": true
+  }
+}
