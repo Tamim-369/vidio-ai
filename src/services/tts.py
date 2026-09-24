@@ -198,15 +198,13 @@ def _chat_loop(lines: list, voice: dict, audio_dir: str) -> list:
         else:
             combined = np.asarray(wav).squeeze()
 
-        combined = _enforce_pauses(combined.astype(np.float32), sr, synth_text)
-        if line.get("is_first") and TTS_LEAD_BUFFER:
-            combined = _strip_lead_buffer(combined, sr, TTS_LEAD_BUFFER, synth_text)
-        combined = _normalize_pacing(combined, sr, text, params, is_first=line.get("is_first", False))
-        gain = LOUD_GAIN if line.get("loud") else params.get("gain", 1.0)
-        # Every line keeps the same short 60ms head pad. Bigger lead-ins made a
-        # ~1s dead-silence pause between sentences (huge audible gap every line).
-        lead_in = 0.06
-        combined = _finalize(combined.astype(np.float32), sr, pitch_shift=pitch_shift, gain=gain, eq=params.get("eq"), speed=params.get("speed", 1.0), attack_pitch=params.get("attack_pitch", 0.0), lead_in=lead_in)
+        combined = combined.astype(np.float32)
+        silence = np.zeros(int(0.06 * sr), dtype=np.float32)
+        combined = np.concatenate([combined, silence])
+        combined = np.concatenate([np.zeros(int(0.06 * sr), dtype=np.float32), combined])
+        peak = float(np.abs(combined).max())
+        if peak > 0.95:
+            combined = combined * (0.95 / peak)
         sf.write(path, combined, sr)
         line["audio_path"] = path
         line["actual_duration"] = len(combined) / sr
