@@ -74,19 +74,47 @@ The pipeline uses the Pocket-TTS "narrator" voice exclusively (see
 `voices/` is gitignored, so a fresh clone has no voice. Pick one:
 
 1. **Prebuilt state** — place `voices/narrator.safetensors` from an existing
-   run/drive into the repo, or
+   run/drive into the repo (works with either model variant).
 2. **Build it from a reference wav** — put a 5–15s clean narration `.wav`
    somewhere and set `POCKET_VOICE_REF` in `.env`. The first run builds
-   `voices/narrator.safetensors` from it (then it can be removed).
+   `voices/narrator.safetensors` from it (then it can be removed). **This
+   path requires the gated model — see "TTS model".**
 
 Without one of these, every TTS run fails with a `FileNotFoundError`.
 
+## TTS model
+
+The narrator runs on Kyutai's Pocket-TTS. The model is NOT bundled in the repo —
+it is downloaded from HuggingFace on the first TTS run and cached under
+`$HF_HOME/hub` (default `HF_HOME=~/.cache/huggingface`; point it inside the
+project, e.g. `HF_HOME=<repo>/.models`, so it is reused and gitignored).
+
+There are two model variants, and which one you get depends on whether you
+already have a voice state file:
+
+- **Open model — `kyutai/pocket-tts-without-voice-cloning`** (~a few GB, no
+  login). This is what downloads if you have no HuggingFace auth. It works with
+  a **prebuilt** `voices/narrator.safetensors` (the repo's normal path).
+- **Gated model — `kyutai/pocket-tts`** (needed to **create** a new voice from
+  a reference `.wav`). To enable it:
+
+  ```bash
+  # 1. Accept the model terms:
+  #    https://huggingface.co/kyutai/pocket-tts  -> "Agree and access repository"
+  uvx hf auth login          # or set HF_TOKEN=<token> in .env
+  ```
+
+  On first run the model downloads into `$HF_HOME/hub/models--kyutai--pocket-tts*`.
+
+> Cold-start note: the download is a few GB and takes a while on slow
+> connections. If `TTSModel.load_model()` can't fetch the gated model, the
+> library silently uses the open variant — so a missing login only surfaces
+> when you later try to build a new voice (`POCKET_VOICE_REF`), not at load.
+
 ## LLM assets
 
-Groq/Gemini/Cloudflare credentials from `.env` are enough. The first run
-downloads the Pocket-TTS model into `$HF_HOME/models--kyutai--pocket-tts*`
-(~a few GB, takes a while over a slow connection). Keep `HF_HOME` inside the
-repo so it is gitignored and reused on every run (e.g. `HF_HOME=<repo>/.models`).
+Groq/Gemini/Cloudflare credentials from `.env` are enough. See "TTS model" for
+the TTS model download.
 
 ## YouTube upload (optional)
 

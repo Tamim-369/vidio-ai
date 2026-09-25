@@ -84,6 +84,7 @@ if [ "$SKIP_VOICE" -eq 0 ]; then
   else
     if grep -q "^POCKET_VOICE_REF=" .env 2>/dev/null && ! grep -q "^POCKET_VOICE_REF=$" .env 2>/dev/null; then
       info "POCKET_VOICE_REF is set — the voice will be built on first run"
+      info "(requires the gated pocket-tts model: accept terms on HF + 'uvx hf auth login')"
     else
       info "no narrator voice yet: add 'voices/narrator.safetensors' or set"
       info "POCKET_VOICE_REF=<path to a short .wav> in .env (see setup.md → Voice)"
@@ -100,3 +101,5 @@ echo "  2. Run:  uv run python src/cli/main.py --list-voices"
 echo "           uv run python src/cli/main.py \"a topic\" --no-upload"
 echo ""
 echo "First run downloads the Pocket-TTS model into HF_HOME (a few GB)."
+echo "If you build a new voice from a wav, also accept terms at"
+echo "https://huggingface.co/kyutai/pocket-tts and run:  uvx hf auth login"
