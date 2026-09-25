@@ -14,18 +14,22 @@ Builds faceless YouTube Shorts: research/viral-topic generation → story/script
 ## Install
 
 ```bash
-git clone <repo-url> && cd videoai
+git clone https://github.com/Tamim-369/vidio-ai.git && cd vidio-ai
 
-# Dependencies
-uv sync                      # if you keep pyproject/uv.lock in sync, or:
+# Dependencies (the .venv is created on first use)
 uv pip install -r requirements.txt
 
 # Playwright (optional topic source; the generator falls back to plain requests
 # if it is not installed). Download a browser the first time:
 uv run playwright install chromium
 
-# A voice is required before any TTS runs — see "Voice" below.
+# Copy the env template and fill in your keys — see "Environment" below.
+cp .env.example .env
 ```
+
+> Note: `uv sync` will NOT install the dependencies — `pyproject.toml` is
+> empty and the project installs purely from `requirements.txt`, so use
+> `uv pip install -r requirements.txt` (or plain `pip`).
 
 If using pip directly:
 
@@ -37,9 +41,15 @@ playwright install chromium
 
 ## Environment (.env)
 
-Copy the repo's `.env` (or create one). It is loaded automatically by the CLI
-and every module that reads a knob — `dotenv` is handled internally, so no
-shell `export` is needed. Never commit `.env` (already gitignored).
+Start from the template and fill in only what you have:
+
+```bash
+cp .env.example .env
+```
+
+It is loaded automatically by the CLI and every module that reads a knob —
+`dotenv` is handled internally, so no shell `export` is needed. Never commit
+`.env` (already gitignored).
 
 | Variable | Required | Purpose |
 |---|---|---|
@@ -59,27 +69,26 @@ shell `export` is needed. Never commit `.env` (already gitignored).
 
 \* At least one text LLM must be configured; the chain is Groq → Gemini → Cloudflare.
 
-Other keys currently present in the sample `.env` (`POLLINATIONS_API_KEY`,
-`HF_TOKEN`, `AUTO_PUBLISH`, `GROQ_API_KEY_BACKUP`) are legacy/unused by the
-code — safe to drop.
-
 ## Voice
 
 The pipeline uses the Pocket-TTS "narrator" voice exclusively (see
-`agents/voice/registry.py`). The voice state ships as:
+`agents/voice/registry.py`). **The voice does not ship in the repo** —
+`voices/` is gitignored, so a fresh clone has no voice. Pick one:
 
-- `voices/narrator.safetensors` — prebuilt state, used as-is.
+1. **Prebuilt state** — place `voices/narrator.safetensors` from an existing
+   run/drive into the repo, or
+2. **Build it from a reference wav** — put a 5–15s clean narration `.wav`
+   somewhere and set `POCKET_VOICE_REF` in `.env`. The first run builds
+   `voices/narrator.safetensors` from it (then it can be removed).
 
-If it is missing, set `POCKET_VOICE_REF` in `.env` to a reference `.wav`
-(5–15s clean narration); the first run builds
-`voices/narrator.safetensors` from it.
+Without one of these, every TTS run fails with a `FileNotFoundError`.
 
 ## LLM assets
 
 Groq/Gemini/Cloudflare credentials from `.env` are enough. The first run
-downloads the Pocket-TTS model into `$HF_HOME/models--kyutai--pocket-tts*` (~a
-few GB) — a few hours of silence-tolerance. Keep `HF_HOME` inside the repo so
-it is gitignored and reused on every run.
+downloads the Pocket-TTS model into `$HF_HOME/models--kyutai--pocket-tts*`
+(~a few GB, takes a while over a slow connection). Keep `HF_HOME` inside the
+repo so it is gitignored and reused on every run (e.g. `HF_HOME=<repo>/.models`).
 
 ## YouTube upload (optional)
 
@@ -141,6 +150,6 @@ Run the standalone tests directly (each is self-running):
 ## First-run checklist
 
 1. `ffmpeg`, `sox`, `tesseract` on PATH.
-2. `.env` in the repo root with at least one LLM key + `PEXELS_API_KEY`.
+2. `cp .env.example .env` with at least one LLM key + `PEXELS_API_KEY`.
 3. Voice present (`voices/narrator.safetensors`) or `POCKET_VOICE_REF` set.
 4. `output/`, `temp/`, `.models/` are created on demand and gitignored.
