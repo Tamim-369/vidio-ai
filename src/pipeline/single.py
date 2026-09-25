@@ -5,7 +5,11 @@ research (or provided story) -> script -> images -> voiceover -> assembly.
 The full step-by-step ordering and timing accounting live here and nowhere
 else; batch.py just calls these per topic.
 """
+import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 
 from src.utils.file_helpers import ensure_workspace, cleanup_temp, dump_artifact
 from src.agents.research.sources import research
@@ -13,9 +17,31 @@ from src.agents.asset.agent import fetch_assets
 from src.agents.voice import agent as voice_manager
 from src.services.tts import generate_audio
 from src.services.video_assembler import assemble
-from src.services.youtube_upload import publish_video
+from src.services.youtube_upload import publish_video, generate_metadata
 from src.pipeline.lab import build_lab_script, speaking_style_for_style
 from src.agents.common.llm import LOCAL_MODEL
+
+_metadata_pool = None
+_metadata_pool_lock = threading.Lock()
+
+# Heavy-phase gate: at most this many videos run TTS + assembly at once.
+# The cheap phases (research/script/assets) are NOT gated, so while one video
+# renders, the next video's low-resource work (LLM + network) runs alongside —
+# heavy CPU/rendering never stacks. Tune via env for the host's core count.
+HEAVY_SLOTS = max(1, int(os.getenv("HEAVY_SLOTS", "2")))
+_heavy_slots = threading.BoundedSemaphore(HEAVY_SLOTS)
+
+
+def _get_metadata_pool() -> ThreadPoolExecutor:
+    """Shared metadata (title/description) pool, lazily created like the TTS
+    and assembler pools so a whole batch reuses one executor instead of
+    spawning one short-lived pool per video."""
+    global _metadata_pool
+    if _metadata_pool is None:
+        with _metadata_pool_lock:
+            if _metadata_pool is None:
+                _metadata_pool = ThreadPoolExecutor(max_workers=4)
+    return _metadata_pool
 
 
 def _format_timing(timing: dict) -> str:
@@ -35,7 +61,7 @@ def _timed(label: str, step, *args, timing: dict, **kwargs):
 
 
 def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: str = "",
-                 script_only: bool = False):
+                 script_only: bool = False, gate_heavy: bool = False):
     """Run the full pipeline for a single topic and produce a video.
 
     If raw_data is provided (e.g. a Reddit story from the topic generator),
@@ -83,14 +109,25 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
         print("\n✅ Script only — assets, audio, video, and upload were skipped.\n")
         return script
 
+    # Kick off title/description generation NOW on a background thread. It only
+    # needs the script (never the video), so it runs in parallel with asset
+    # fetch / audio / assembly and the upload never waits on the LLM metadata.
+    metadata_future = None
+    if publish:
+        print("   (spawning title & description generation in parallel...)")
+        metadata_future = _get_metadata_pool().submit(generate_metadata, topic, script)
+
     print("\n🖼️  Fetching images...")
     script["lines"] = _timed("assets", fetch_assets, script["lines"], topic=topic, timing=timing)
 
     print("\n🎙️  Generating voiceover...")
-    script["lines"] = _timed("audio", generate_audio, script["lines"], voice=voice_cfg, topic=topic, timing=timing)
+    if gate_heavy:
+        print(f"   (waiting for a heavy slot: ≤{HEAVY_SLOTS} video(s) render at once)")
+    with _heavy_slots if gate_heavy else nullcontext():
+        script["lines"] = _timed("audio", generate_audio, script["lines"], voice=voice_cfg, topic=topic, timing=timing)
 
-    print("\n🎬 Assembling video...")
-    output = _timed("assemble", assemble, script, topic=topic, timing=timing)
+        print("\n🎬 Assembling video...")
+        output = _timed("assemble", assemble, script, topic=topic, timing=timing)
 
     # Record the topic as done so it is never regenerated (fuzzy + exact dedup).
     from src.agents.topic.helpers import record_made_video
@@ -98,7 +135,9 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
 
     if publish:
         print("  (publishing...)")
-        _timed("publish", publish_video, output, script["topic"], script, timing=timing)
+        metadata = metadata_future.result() if metadata_future else None
+        _timed("publish", publish_video, output, script["topic"], script,
+               metadata=metadata, timing=timing)
     else:
         print("\n⏭️  Skipping YouTube upload (pass --no-upload to keep it local)")
 
@@ -109,12 +148,16 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
     return output
 
 
-def create_video_from_topic(topic: dict, publish: bool = True, voice: str = "", script_only: bool = False):
+def create_video_from_topic(topic: dict, publish: bool = True, voice: str = "", script_only: bool = False,
+                            gate_heavy: bool = False):
     """Run the pipeline for a single topic dict from the topic generator.
 
     Uses the Reddit story content + source URLs as raw data for scripting.
     Caption-only posts (image subs like tankporn/WarshipPorn) fall back to
     fresh web research so the script isn't built from a one-line title.
+    gate_heavy: apply the render-phase gate (HEAVY_SLOTS). Batch passes
+    True only when it is producing more than one video; a single video runs
+    ungated.
     """
     story = (topic.get("content") or topic.get("summary") or "").strip()
 
@@ -126,4 +169,4 @@ def create_video_from_topic(topic: dict, publish: bool = True, voice: str = "", 
         raw_data = research(topic["title"], urls=topic.get("source_urls") or [])
 
     return create_video(topic["title"], raw_data=raw_data, publish=publish, voice=voice,
-                        script_only=script_only)
+                        script_only=script_only, gate_heavy=gate_heavy)

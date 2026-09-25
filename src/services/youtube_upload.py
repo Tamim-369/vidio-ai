@@ -423,15 +423,21 @@ def set_thumbnail(youtube, video_id: str, thumbnail_path: str) -> None:
     print(f"    [youtube] Thumbnail set for {video_id}")
 
 
-def publish_video(video_path: str, topic: str, script: dict, thumbnail_path: str = None) -> str:
+def publish_video(video_path: str, topic: str, script: dict, thumbnail_path: str = None,
+                  metadata: dict = None) -> str:
     """Generate metadata, upload the video, and report its status.
 
-    Returns the YouTube video id.
+    metadata: pre-generated title/description/tags (e.g. produced in parallel
+    with assembly via generate_metadata). When None (default) it is generated
+    here. Returns the YouTube video id.
     """
     print(f"\n📺 Publishing to YouTube: {topic}")
 
-    print("    [youtube] Generating title & description...")
-    meta = generate_metadata(topic, script)
+    if metadata:
+        meta = metadata
+    else:
+        print("    [youtube] Generating title & description...")
+        meta = generate_metadata(topic, script)
     title = meta["title"]
     description = meta["description"]
     tags =  meta["tags"]

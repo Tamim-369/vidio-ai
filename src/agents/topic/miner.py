@@ -130,6 +130,16 @@ def _process_video(cname, views, vid, title, tmp):
     topic = str(seed.get("topic", "")).strip()
     if not topic or len(topic.split()) > 14:
         return None
+
+    # Enforce the resolver's own niche verdict: a competitor's top video is
+    # only a candidate when it is genuinely on-niche (WW1/WW2 stories, human/
+    # animal experiments, or history-rooted dark legends). Rejecting off-niche
+    # viral videos here keeps the batch queue free of random stories.
+    niche_fit = str(seed.get("niche_fit", "")).strip().lower()
+    if not niche_fit or niche_fit.startswith("no"):
+        print(f"    [miner] off-niche (rejected): {topic}")
+        return None
+
     return {
         "source": f"channel:{cname}",
         "category": seed.get("angle", "mystery"),

@@ -8,8 +8,12 @@ self-contained phases:
   produced nothing) or the last saved batch.
 - _produce_topics(): render topics through create_video_from_topic() on a
   moving assembly line: up to `concurrency` videos in flight at once, each in
-  its own temp workspace, round-robining voices. Serializing instructions
-  land in parallel workers here; per-video timing is still reported.
+  its own temp workspace, round-robining voices. The cheap (LLM/network)
+  phases of all in-flight videos overlap freely; the heavy render phases
+  (TTS + assembly) are gated by HEAVY_SLOTS in single.py so expensive CPU work
+  never stacks — the next video's research/script/assets run while the
+  current one renders. Serializing instructions land in parallel workers here;
+  per-video timing is still reported.
 """
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -58,20 +62,29 @@ def _produce_topics(topics: list, publish: bool, voice: str, script_only: bool =
     stays deterministic (pick_voice is not thread-safe). Each worker's
     create_video_from_topic runs in its own temp workspace, so none of them
     collide on temp/ paths even when they are mid-flight at the same time.
+
+    The render-phase gate (single.py's HEAVY_SLOTS) only applies when there
+    are more than one video to make: with a single video there is nothing to
+    overlap, so it renders without waiting on a slot.
     """
     voice_manager.list_voices()
 
     print(f"\n🎬 Processing {len(topics)} topics ({concurrency} at a time)...")
-    assigned = [(t, voice_manager.pick_voice(preferred=voice)[0]) for t in topics]
+    gate_heavy = len(topics) > 1
+    assigned = [
+        (t, voice_manager.pick_voice(preferred=voice)[0], gate_heavy)
+        for t in topics
+    ]
 
     batch_t0 = time.monotonic()
     per_video = []
 
-    def _work(topic_vid):
-        topic, vid = topic_vid
+    def _work(topic_vid_gate):
+        topic, vid, gate_heavy = topic_vid_gate
         v_t0 = time.monotonic()
         try:
-            create_video_from_topic(topic, publish=publish, voice=vid, script_only=script_only)
+            create_video_from_topic(topic, publish=publish, voice=vid, script_only=script_only,
+                                    gate_heavy=gate_heavy)
         except Exception as e:
             print(f"❌ Failed on topic: {e}")
         return (topic["title"], time.monotonic() - v_t0)

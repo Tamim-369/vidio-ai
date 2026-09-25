@@ -137,6 +137,7 @@ def _generate_pocket(lines: list, audio_dir: str) -> list:
         cleaned = _clean_text(line["text"])
         text = _de_shout(cleaned) if line.get("loud") else cleaned
         loud = bool(line.get("loud"))
+        line["spoken_text"] = text  # what the narrator actually says
         print(f"  [tts] Line {line_id}: {text}")
         jobs[pool.submit(_tts_worker_generate, text, loud)] = (line, text)
 

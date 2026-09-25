@@ -27,9 +27,9 @@ from src.agents.topic.score import score_lead
 BATCH_DIR = os.path.join("topics")
 
 NICHE_WEIGHTS = {
-    "experiments": 0.45,
-    "dark_legends": 0.35,
-    "ww1_ww2_stories": 0.20,
+    "experiments": 0.40,
+    "ww1_ww2_stories": 0.35,
+    "dark_legends": 0.25,
 }
 
 

@@ -134,6 +134,9 @@ MILITARY = {
     "SU-34": "sukhoi thirty-four", "SU-35": "sukhoi thirty-five",
     "TU-16": "tupolev sixteen", "TU-22": "tupolev twenty-two",
     "TU-95": "tupolev ninety-five", "TU-160": "tupolev one sixty",
+    "IL-76": "ilyushin seventy-six", "IL-86": "ilyushin eighty-six",
+    "IL-96": "ilyushin ninety-six", "IL-18": "ilyushin eighteen",
+    "IL-62": "ilyushin sixty-two", "IL-14": "ilyushin fourteen",
     # Helicopters
     "CH-47": "C H forty-seven", "CH-53": "C H fifty-three",
     "UH-60": "U H sixty", "AH-64": "A H sixty-four", "AH-1": "A H one",
@@ -164,7 +167,7 @@ MILITARY = {
     "SR-90": "strontium ninety", "CS-137": "cesium one thirty-seven",
 }
 MILITARY_PATTERN = re.compile(
-    r'\b(' + '|'.join(sorted(MILITARY, key=len, reverse=True)) + r')(s?)\b',
+    r'\b(' + '|'.join(sorted(MILITARY, key=len, reverse=True)) + r')((?-i:[A-Z])?)(s?)\b',
     re.IGNORECASE)
 MILITARY_RE = MILITARY_PATTERN
 
@@ -209,6 +212,8 @@ def _plural_spoken(spoken: str) -> str:
     last = m.group(3)
     if last.endswith("y"):
         last = last[:-1] + "ies"
+    elif re.search(r'(?:s|x|z|ch|sh)$', last):
+        last += "es"          # six → sixes, thatch → thatches
     else:
         last += "s"
     return m.group(1) + m.group(2) + last
@@ -230,10 +235,28 @@ def _decimal_words(v: str) -> str:
 def _military_designator(full: re.Match) -> str:
     """One military/isotope designator → its spoken form (plural-safe)."""
     key = full.group(1).upper()
+    variant = full.group(2)
+    plural = full.group(3)
+    # Trailing-letter variants of a known base: "B-52G" → "B fifty-two G",
+    # "F-16C" → "F sixteen C" — say the base then the variant letter.
     spoken = MILITARY.get(key, "")
+    if variant:
+        base = MILITARY.get(key, "")
+        if base:
+            spoken = f"{base} {variant}"
+        elif len(key) >= 2 and key[:-1] in MILITARY:
+            spoken = f"{MILITARY[key[:-1]]} {key[-1]}"
     if not spoken:
         return full.group(0)
-    return _plural_spoken(spoken) if full.group(2) else spoken
+    # Drop the doubled manufacturer when it already precedes the designator:
+    # "Tupolev Tu-95" → "Tupolev ninety-five" (not "tupolev tupolev").
+    head = spoken.split()[0]
+    if head.lower() in ("tupolev", "sukhoi", "mil", "ilyushin") and head.lower() in \
+            full.string[max(0, full.start() - 24):full.start()].lower():
+        spoken = " ".join(spoken.split()[1:])
+        if not spoken and plural:
+            return full.group(0)
+    return _plural_spoken(spoken) if plural else spoken
 
 
 def _expand_weapons_and_formulas(text: str) -> str:
@@ -396,15 +419,42 @@ def _spell_acronyms(text: str) -> str:
     return text
 
 
+# Distance/speed/mass/voltage units -> spoken words. Longest key first so
+# compound units (km/h, MHz) replace before their parts (km, M).
+_UNIT_WORDS = {
+    "km/h": "kilometers per hour",
+    "m/s": "meters per second",
+    "kph": "kilometers per hour",
+    "mph": "miles per hour",
+    "GHz": "gigahertz",
+    "MHz": "megahertz",
+    "kHz": "kilohertz",
+    "mm": "millimeters",
+    "cm": "centimeters",
+    "kg": "kilograms",
+    "mg": "milligrams",
+    "kW": "kilowatts",
+    "MW": "megawatts",
+    "kV": "kilovolts",
+    "mi": "miles",
+    "ft": "feet",
+    "yd": "yards",
+    "lb": "pounds",
+    "km": "kilometers",
+    "in": "inches",
+}
+
+
 def _expand_units(text: str) -> str:
-    """Distance/speed units, compact or spaced ("12 km", "12km", "900km/h").
-    Order matters: km/h before km, attached-number forms first."""
-    text = re.sub(r'\b(\d+(?:\.\d+)?)\s?km/h\b', r'\1 kilometers per hour',
-                  text, flags=re.IGNORECASE)
-    text = re.sub(r'\bkm/h\b', 'kilometers per hour', text, flags=re.IGNORECASE)
-    text = re.sub(r'\b(\d+(?:\.\d+)?)\s?km\b', r'\1 kilometers',
-                  text, flags=re.IGNORECASE)
-    return re.sub(r'\bkm\b', 'kilometers', text, flags=re.IGNORECASE)
+    """Distance/speed/measurement units, compact or spaced ("12 km", "12km",
+    "900km/h", "10kg bomb", "7.62 mm", "5,000 km"). Longest unit wins
+    (km/h over km). A negative lookbehind skips digits mid comma-group so
+    "2,300,000 in" never becomes "...000 inches"."""
+    for unit in sorted(_UNIT_WORDS, key=len, reverse=True):
+        text = re.sub(rf'(?<![\d,])\b(\d[\d]*(?:\.\d+)?)\s?{unit}\b',
+                      lambda m, u=unit: m.group(1) + " " + _UNIT_WORDS[u],
+                      text, flags=re.IGNORECASE)
+    return text
 
 
 def _fix_pronunciation(text: str) -> str:
@@ -424,6 +474,46 @@ def _fix_number_hyphens(text: str) -> str:
     return re.sub(r'\b(\d[\d,]*(?:\.\d+)?)-(?=[A-Za-z])', r'\1 ', text)
 
 
+def _expand_dotted_initials(text: str) -> str:
+    """Initials with periods -> spaced letters.
+
+    'J.R.R. Tolkien' → 'J R R Tolkien'; 'W.E.B. Du Bois' → 'W E B Du Bois';
+    'B.B. King' → 'B B King'; 'U.S.' → 'U S'. TTS reads bare initials letter-by-
+    letter (pauses), while a dotted run like "J. R. R." comes out as "dot" or
+    stutters. Runs of 2+ single letters each followed by '.' are matched, so
+    sentence ends like 'abc.' and decimals '7.62' are untouched.
+    """
+    return re.sub(r'\b(?:[A-Z]\.){2,}(?!\w)', lambda m: " ".join(c for c in m.group(0) if c.isalpha()), text)
+
+
+_WW = {
+    'I': 'World War One', 'II': 'World War Two',
+    'III': 'World War Three', 'IV': 'World War Four',
+    '1': 'World War One', '2': 'World War Two', '3': 'World War Three',
+}
+
+
+def _expand_world_wars(text: str) -> str:
+    """WWI/WWII/WW2, dotted or not, before initials handling so W.W.II
+    becomes "World War Two" and not "W W roman few". Case-insensitive."""
+    def _ww(m: re.Match) -> str:
+        key = m.group(1).upper()
+        return _WW.get(key, m.group(0))
+    return re.sub(r'\b[Ww][.\s]*[Ww][.\s]*(I{1,3}|IV|[1-4])\b', _ww, text)
+
+
+def _expand_times_and_labels(text: str) -> str:
+    """"4x" / "1.5x" → "four times" / "one point five times";
+    "3D" / "4K" → "three D" / "four K"; "N/A" → "not applicable";
+    "R&D" → "R and D"."""
+    text = re.sub(r'\b(\d+(?:\.\d+)?)\s*[xX](?![A-Za-z])\b',
+                  lambda m: _decimal_words(m.group(1)) + " times", text)
+    text = re.sub(r'\b(\d+)\s*[dD]\b', r'\1 D', text)
+    text = re.sub(r'\b(\d+)\s*K\b', r'\1 K', text)
+    text = re.sub(r'\bN/A\b', 'not applicable', text, flags=re.IGNORECASE)
+    return re.sub(r'\bR&D\b', 'R and D', text)
+
+
 def _final_spacing(text: str) -> str:
     """Ensure proper spacing after punctuation, collapse whitespace."""
     # Don't split "!!" or "!?" into two.
@@ -441,6 +531,41 @@ _TITLES = {
     r'\bProf\.(?!\w)': 'Professor',
     r'\bJr\.(?!\w)': 'junior',
     r'\bSr\.(?!\w)': 'senior',
+    # Military ranks — TTS otherwise reads "Lt." as "lit", "Cpt." weirdly etc.
+    r'\bLt\. Col\.(?!\w)': 'Lieutenant Colonel',
+    r'\bLt\. Gen\.(?!\w)': 'Lieutenant General',
+    r'\bMaj\. Gen\.(?!\w)': 'Major General',
+    r'\blieutenant colonel\b': 'Lieutenant Colonel',
+    r'\blieutenant general\b': 'Lieutenant General',
+    r'\bmajor general\b': 'Major General',
+    r'\bLt\.(?!\w)': 'Lieutenant',
+    r'\bCol\.(?!\w)': 'Colonel',
+    r'\bGen\.(?!\w)': 'General',
+    r'\bCpt\.(?!\w)': 'Captain',
+    r'\bCapt\.(?!\w)': 'Captain',
+    r'\bSgt\.(?!\w)': 'Sergeant',
+    r'\bMaj\.(?!\w)': 'Major',
+    r'\bCmdr\.(?!\w)': 'Commander',
+    r'\bAdm\.(?!\w)': 'Admiral',
+    r'\bCpl\.(?!\w)': 'Corporal',
+    r'\bPvt\.(?!\w)': 'Private',
+    r'\bSgt\. Major\.(?!\w)': 'Sergeant Major',
+    r'\bSt\.(?!\w)': 'Saint',
+    # Common textual abbreviations TTS mangles.
+    r'\bapprox\.(?!\w)': 'approximately',
+    r'\bdept\.(?!\w)': 'department',
+    r'\bgov\.(?!\w)': 'government',
+    r'\bpres\.(?!\w)': 'President',
+    r'\bPres\.(?!\w)': 'President',
+    r'\bhrs\.(?!\w)': 'hours',
+    r'\bno\.(?!\w)': 'number',
+    r'\bNos\.(?!\w)': 'numbers',
+    r'\bSec\.(?!\w)': 'Secretary',
+    r'\bRep\.(?!\w)': 'Representative',
+    r'\bSen\.(?!\w)': 'Senator',
+    r'\bGov\.(?!\w)': 'Governor',
+    r'\bRev\.(?!\w)': 'Reverend',
+    r'\bGen\.\b(?=[A-Z])': 'General',
 }
 
 
@@ -456,8 +581,11 @@ def _clean_text(text: str) -> str:
     text = _normalize_unicode(text)
     text = _spell_acronyms(text)
     text = _spell_titles(text)
+    text = _expand_world_wars(text)
+    text = _expand_dotted_initials(text)
     text = _expand_units(text)
     text = _fix_pronunciation(text)
+    text = _expand_times_and_labels(text)
     text = _fix_number_hyphens(text)
     text = _expand_numbers(text)
     return _final_spacing(text)

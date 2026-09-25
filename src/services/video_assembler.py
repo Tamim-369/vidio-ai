@@ -178,10 +178,15 @@ def _render_line(line: dict, size: tuple, ws: str) -> str | None:
     frames = _line_frames(asset_paths, total_duration, size)
 
     # Burn styled karaoke captions onto this line's frames (after crossfades).
+    # Use the *spoken* text (what TTS actually pronounced, stored at audio
+    # stage) so the caption word count matches the narration — otherwise
+    # cleanup that expands tokens (J.R.R. -> "J R R", "12 km/h" -> words)
+    # desyncs the karaoke highlight from the audio.
+    spoken = line.get("spoken_text") or line["text"]
     if CAPTIONS_ENABLED and line.get("text") and audio_path:
         accent = accent_for_style(VIDEO_STYLE, CAPTION_ACCENT)
-        word_times = align_words(audio_path, line["text"])
-        frames = add_captions(frames, line["text"], total_duration, accent=accent, word_times=word_times, frame_rate=FPS)
+        word_times = align_words(audio_path, spoken)
+        frames = add_captions(frames, spoken, total_duration, accent=accent, word_times=word_times, frame_rate=FPS)
 
     def make_frame(t, f=frames):
         idx = min(int(t * FPS), len(f) - 1)
