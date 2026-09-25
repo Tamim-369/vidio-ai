@@ -42,7 +42,7 @@ if command -v uv >/dev/null 2>&1; then
 elif command -v python3 >/dev/null 2>&1; then
   PY="pip"
 else
-  fail "neither 'uv' nor 'python3' found — install Python 3.13 (see setup.md)"
+  fail "neither 'uv' nor 'python3' found - install Python 3.13 (see setup.md)"
 fi
 ok "package tool: $PY"
 
@@ -70,9 +70,9 @@ fi
 
 # --- 5. .env from template ---------------------------------------------------
 if [ ! -f .env ]; then
-  [ -f .env.example ] || fail "missing .env.example — re-clone the repo"
+  [ -f .env.example ] || fail "missing .env.example - re-clone the repo"
   cp .env.example .env
-  ok "created .env from .env.example — edit it and add your keys"
+  ok "created .env from .env.example - edit it and add your keys"
 else
   ok ".env already exists"
 fi
@@ -83,7 +83,7 @@ if [ "$SKIP_VOICE" -eq 0 ]; then
     ok "narrator voice found: voices/narrator.safetensors"
   else
     if grep -q "^POCKET_VOICE_REF=" .env 2>/dev/null && ! grep -q "^POCKET_VOICE_REF=$" .env 2>/dev/null; then
-      info "POCKET_VOICE_REF is set — the voice will be built on first run"
+      info "POCKET_VOICE_REF is set - the voice will be built on first run"
       info "(requires the gated pocket-tts model: accept terms on HF + 'uvx hf auth login')"
     else
       info "no narrator voice yet: add 'voices/narrator.safetensors' or set"

@@ -1,158 +1,316 @@
 # Setup
 
-Builds faceless YouTube Shorts: research/viral-topic generation → story/script → Pocket-TTS voiceover → image assembly → MP4 → optional YouTube upload.
+## What this project does
 
-## Prerequisites
+Builds faceless YouTube Shorts videos automatically. The pipeline:
 
-- Python 3.13 (see `.python-version`; a 3.12 venv also works)
-- System binaries (must be on `PATH`):
-  - `ffmpeg` — video assembly (`video_assembler.py`)
-  - `sox` — TTS DSP (pitch, tempo, EQ; `tts_dsp.py`)
-  - `tesseract` — OCR text-slop filter for images (`pytesseract`; `agents/asset/agent.py`)
-- [uv](https://docs.astral.sh/uv/), or plain `pip`/`venv`
+1. picks viral/mystery topics (Reddit, competitor channel mining, Wikipedia)
+2. researches each topic
+3. writes a story and a script
+4. generates voiceover audio with Pocket-TTS
+5. fetches images and captions
+6. assembles everything into an MP4
+7. optionally uploads to YouTube
 
-## Install
+## What you need before you start
 
-One command does everything: checks prerequisites, creates `.venv`, installs
-requirements, installs Playwright Chromium, creates `.env` from the template,
-and checks the narrator voice.
+### Hardware
+
+- Any modern CPU is enough. A GPU makes TTS generation faster but is not required.
+
+### System packages
+
+These three programs must be on your `PATH`. The code calls them directly.
+
+| Program | Used for | Ubuntu/Debian | macOS | Windows |
+|---|---|---|---|---|
+| `ffmpeg` | video assembly | `sudo apt install ffmpeg` | `brew install ffmpeg` | `winget install ffmpeg` |
+| `sox` | TTS audio DSP | `sudo apt install sox` | `brew install sox` | `winget install sox` |
+| `tesseract` | OCR text filter on images | `sudo apt install tesseract-ocr` | `brew install tesseract` | `winget install tesseract` |
+
+### Software
+
+- Python 3.13 (with a `.python-version` file, `uv` picks it automatically; 3.12 also works)
+- [uv](https://docs.astral.sh/uv/) (recommended) or plain `pip`/`venv`
+- `git`
+
+> If you use `uv`, install it with: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+### Accounts and API keys (optional except the first one)
+
+The pipeline needs at least one AI text model to write scripts. Everything else
+is optional and only enables that feature.
+
+| Account | Where to get it | Needed for | Required? |
+|---|---|---|---|
+| Groq | https://console.groq.com/keys | main text LLM (best output) | at least one of the three LLM options |
+| Gemini | https://aistudio.google.com/apikey | text LLM fallback + topic brainstorming | fallback |
+| Cloudflare Workers AI | https://dash.cloudflare.com → Workers AI | text LLM last resort | last resort |
+| Pexels | https://www.pexels.com/api/ | image search for video | for image fetching |
+| HuggingFace | https://huggingface.co/settings/tokens | download TTS model | if you build a new voice (see TTS model) |
+| Reddit | https://www.reddit.com/prefs/apps | topic source (script app) | optional |
+| Google Cloud / YouTube | https://console.cloud.google.com | uploading to YouTube | optional |
+
+You do not need all of them. The absolute minimum to render a video is:
+- one LLM key (Groq preferred)
+- a Pexels API key
+- a voice (see Voice section)
+
+## Step 1. Clone the repository
 
 ```bash
-git clone https://github.com/Tamim-369/vidio-ai.git && cd vidio-ai
+git clone https://github.com/Tamim-369/vidio-ai.git
+cd vidio-ai
+```
+
+## Step 2. Install dependencies
+
+### Option A: one command (recommended)
+
+```bash
 bash setup.sh
 ```
 
-Flags: `--no-playwright` (skip the optional ~150 MB browser download),
-`--no-voice-check`. Then edit `.env` and add your keys — see below.
+The script does everything for you:
 
----
+1. checks that `ffmpeg`, `sox`, and `tesseract` are installed
+2. detects `uv` or `pip`
+3. creates a virtual environment in `.venv`
+4. installs everything in `requirements.txt`
+5. installs the Playwright Chromium browser (optional feature)
+6. creates `.env` from `.env.example` if you do not have one
+7. checks whether the narrator voice exists and tells you the next step
 
-Manual install (if you prefer the steps yourself):
-
-If using pip directly:
+Useful flags:
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
+bash setup.sh --no-playwright     # skip the optional ~150 MB browser download
+bash setup.sh --no-voice-check    # do not check for the narrator voice
 ```
 
-## Environment (.env)
+### Option B: manual steps
 
-Start from the template and fill in only what you have:
+With uv:
+
+```bash
+uv venv
+uv pip install -r requirements.txt
+uv run playwright install chromium   # optional
+```
+
+With plain pip:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+playwright install chromium          # optional
+```
+
+## Step 3. Configure `.env`
+
+The project reads its configuration from a file named `.env` in the repo root.
+Start from the template:
 
 ```bash
 cp .env.example .env
 ```
 
-It is loaded automatically by the CLI and every module that reads a knob —
-`dotenv` is handled internally, so no shell `export` is needed. Never commit
-`.env` (already gitignored).
+Then open `.env` and fill in your keys. The file is loaded automatically by the
+CLI and by every module that reads a setting. You never need to `export`
+anything in your shell, and the file is gitignored so it will never be
+committed.
 
-| Variable | Required | Purpose |
+### All supported variables
+
+| Variable | Purpose | Required |
 |---|---|---|
-| `GROQ_API_KEY` | yes* | Primary LLM (script/story/research/JSON). `_SECOND`/`_THIRD` keys rotate on failure. |
-| `GEMINI_API_KEY` (`_ONE`..`_FIVE`) | fallback | Gemini text fallback + topic brainstormer. |
-| `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | fallback | Cloudflare Workers AI, last-resort LLM. |
-| `PEXELS_API_KEY` | assets | Image search/asset fetching. |
-| `POCKET_VOICE_REF` | if no voice | Path to a reference `.wav` used to build the narrator voice state (see Voice). |
-| `HF_HOME` | recommended | Where HuggingFace caches TTS models (e.g. `<repo>/.models`). |
-| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` / `REDDIT_USERNAME` / `REDDIT_PASSWORD` | topic source | Optional Reddit OAuth ("script" app at reddit.com/prefs/apps). |
-| `YOUTUBE_CLIENT_SECRETS` / `YOUTUBE_TOKEN_FILE` | upload | YouTube OAuth files (defaults `client_secrets.json`/`token.json`). |
-| `YOUTUBE_PRIVACY_STATUS` | | `public`/`private`/`unlisted` (default `private`). |
-| `YOUTUBE_REDIRECT_PORT` | | OAuth loopback port (default `8080`). |
-| `YOUTUBE_CATEGORY_ID` | | Video category (default `27` = Education). |
-| `YOUTUBE_TAGS` | | Comma-separated tags appended to every upload. |
-| `TTS_MIN_WPS` / `TTS_MAX_WPS` / `LOCAL_MODEL` / `CAPTIONS_ENABLED` / `ASSET_*` / `STAGE_TIMEOUT_S` / `MAX_*` | tuning | Optional behavioral knobs; each has a sane default. |
+| `GROQ_API_KEY` | primary LLM | at least one LLM key |
+| `GROQ_API_KEY_SECOND` | second Groq key, rotated on failure | no |
+| `GROQ_API_KEY_THIRD` | third Groq key, rotated on failure | no |
+| `GEMINI_API_KEY` | Gemini fallback LLM | no |
+| `GEMINI_API_KEY_ONE` .. `GEMINI_API_KEY_FIVE` | five Gemini keys, rotated in order | no |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare Workers AI access token | no |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account id | no |
+| `PEXELS_API_KEY` | image search | for images |
+| `HF_HOME` | where TTS models are cached, e.g. `<repo>/.models` | recommended |
+| `HF_TOKEN` | HuggingFace token, only if building a new voice | only for new voice |
+| `POCKET_VOICE_REF` | path to a reference `.wav` to build the narrator voice | only if no prebuilt voice |
+| `REDDIT_CLIENT_ID` | Reddit script app client id | only for Reddit topics |
+| `REDDIT_CLIENT_SECRET` | Reddit script app client secret | only for Reddit topics |
+| `REDDIT_USERNAME` | Reddit username | only for Reddit topics |
+| `REDDIT_PASSWORD` | Reddit password | only for Reddit topics |
+| `YOUTUBE_CLIENT_SECRETS` | path to the YouTube OAuth client file (default `client_secrets.json`) | only for upload |
+| `YOUTUBE_TOKEN_FILE` | path to the saved OAuth token (default `token.json`) | only for upload |
+| `YOUTUBE_PRIVACY_STATUS` | `public`, `private`, or `unlisted` (default `private`) | only for upload |
+| `YOUTUBE_REDIRECT_PORT` | OAuth loopback port (default `8080`) | only for upload |
+| `YOUTUBE_CATEGORY_ID` | video category id (default `27` = Education) | only for upload |
+| `YOUTUBE_TAGS` | comma separated tags added to every upload | no |
 
-\* At least one text LLM must be configured; the chain is Groq → Gemini → Cloudflare.
+Optional tuning knobs (each has a sane default, skip unless you want to change
+behavior):
 
-## Voice
+| Variable | Purpose |
+|---|---|
+| `TTS_MIN_WPS` / `TTS_MAX_WPS` | speaking-rate band for TTS pacing |
+| `CAPTIONS_ENABLED` | enable or disable captions |
+| `LOCAL_MODEL` | model override |
+| `ASSET_*` | image fetching behavior (count, aspect ratio, text slop filter) |
+| `STAGE_TIMEOUT_S` | per-stage timeout |
+| `MAX_EVAL_ROUNDS`, `MAX_FACT_FIXES`, `MAX_SCENE_ATTEMPTS` | story retry budgets |
 
-The pipeline uses the Pocket-TTS "narrator" voice exclusively (see
-`agents/voice/registry.py`). **The voice does not ship in the repo** —
-`voices/` is gitignored, so a fresh clone has no voice. Pick one:
+> The LLM fallback chain is: Groq, then Gemini, then Cloudflare. Only the first
+> key you provide is read, the others are only used when the earlier ones fail.
 
-1. **Prebuilt state** — place `voices/narrator.safetensors` from an existing
-   run/drive into the repo (works with either model variant).
-2. **Build it from a reference wav** — put a 5–15s clean narration `.wav`
-   somewhere and set `POCKET_VOICE_REF` in `.env`. The first run builds
-   `voices/narrator.safetensors` from it (then it can be removed). **This
-   path requires the gated model — see "TTS model".**
+## Step 4. The TTS model
 
-Without one of these, every TTS run fails with a `FileNotFoundError`.
+The narrator uses Kyutai's Pocket-TTS. The model is **not** bundled in the
+repo. It downloads from HuggingFace on the first TTS run and is cached under
+`$HF_HOME/hub` (default `~/.cache/huggingface`, set `HF_HOME` in `.env` to
+keep it inside the project, for example `HF_HOME=.models`).
 
-## TTS model
+There are two model variants:
 
-The narrator runs on Kyutai's Pocket-TTS. The model is NOT bundled in the repo —
-it is downloaded from HuggingFace on the first TTS run and cached under
-`$HF_HOME/hub` (default `HF_HOME=~/.cache/huggingface`; point it inside the
-project, e.g. `HF_HOME=<repo>/.models`, so it is reused and gitignored).
+| Variant | HuggingFace repo | Auth needed | Works with |
+|---|---|---|---|
+| Open | `kyutai/pocket-tts-without-voice-cloning` | no | a prebuilt `voices/narrator.safetensors` |
+| Gated | `kyutai/pocket-tts` | yes | also lets you build a new voice from a `.wav` |
 
-There are two model variants, and which one you get depends on whether you
-already have a voice state file:
+If no HuggingFace auth is available, the library silently downloads the open
+variant and the prebuilt narrator voice still works. You only need the gated
+model if you want to create a new voice from a reference audio file.
 
-- **Open model — `kyutai/pocket-tts-without-voice-cloning`** (~a few GB, no
-  login). This is what downloads if you have no HuggingFace auth. It works with
-  a **prebuilt** `voices/narrator.safetensors` (the repo's normal path).
-- **Gated model — `kyutai/pocket-tts`** (needed to **create** a new voice from
-  a reference `.wav`). To enable it:
-
-  ```bash
-  # 1. Accept the model terms:
-  #    https://huggingface.co/kyutai/pocket-tts  -> "Agree and access repository"
-  uvx hf auth login          # or set HF_TOKEN=<token> in .env
-  ```
-
-  On first run the model downloads into `$HF_HOME/hub/models--kyutai--pocket-tts*`.
-
-> Cold-start note: the download is a few GB and takes a while on slow
-> connections. If `TTSModel.load_model()` can't fetch the gated model, the
-> library silently uses the open variant — so a missing login only surfaces
-> when you later try to build a new voice (`POCKET_VOICE_REF`), not at load.
-
-## LLM assets
-
-Groq/Gemini/Cloudflare credentials from `.env` are enough. See "TTS model" for
-the TTS model download.
-
-## YouTube upload (optional)
-
-Handled on the first `--upload` run:
-
-1. Put your Google Cloud OAuth client in `client_secrets.json`
-   (or set `YOUTUBE_CLIENT_SECRETS`).
-2. If it is a "Web application" client, register the redirect URI
-   `http://localhost:8080/` (and `http://127.0.0.1:8080/`) in the Cloud
-   Console; desktop-app clients accept any loopback port automatically.
-3. Run the pipeline once; the tool opens a browser, you authorize, and
-   `token.json` is saved (gitignored). Subsequent runs reuse the token.
-
-`--no-upload` skips this entirely.
-
-## Run
-
-The CLI bootstraps `sys.path` and loads `.env`, so it works from any CWD:
+To enable the gated model:
 
 ```bash
-# Single video for one topic
-uv run python src/cli/main.py "The mystery of the Dyatlov Pass"
-
-# No YouTube upload
-uv run python src/cli/main.py "Topic" --no-upload
-
-# Research + batch-render topics, or reuse a saved topic batch
-uv run python src/cli/main.py --batch
-uv run python src/cli/main.py --batch --use-saved
-
-# Stages / helpers
-uv run python src/cli/generate_topics.py --target 20 --save-only
-uv run python src/cli/research_topics.py --no-miner
-uv run python src/cli/main.py --list-voices
-uv run python src/cli/main.py --script-only          # topics + scripts only
+# 1. open https://huggingface.co/kyutai/pocket-tts and click "Agree and access repository"
+# 2. log in locally:
+uvx hf auth login
+#    or set HF_TOKEN=<your token> in .env
 ```
 
-Equivalent module form: `uv run python -m src ...`.
+The download is a few GB and happens only once, on the first TTS run.
+
+## Step 5. The narrator voice
+
+The repo does **not** contain the voice. The `voices/` directory is gitignored,
+so a fresh clone has no voice file. Pick one option.
+
+### Option 1: use a prebuilt voice
+
+Drop a narrator voice state file here:
+
+```bash
+voices/narrator.safetensors
+```
+
+You can copy it from an existing installation or a backup. This works with
+either model variant.
+
+### Option 2: build it from a reference wav
+
+Put a 5 to 15 second clean narration `.wav` anywhere on disk and point to it in
+`.env`:
+
+```
+POCKET_VOICE_REF=/absolute/path/to/your_sample.wav
+```
+
+On the first run, the pipeline builds `voices/narrator.safetensors` from it.
+The reference wav can then be removed. This option requires the gated model
+(see the TTS model section above).
+
+Without one of these two options, the pipeline stops with a
+`FileNotFoundError` when it reaches the TTS stage.
+
+## Step 6. Optional integrations
+
+### Reddit topics (optional)
+
+Create a "script" app at https://www.reddit.com/prefs/apps and fill in
+`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, and
+`REDDIT_PASSWORD` in `.env`.
+
+### YouTube upload (optional)
+
+Uploading is on by default for the main command. Skip it with `--no-upload`.
+
+1. Create an OAuth client in Google Cloud Console and download it as
+   `client_secrets.json` (or point `YOUTUBE_CLIENT_SECRETS` at it).
+2. If the client type is "Web application", register the redirect URI
+   `http://localhost:8080/` (and `http://127.0.0.1:8080/`). Desktop app
+   clients accept any loopback port automatically.
+3. Run the pipeline once. A browser opens, you authorize the app, and the token
+   is saved to `token.json` (gitignored). Later runs reuse the token.
+
+## Step 7. Verify the install
+
+```bash
+uv run python src/cli/main.py --list-voices
+```
+
+This loads the CLI, connects the TTS model path, and prints the registered
+voices. Expect to see `narrator`. The first invocation downloads the TTS model
+if it is not cached yet.
+
+## Step 8. Run
+
+Run from anywhere; the CLI bootstraps `sys.path` and loads `.env` itself.
+
+```bash
+# one video for a topic you supply
+uv run python src/cli/main.py "The mystery of the Dyatlov Pass"
+
+# same, but do not upload to YouTube
+uv run python src/cli/main.py "Topic" --no-upload
+
+# research topics and render a batch
+uv run python src/cli/main.py --batch
+
+# reuse an already saved topic batch
+uv run python src/cli/main.py --batch --use-saved
+
+# topics + scripts only, no assets/audio/video/upload
+uv run python src/cli/main.py --script-only
+
+# topic generation helper
+uv run python src/cli/generate_topics.py --target 20 --save-only
+
+# topic research helper
+uv run python src/cli/research_topics.py --no-miner
+```
+
+The same commands work with `python -m src` instead of `python
+src/cli/main.py`.
+
+Main CLI flags:
+
+| Flag | Meaning |
+|---|---|
+| `topic` (positional) | single topic to make a video for |
+| `--batch` | generate topics and render all of them |
+| `--use-saved` | use a saved topic batch instead of generating |
+| `--upload` / `--no-upload` | upload (default) or skip YouTube upload |
+| `--voice VOICE` | force a voice id |
+| `--list-voices` | list registered voices and exit |
+| `--script-only` | stop after topics + scripts |
+| `--limit N` | posts per source when researching (default 100) |
+| `--target N` | how many topics to research (default 24) |
+
+## Tests
+
+The tests are standalone scripts, not pytest. Run each one directly:
+
+```bash
+# staged script pipeline (topics -> story -> script -> scene)
+uv run python -u src/tests/script_lab_test.py
+
+# channel mining
+uv run python src/tests/test_channel_miner.py
+
+# YouTube upload
+uv run python src/tests/test_youtube_upload.py
+```
 
 ## Layout
 
@@ -162,20 +320,27 @@ src/agents/         per-domain agents (topic, research, story, script, scene, as
 src/services/       TTS, DSP, providers/LLM, captions, video assembly, YouTube
 src/pipeline/       orchestration (create_video, run_batch, lab)
 src/utils/          shared file helpers
-src/tests/          unit tests (pytest)
-```
-
-Run the standalone tests directly (each is self-running):
-
-```bash
-.venv/bin/python -u src/tests/script_lab_test.py            # staged script pipeline
-.venv/bin/python src/tests/test_channel_miner.py            # channel mining
-.venv/bin/python src/tests/test_youtube_upload.py           # YouTube upload
+src/tests/          standalone tests
 ```
 
 ## First-run checklist
 
-1. `ffmpeg`, `sox`, `tesseract` on PATH.
-2. `cp .env.example .env` with at least one LLM key + `PEXELS_API_KEY`.
-3. Voice present (`voices/narrator.safetensors`) or `POCKET_VOICE_REF` set.
-4. `output/`, `temp/`, `.models/` are created on demand and gitignored.
+1. `ffmpeg`, `sox`, and `tesseract` are on `PATH`.
+2. `.venv` exists and `requirements.txt` is installed.
+3. `.env` exists with at least one LLM key and `PEXELS_API_KEY`.
+4. A voice exists: `voices/narrator.safetensors` or `POCKET_VOICE_REF` set.
+5. `output/`, `temp/`, and the HF cache dir are created on demand and gitignored.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `command not found: uv` | install uv: `curl -LsSf https://astral.sh/uv/install.sh | sh` |
+| `[setup] ERROR: 'sox' is required...` | install the system package (see table above) |
+| `No Pocket-TTS narrator voice state` | you have no voice; do Step 5 |
+| `VOICE_CLONING_UNSUPPORTED` | you tried to build a voice without the gated model; do Step 4 |
+| `[cf] CLOUDFLARE_API_TOKEN ... missing` | LLM chain ran out of keys; add a Groq or Gemini key |
+| `[gemini] no GEMINI_API_KEY_* configured` | same as above |
+| upload not working | check YouTube OAuth setup, Step 6 |
+| first run very slow | the TTS model is downloading; it is a one time download |
+| `where are the videos` | they are written to `output/<slug>.mp4` |
