@@ -22,8 +22,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.config.settings import YOUTUBE_PRIVACY_STATUS
-from src.services.youtube_upload import generate_metadata, publish_video
+from src.services.youtube_upload import (
+    YOUTUBE_PRIVACY_STATUS,
+    generate_metadata,
+    publish_video,
+)
 
 
 def _find_latest_video() -> str:
@@ -89,7 +92,7 @@ def main():
     video_id = publish_video(video_path, topic, script)
 
     print("\n" + "=" * 60)
-    print(f"✅ Success! Video published:")
+    print("✅ Success! Video published:")
     print(f"   https://youtu.be/{video_id}")
 
 

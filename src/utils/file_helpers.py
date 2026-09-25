@@ -4,9 +4,12 @@ import re
 import shutil
 import time
 
-from src.config.settings import OUTPUT_DIR, TEMP_DIR
-
 DEBUG_DIR = "debug_output"
+
+# Shared output/temp dirs (used directly by every service and agent that
+# touches disk). Kept here as the single place that owns file paths.
+OUTPUT_DIR = "output"
+TEMP_DIR = "temp"
 
 _ARTIFACT_SEQ = 0
 
@@ -20,16 +23,6 @@ def ensure_dirs():
 def cleanup_temp():
     if os.path.exists(TEMP_DIR):
         shutil.rmtree(TEMP_DIR)
-
-
-def save_json(data: dict, path: str):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def load_json(path: str) -> dict:
-    with open(path, "r") as f:
-        return json.load(f)
 
 
 def dump_artifact(step: str, data, topic: str = "") -> str:

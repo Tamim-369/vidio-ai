@@ -8,13 +8,29 @@ else; batch.py just calls these per topic.
 import time
 
 from src.utils.file_helpers import ensure_dirs, cleanup_temp, dump_artifact
-from src.services.data_source import research
-from src.services.asset_fetcher import fetch_assets
+from src.agents.research.sources import research
+from src.agents.asset.agent import fetch_assets
+from src.agents.voice import agent as voice_manager
 from src.services.tts import generate_audio
 from src.services.video_assembler import assemble
 from src.services.youtube_upload import publish_video
-from src.services import voice_manager
-from src.services.script_lab import build_lab_script, speaking_style_for_style
+from src.pipeline.lab import build_lab_script, speaking_style_for_style
+
+
+def _format_timing(timing: dict) -> str:
+    """Render a timing dict as a compact summary of nonzero stages."""
+    return "  ".join(
+        f"{k}={f'{v/60:.1f}m' if v >= 120 else f'{v:.0f}s'}"
+        for k, v in timing.items() if v > 0
+    )
+
+
+def _timed(label: str, step, *args, timing: dict, **kwargs):
+    """Run `step(*args, **kwargs)`, timing it, and stamp `timing[label]`."""
+    t = time.monotonic()
+    result = step(*args, **kwargs)
+    timing[label] = time.monotonic() - t
+    return result
 
 
 def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: str = "",
@@ -49,64 +65,45 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
     timing["research"] = time.monotonic() - t0
     dump_artifact("research", raw_data, topic)
 
-    print(f"\n📝 Building script (100% local, Ollama phi4-mini)...")
-    t = time.monotonic()
+    print("\n📝 Building script (100% local, Ollama phi4-mini)...")
     try:
-        script = build_lab_script(
-            topic,
-            str(raw_data or ""),
-            style=speaking_style_for_style(style),
-        )
+        script = _timed("script", build_lab_script,
+                        topic, str(raw_data or ""),
+                        style=speaking_style_for_style(style))
     except Exception as e:
         print(f"   ❌ Local script lab failed: {e}")
         raise
     print(f"   {len(script['lines'])} lines generated")
-    timing["script"] = time.monotonic() - t
 
     if script_only:
         dump_artifact("script", script, topic)
         timing["total"] = time.monotonic() - t0
-        parts = "  ".join(
-            f"{k}={f'{v/60:.1f}m' if v >= 120 else f'{v:.0f}s'}"
-            for k, v in timing.items() if v > 0
-        )
-        print(f"\n⏱️  Script-only time: {parts}")
-        print(f"\n✅ Script only — assets, audio, video, and upload were skipped.\n")
+        print(f"\n⏱️  Script-only time: {_format_timing(timing)}")
+        print("\n✅ Script only — assets, audio, video, and upload were skipped.\n")
         return script
 
-    print(f"\n🖼️  Fetching images...")
-    t = time.monotonic()
-    script["lines"] = fetch_assets(script["lines"], topic=topic)
-    timing["assets"] = time.monotonic() - t
+    print("\n🖼️  Fetching images...")
+    script["lines"] = _timed("assets", fetch_assets, script["lines"], topic=topic, timing=timing)
 
-    print(f"\n🎙️  Generating voiceover...")
-    t = time.monotonic()
-    script["lines"] = generate_audio(script["lines"], voice=voice_cfg)
-    timing["audio"] = time.monotonic() - t
+    print("\n🎙️  Generating voiceover...")
+    script["lines"] = _timed("audio", generate_audio, script["lines"], voice=voice_cfg, timing=timing)
 
-    print(f"\n🎬 Assembling video...")
-    t = time.monotonic()
-    output = assemble(script)
-    timing["assemble"] = time.monotonic() - t
+    print("\n🎬 Assembling video...")
+    output = _timed("assemble", assemble, script, timing=timing)
 
     # Record the topic as done so it is never regenerated (fuzzy + exact dedup).
-    from src.services.topic_generator import record_made_video
+    from src.agents.topic.helpers import record_made_video
     record_made_video(topic)
 
     if publish:
-        t = time.monotonic()
-        publish_video(output, script["topic"], script)
-        timing["publish"] = time.monotonic() - t
+        print("  (publishing...)")
+        _timed("publish", publish_video, output, script["topic"], script, timing=timing)
     else:
         print("\n⏭️  Skipping YouTube upload (pass --no-upload to keep it local)")
 
     cleanup_temp()
     timing["total"] = time.monotonic() - t0
-    parts = "  ".join(
-        f"{k}={f'{v/60:.1f}m' if v >= 120 else f'{v:.0f}s'}"
-        for k, v in timing.items() if v > 0
-    )
-    print(f"\n⏱️  Build time: {parts}")
+    print(f"\n⏱️  Build time: {_format_timing(timing)}")
     print(f"\n✅ Done! Video saved to: {output}\n")
     return output
 

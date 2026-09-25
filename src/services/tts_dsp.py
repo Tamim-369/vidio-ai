@@ -8,8 +8,22 @@ import os
 import re
 import shlex
 
+from dotenv import load_dotenv
 import numpy as np
 import soundfile as sf
+
+load_dotenv()
+
+# Speaking-rate band (words per second), measured over SPEECH-ONLY time
+# (silence gaps subtracted) so deliberate pauses/dramatic lines are not
+# punished. Only lines whose actual speech bursts fall outside the band are
+# corrected (whole-line uniform tempo): faster than TTS_MAX_WPS → slowed to it,
+# slower than TTS_MIN_WPS → picked up to it. Tuned to natural energized
+# narration (~3.0-3.4 wps of burst speech): a floor of 2.6 left lots of lines
+# audibly draggy, and forcing a 1.05x stretch felt robotic, so the floor sits at
+# normal narration (+1) and the ceiling just reins in the rare rush; 0 disables.
+TTS_MIN_WPS = float(os.getenv("TTS_MIN_WPS", "3.0"))
+TTS_MAX_WPS = float(os.getenv("TTS_MAX_WPS", "3.4"))
 
 
 def _noise_gate(audio: np.ndarray, threshold: float | None = None) -> np.ndarray:
@@ -121,6 +135,69 @@ def _insert_silence(audio: np.ndarray, sr: int, at_s: float, dur_s: float) -> np
     return np.concatenate([left, pad, right])
 
 
+def _quietest_time(env: np.ndarray, center: float, dur: float) -> float:
+    """Time of the lowest-energy frame within +-0.035s of `center`."""
+    i0 = max(int((center - 0.035) / _HOP_S), 0)
+    i1 = min(int((center + 0.035) / _HOP_S) + 1, len(env))
+    if i1 <= i0 or i0 >= len(env):
+        return max(min(center, dur - 0.01), 0.0)
+    k = i0 + int(np.argmin(env[i0:i1]))
+    return min(k * _HOP_S, dur - 0.01)
+
+
+def _envelope(audio: np.ndarray, sr: int) -> np.ndarray:
+    """Per-hop RMS energy envelope used to find quiet frames."""
+    hop = max(1, int(sr * _HOP_S))
+    nf = len(audio) // hop
+    if nf == 0:
+        return np.zeros(0)
+    frame = audio[:nf * hop].reshape(nf, hop)
+    return np.sqrt(np.mean(frame ** 2, axis=1) + 1e-12)
+
+
+def _best_silence(gaps: list, lo: float, hi: float) -> tuple | None:
+    """The `gaps` pause nearest the [lo, hi] boundary window, or None."""
+    best_g, best_d = None, 1e9
+    for (gs, gd) in gaps:
+        if gs >= hi or gs + gd <= lo:
+            continue
+        center = gs + gd / 2
+        if lo <= center <= hi:
+            d = 0.0
+        else:
+            d = min(abs(center - lo), abs(center - hi))
+        if d < best_d:
+            best_d, best_g = d, (gs, gd)
+    return best_g
+
+
+def _apply_pause(out: np.ndarray, sr: int, gs: float, have: float,
+                 target: float, shift: float) -> tuple[np.ndarray, float]:
+    """Resize one real silence to `target`: trim over-long air or lengthen short.
+    Returns (out, updated shift)."""
+    if have > target + 0.05:  # More tolerant of natural pauses
+        # Model left an over-long breath: dead audio + hiss fog between
+        # sentences. Replace the WHOLE gap with `target` clean zeros —
+        # trims the dead air AND zeros out the foggy noise at once.
+        i0 = int((gs + shift) * sr)
+        i1 = int(((gs + have) + shift) * sr)
+        i1 = min(i1, len(out))
+        left = out[:i0].copy()
+        right = out[i1:].copy()
+        fade = min(int(0.002 * sr), len(left), len(right))
+        if fade:
+            left[-fade:] *= np.linspace(1.0, 0.0, fade)
+            right[:fade] *= np.linspace(0.0, 1.0, fade)
+        pad = np.zeros(int(target * sr), dtype=out.dtype)
+        out = np.concatenate([left, pad, right])
+        shift += target - have
+    elif target - have >= 0.05:  # Only extend if meaningfully short
+        at = gs + shift  # extend from the gap's start
+        out = _insert_silence(out, sr, at, target - have)
+        shift += target - have
+    return out, shift
+
+
 def _enforce_pauses(audio: np.ndarray, sr: int, text: str) -> np.ndarray:
     """Give the audio the pauses the punctuation implies.
 
@@ -156,6 +233,7 @@ def _enforce_pauses(audio: np.ndarray, sr: int, text: str) -> np.ndarray:
 
     dur = len(audio) / sr
     gaps = _detect_silence_gaps(audio, sr)
+    env = _envelope(audio, sr)
 
     # Per-word (start, end) times from the real waveform (same alignment the
     # captions use). Only used to anchor WHERE a boundary is; silences that get
@@ -172,24 +250,6 @@ def _enforce_pauses(audio: np.ndarray, sr: int, text: str) -> np.ndarray:
     # Char-proportional fallback (lengthen-only, conservative).
     charlen = np.cumsum([len(t) + 1 for t in tokens])
     total = float(charlen[-1])
-
-    # Envelope used to pick the quietest frame near a boundary (for insertion).
-    hop = max(1, int(sr * _HOP_S))
-    nf = len(audio) // hop
-    if nf > 0:
-        frame = audio[:nf * hop].reshape(nf, hop)
-        env = np.sqrt(np.mean(frame ** 2, axis=1) + 1e-12)
-    else:
-        env = np.zeros(0)
-
-    def _quietest_time(center: float) -> float:
-        """Time of the lowest-energy frame within +-0.035s of `center`."""
-        i0 = max(int((center - 0.035) / _HOP_S), 0)
-        i1 = min(int((center + 0.035) / _HOP_S) + 1, len(env))
-        if i1 <= i0 or i0 >= len(env):
-            return max(min(center, dur - 0.01), 0.0)
-        k = i0 + int(np.argmin(env[i0:i1]))
-        return min(k * _HOP_S, dur - 0.01)
 
     out = audio
     shift = 0.0  # cumulative inserted time this line
@@ -212,76 +272,32 @@ def _enforce_pauses(audio: np.ndarray, sr: int, text: str) -> np.ndarray:
             lo, hi = est - mat_ch, est + mat_ch
 
         # 1) Prefer lengthening a REAL silence the model made near the boundary.
-        best_g, best_d = None, 1e9
-        for (gs, gd) in gaps:
-            if gs >= hi or gs + gd <= lo:
-                continue
-            center = gs + gd / 2
-            if lo <= center <= hi:
-                d = 0.0
-            else:
-                d = min(abs(center - lo), abs(center - hi))
-            if d < best_d:
-                best_d, best_g = d, (gs, gd)
+        best_g = _best_silence(gaps, lo, hi)
         if best_g is not None:
             gs, have = best_g
-            if have > target + 0.05:  # More tolerant of natural pauses
-                # Model left an over-long breath: dead audio + hiss fog between
-                # sentences. Replace the WHOLE gap with `target` clean zeros —
-                # trims the dead air AND zeros out the foggy noise at once.
-                i0 = int((gs + shift) * sr)
-                i1 = int(((gs + have) + shift) * sr)
-                i1 = min(i1, len(out))
-                left = out[:i0].copy()
-                right = out[i1:].copy()
-                fade = min(int(0.002 * sr), len(left), len(right))
-                if fade:
-                    left[-fade:] *= np.linspace(1.0, 0.0, fade)
-                    right[:fade] *= np.linspace(0.0, 1.0, fade)
-                pad = np.zeros(int(target * sr), dtype=out.dtype)
-                out = np.concatenate([left, pad, right])
-                shift += target - have
-            elif target - have >= 0.05:  # Only extend if meaningfully short
-                at = gs + shift  # extend from the gap's start
-                out = _insert_silence(out, sr, at, target - have)
-                shift += target - have
+            out, shift = _apply_pause(out, sr, gs, have, target, shift)
             continue
 
         # 2) Model ran words together → INSERT the pause at the aligned
         #    boundary, at its quietest frame. Only when we have real alignment
         #    (a char-count guess is exactly what caused the mid-word bug).
-        if times is None:
+        #    NEVER fabricate a break for mid-sentence punctuation (commas,
+        #    dashes, colons): narrators run those in one breath, and inserting
+        #    a silence there is what reads as random staccato cuts. Only real
+        #    sentence-final marks (. ! ?) get a forced beat.
+        if times is None or punct not in ('.', '!', '?'):
             continue
-        at = _quietest_time(w_end) + shift
-        pad = target
-        if pad < 0.04 or at + pad * sr > len(out):
+        at = _quietest_time(env, w_end, dur) + shift
+        if target < 0.04 or at + target * sr > len(out):
             continue
-        out = _insert_silence(out, sr, at, pad)
-        shift += pad
+        out = _insert_silence(out, sr, at, target)
+        shift += target
     return out
 
 
-def _attack_dip(audio: np.ndarray, sr: int, dip: float = -2.0, window: float = 0.09) -> np.ndarray:
-    """Per-word/sentence onset pitch dip — the 'gruff attack' signature.
-
-    Detects rising-energy onsets (word/sentence starts) and briefly drops pitch
-    on the attack window via SoX (formant-preserving), crossfading boundaries to
-    avoid clicks. dip < 0 makes word starts deeper, gliding back to normal.
-    """
-    if dip == 0.0:
-        return audio
-    import librosa
-    import subprocess
-    import tempfile
-
-    # Onset detection on a 10ms envelope.
-    hop = int(sr * 0.01)
-    n = int(sr * 0.03)
-    env = librosa.feature.rms(y=audio, frame_length=n, hop_length=hop)[0]
-    env = env / (env.max() + 1e-9)
-    base = float(np.percentile(env, 40))
-    thr = base + (1.0 - base) * 0.25
-
+def _onsets_from_env(env: np.ndarray, hop: int, thr: float) -> list:
+    """Start times (samples) of distinct onsets: >=40ms sustained energy,
+    separated by >=150ms so each trigger is a fresh word/sentence start."""
     onsets = []
     above = env > thr
     min_run = int(0.04 / 0.01)  # 40ms sustained energy = a real onset
@@ -299,38 +315,65 @@ def _attack_dip(audio: np.ndarray, sr: int, dip: float = -2.0, window: float = 0
             i = j
         else:
             i += 1
+    return onsets
 
+
+def _dip_window_sox(audio: np.ndarray, sr: int, t0: int, window: float, cents: int) -> None:
+    """Pitch-dip one onset window in place via SoX, crossfading its edges."""
+    import subprocess
+    import tempfile
+
+    win_len = int(window * sr)
+    e0 = min(t0 + win_len, len(audio))
+    if e0 - t0 < int(0.03 * sr):
+        return
+    seg = audio[t0:e0]
+    with tempfile.TemporaryDirectory() as td:
+        tmp_in = os.path.join(td, "in.wav")
+        tmp_out = os.path.join(td, "out.wav")
+        sf.write(tmp_in, seg, sr)
+        subprocess.run(
+            ["sox", tmp_in, tmp_out, "pitch", str(cents)],
+            check=True, capture_output=True,
+        )
+        seg_p, _ = sf.read(tmp_out, dtype="float32")
+        if len(seg_p) != len(seg):
+            seg_p = seg_p[:len(seg)]
+        # Fade edges (attack inlet / release outlet) so the dip is a glide, not a click.
+        xf = int(0.008 * sr)  # 8ms crossfade at segment edges to prevent clicks
+        f = np.ones(len(seg), dtype=np.float32)
+        f[:xf] = np.linspace(0.0, 1.0, xf)
+        f[-xf:] = np.linspace(1.0, 0.0, xf)
+        seg = seg + (seg_p - seg) * f
+        audio[t0:e0] = seg
+
+
+def _attack_dip(audio: np.ndarray, sr: int, dip: float = -2.0, window: float = 0.09) -> np.ndarray:
+    """Per-word/sentence onset pitch dip — the 'gruff attack' signature.
+
+    Detects rising-energy onsets (word/sentence starts) and briefly drops pitch
+    on the attack window via SoX (formant-preserving), crossfading boundaries to
+    avoid clicks. dip < 0 makes word starts deeper, gliding back to normal.
+    """
+    if dip == 0.0:
+        return audio
+    import librosa
+
+    # Onset detection on a 10ms envelope.
+    hop = int(sr * 0.01)
+    n = int(sr * 0.03)
+    env = librosa.feature.rms(y=audio, frame_length=n, hop_length=hop)[0]
+    env = env / (env.max() + 1e-9)
+    base = float(np.percentile(env, 40))
+    thr = base + (1.0 - base) * 0.25
+
+    onsets = _onsets_from_env(env, hop, thr)
     if not onsets:
         return audio
 
-    win_len = int(window * sr)
     cents = int(round(dip * 100))
-    xf = int(0.008 * sr)  # 8ms crossfade at segment edges to prevent clicks
-
-    # Gather all windows to process, then run sox per window.
-    with tempfile.TemporaryDirectory() as td:
-        for t0 in onsets:
-            s0 = int(t0)
-            e0 = min(s0 + win_len, len(audio))
-            if e0 - s0 < int(0.03 * sr):
-                continue
-            seg = audio[s0:e0]
-            tmp_in = os.path.join(td, "in.wav")
-            tmp_out = os.path.join(td, "out.wav")
-            sf.write(tmp_in, seg, sr)
-            subprocess.run(
-                ["sox", tmp_in, tmp_out, "pitch", str(cents)],
-                check=True, capture_output=True,
-            )
-            seg_p, _ = sf.read(tmp_out, dtype="float32")
-            if len(seg_p) != len(seg):
-                seg_p = seg_p[:len(seg)]
-            # Fade edges (attack inlet / release outlet) so the dip is a glide, not a click.
-            f = np.ones(len(seg), dtype=np.float32)
-            f[:xf] = np.linspace(0.0, 1.0, xf)
-            f[-xf:] = np.linspace(1.0, 0.0, xf)
-            seg = seg + (seg_p - seg) * f
-            audio[s0:e0] = seg
+    for t0 in onsets:
+        _dip_window_sox(audio, sr, int(t0), window, cents)
     return audio
 
 
@@ -368,6 +411,49 @@ def _onset_boost(audio: np.ndarray, sr: int, peak_gain: float = 2.2, window: flo
     return audio * g
 
 
+def _sox_process(combined: np.ndarray, sr: int, eq: list, pitch_shift: float,
+                 speed: float) -> np.ndarray:
+    """SoX formant-preserving pass: EQ + pitch + tempo, when any is requested.
+
+    Round-trips through a temp wav since the sox CLI chains multiple effects.
+    """
+    if not (eq or pitch_shift or speed != 1.0):
+        return combined
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp_in = os.path.join(td, "in.wav")
+        tmp_out = os.path.join(td, "out.wav")
+        sf.write(tmp_in, combined, sr)
+        effects = []
+        if eq:
+            for fil in eq:
+                effects.extend(shlex.split(fil))
+        if pitch_shift:
+            cents = int(round(pitch_shift * 100))
+            effects.extend(["pitch", str(cents)])
+        if speed != 1.0:
+            effects.extend(["tempo", f"{speed:.4f}"])
+        subprocess.run(
+            ["sox", tmp_in, tmp_out, *effects],
+            check=True, capture_output=True,
+        )
+        combined, _ = sf.read(tmp_out, dtype="float32")
+    return combined
+
+
+def _normalize_levels(combined: np.ndarray, gain: float) -> np.ndarray:
+    """RMS-normalize to consistent loudness, apply `gain`, clip to safe range."""
+    TARGET_RMS = 0.15
+    rms = np.sqrt(np.mean(combined ** 2))
+    if rms > 0:
+        combined = combined * (TARGET_RMS / rms)
+    if gain != 1.0:
+        combined = combined * gain
+    return np.clip(combined, -0.95, 0.95)
+
+
 def _finalize(combined: np.ndarray, sr: int, pitch_shift: float = 0.0, gain: float = 1.0, eq: list = None, speed: float = 1.0, attack_pitch: float = 0.0, lead_in: float = 0.06) -> np.ndarray:
     """Shared post-processing: EQ + pitch/speed, attack dip, silence pad, noise gate, RMS normalize, clip.
 
@@ -379,31 +465,7 @@ def _finalize(combined: np.ndarray, sr: int, pitch_shift: float = 0.0, gain: flo
     line must never sit at sample 0 (see below). Keep SHORT: a large pad reads as
     dead air before every line and makes the video feel laggy.
     """
-    if eq or pitch_shift or speed != 1.0:
-        # SoX formant-preserving pitch (no phase-vocoder smear like librosa), per-voice
-        # timbre EQ and time-stretch. Round-trips through a temp wav since sox CLI works
-        # when multiple effects chain.
-        import subprocess
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as td:
-            tmp_in = os.path.join(td, "in.wav")
-            tmp_out = os.path.join(td, "out.wav")
-            sf.write(tmp_in, combined, sr)
-            effects = []
-            if eq:
-                for fil in eq:
-                    effects.extend(shlex.split(fil))
-            if pitch_shift:
-                cents = int(round(pitch_shift * 100))
-                effects.extend(["pitch", str(cents)])
-            if speed != 1.0:
-                effects.extend(["tempo", f"{speed:.4f}"])
-            subprocess.run(
-                ["sox", tmp_in, tmp_out, *effects],
-                check=True, capture_output=True,
-            )
-            combined, _ = sf.read(tmp_out, dtype="float32")
+    combined = _sox_process(combined, sr, eq, pitch_shift, speed)
 
     if attack_pitch:
         combined = _attack_dip(combined, sr, dip=attack_pitch)
@@ -423,15 +485,7 @@ def _finalize(combined: np.ndarray, sr: int, pitch_shift: float = 0.0, gain: flo
     # "isten") is ~20dB under the vowels. Lift the first ~180ms of speech.
     combined = _onset_boost(combined, sr)
 
-    # RMS normalization — consistent loudness across all lines
-    TARGET_RMS = 0.15
-    rms = np.sqrt(np.mean(combined ** 2))
-    if rms > 0:
-        combined = combined * (TARGET_RMS / rms)
-    if gain != 1.0:
-        combined = combined * gain
-    combined = np.clip(combined, -0.95, 0.95)
-    return combined
+    return _normalize_levels(combined, gain)
 
 
 # Deterministic emphasis for lines the script marks "loud" (ALL-CAPS / "!!").
@@ -462,165 +516,14 @@ def _de_shout(text: str) -> str:
     return re.sub(r"[A-Za-z']+", _word, text)
 
 
-def _time_stretch(audio: np.ndarray, sr: int, factor: float) -> np.ndarray:
-    """Formant-preserving whole-line time-stretch via SoX (factor < 1 = slower,
-    factor > 1 = faster).
-
-    Applied across the ENTIRE line uniformly, so it can never create the
-    mid-sentence speed step that per-region stretching caused before. The factor
-    is CLAMPED to a range that stays artifact-free (so an extremely slow line is
-    still picked up as much as is safe rather than skipped entirely). Never
-    slows more than 3%: anything below 0.97 reads as a sudden speed drop.
-    """
-    if factor <= 0:
-        return audio
-    factor = min(max(factor, 0.97), 1.5)
-    import subprocess
-    import tempfile
-    with tempfile.TemporaryDirectory() as td:
-        tmp_in = os.path.join(td, "in.wav")
-        tmp_out = os.path.join(td, "out.wav")
-        sf.write(tmp_in, audio, sr)
-        subprocess.run(["sox", tmp_in, tmp_out, "tempo", f"{factor:.4f}"],
-                       check=True, capture_output=True)
-        out, _ = sf.read(tmp_out, dtype="float32")
-    return out
-
-
-def _strip_lead_buffer(audio: np.ndarray, sr: int, buffer_text: str, full_text: str) -> np.ndarray:
-    """Remove a synthesis-only lead word (e.g. 'Okay.') from the front of a clip.
-
-    Chatterbox voices the FIRST phoneme of a fresh synthesis weakly — the very
-    cause of "Listen"→"isten". Prepending a throwaway word makes that weak onset
-    land on a buffer we then DISCARD: the real first word is synthesized
-    mid-stream (after the buffer's pause), where the model voices onsets fully.
-    The buffer's trailing pause is detected as the gap after the first speech
-    region and cut, so only the real line (plus any pre-roll) remains.
-    """
-    dur = len(audio) / sr
-    if dur < 0.5:
-        return audio
-    # Threshold tuned for the RAW (pre-finalize, unnormalized) waveform: the
-    # buffer's pause can be as short as ~100ms and sits amid model hiss, so the
-    # generic env.max()*0.03 gate is too aggressive here and merges the pause
-    # into speech. Use the quiet-frame floor instead.
-    hop = max(1, int(sr * _HOP_S))
-    n = len(audio) // hop
-    frame = audio[:n * hop].reshape(n, hop)
-    env = np.sqrt(np.mean(frame ** 2, axis=1) + 1e-12)
-    quiet = np.percentile(env, 25)
-    thr = max(quiet * 1.5, env.max() * 0.02, 0.0025)
-    active = env > thr
-    gaps = []
-    in_gap, start = False, 0
-    for i, a in enumerate(active):
-        if not a and not in_gap:
-            in_gap, start = True, i
-        elif a and in_gap:
-            in_gap = False
-            d = (i - start) * _HOP_S
-            if d >= 0.04:
-                gaps.append((start * _HOP_S, d))
-    if in_gap and (n - start) * _HOP_S >= 0.04:
-        gaps.append((start * _HOP_S, (n - start) * _HOP_S))
-
-    # Speech regions are the intervals between gaps.
-    regions, cur = [], 0.0
-    for gs, gd in gaps:
-        if gs - cur >= 0.04:
-            regions.append((cur, gs))
-        cur = gs + gd
-    if dur - cur >= 0.04:
-        regions.append((cur, dur))
-
-    # Proportional estimate of where the buffer ends (chars share of duration
-    # + half a breath) — used as a sanity bound, never as the exact cut.
-    total = max(len(full_text or ""), 1)
-    frac = len(buffer_text or "") / total
-    est = frac * dur + 0.15
-
-    if len(regions) >= 2:
-        # Buffer = first speech region; cut at the start of the second region
-        # (end of the buffer's pause). Clamp so we never retain more than
-        # ~0.45s of the buffer's trailing breathe even if gap detection is off.
-        cut = min(regions[1][0], regions[0][1] + 0.45)
-    else:
-        cut = est
-
-    print(f"    [tts] Lead-buffer strip: dur={dur:.2f}s regions={len(regions)} est={est:.2f}s cut={cut:.2f}s")
-    return audio[int(cut * sr):]
-
-
-def _normalize_pacing(audio: np.ndarray, sr: int, text: str, params: dict, is_first: bool = False) -> np.ndarray:
-    """Equalize speaking rate into the [TTS_MIN_WPS, TTS_MAX_WPS] band.
-
-    The rate is words/second measured over SPEECH-ONLY time — silence gaps are
-    subtracted first — so a pause-heavy dramatic line (long breaths between
-    staccato words) is not miscounted as slow and its pauses stay intact. Only
-    genuine speech tempo is corrected: too-fast lines are slowed to the band
-    top, too-slow lines are picked up to the band floor, via a whole-line
-    uniform tempo (formant-preserving, no mid-sentence speed step).
-
-    For the first line (is_first=True), enforce EXACT mid-band pace (3.2 wps)
-    so the opening sounds perfectly normal — not slow, not fast, just right.
-    """
-    from src.config.settings import TTS_MIN_WPS, TTS_MAX_WPS
-    if not TTS_MAX_WPS or TTS_MAX_WPS <= 0:
-        return audio
-    words = len((text or "").split())
-    if words < 2:
-        return audio
-    dur = len(audio) / sr
-    if dur < 0.5:
-        return audio
-    gaps = _detect_silence_gaps(audio, sr)
-    speech = max(dur - sum(d for _, d in gaps), 0.3)
-    wps = words / speech
-    
-    # Mid-band target for "normal" pace
-    mid_wps = (TTS_MIN_WPS + TTS_MAX_WPS) / 2.0  # 3.2
-    
-    if is_first:
-        # First line: enforce EXACT mid-band pace
-        if abs(wps - mid_wps) > 0.05:  # only adjust if meaningfully off
-            factor = mid_wps / wps
-            # Cap at reasonable bounds to avoid artifacts
-            factor = min(max(factor, 0.85), 1.15)
-            print(f"    [tts] First-line pacing: {wps:.2f} -> {mid_wps:.2f} wps ({factor:.2f}x)")
-            return _time_stretch(audio, sr, factor)
-        return audio
-    
-    if wps > TTS_MAX_WPS:
-        # Cap the slow-down at 3%: a line that ran hot must not suddenly gum up
-        # against the band ceiling (perceptible as a mid-video speed drop).
-        factor = max(TTS_MAX_WPS / wps, 0.97)
-    elif wps < TTS_MIN_WPS:
-        factor = TTS_MIN_WPS / wps  # faster
-    else:
-        return audio
-    print(f"    [tts] Pacing: {wps:.2f} wps over {speech:.2f}s speech / {dur:.2f}s total -> {factor:.2f}x")
-    return _time_stretch(audio, sr, factor)
-
-
 def postprocess_line(combined: np.ndarray, sr: int, engine: str, text: str, params: dict) -> tuple:
-    """Single shared post-synthesis seam (pause enforcement + engine-finalize).
+    """Single shared post-synthesis seam (pause enforcement + finalize).
 
-    Used by BOTH the TTS generators and the harness re-bake path so a re-applied
-    pause tweak reproduces EXACTLY what a fresh bake would emit — no drift.
+    Pocket-TTS is the only engine; `engine` is accepted for API compatibility.
     Returns (final_audio, raw_audio) where raw is the pure synthesis
     (pre-pause, pre-finalize) used to rebuild instantly on pause-only changes.
     """
     raw = combined.astype(np.float32)
     final = _enforce_pauses(raw, sr, text)
-    if engine == "pocket":
-        final = _finalize(final, sr, gain=params.get("gain", 1.0))
-    else:  # chatterbox — engine-specific post params
-        final = _finalize(
-            final, sr,
-            pitch_shift=params.get("pitch_shift", 0.0),
-            gain=params.get("gain", 1.0),
-            eq=params.get("eq"),
-            speed=params.get("speed", 1.0),
-            attack_pitch=params.get("attack_pitch", 0.0),
-        )
+    final = _finalize(final, sr, gain=params.get("gain", 1.0))
     return final, raw

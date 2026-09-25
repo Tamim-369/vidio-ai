@@ -29,12 +29,6 @@ cookie
 /topics
 raw_*.txt
 debug_output/
-voice_tests/test_output/*
-voice_tests/*.wav
-voice_tests/scripts/*
-voice_tests/assets/*
-voice_tests/audio/*
-voice_tests/output/*
 /voices
 /channel_cache
 .venv*/

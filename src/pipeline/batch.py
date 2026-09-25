@@ -12,7 +12,7 @@ self-contained phases:
 import time
 
 from src.utils.file_helpers import dump_artifact
-from src.services import voice_manager
+from src.agents.voice import agent as voice_manager
 from src.pipeline.single import create_video_from_topic
 
 
@@ -23,13 +23,13 @@ def _select_topics(generate: bool, target: int) -> list:
     idea pass, then the deep research pipeline — each tried only if the
     previous one came back empty. generate=False loads the latest saved batch.
     """
-    from src.services.research_pipeline import generate_first_topics, run_research_pipeline
-    from src.services.topic_generator import load_latest_topics
+    from src.agents.research.agent import generate_first_topics, run_research_pipeline
+    from src.agents.topic.helpers import load_latest_topics
 
     if generate:
         print(f"\n🎯 Topic agent: picking {target} fresh topic(s)...")
         try:
-            from src.services.topic_agent.agent import run_topic_agent
+            from src.agents.topic.agent import run_topic_agent
 
             topics = run_topic_agent(target=target)
         except Exception as e:

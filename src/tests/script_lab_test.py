@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.services.script_lab import run_pipeline
+from src.pipeline.lab import run_pipeline
 
 DEFAULT_TOPIC = "The Ghost Army"
 DEFAULT_STORY = """The Ghost Army was a real United States Army unit that won battles without ever firing a shot. It was called the 23rd Headquarters Special Troops, and it used inflatable rubber tanks, fake radio chatter, and pretend generals to fool the Germans across Europe in World War Two. About 1,100 men served in it, most of them artists, engineers, and sound men rather than combat soldiers. They landed in Normandy in July 1944, and they kept their secret so well that the operation was classified until 1996. Their rubber tanks and artillery looked real from 500 yards, and the whole unit could pack up and move about 63 miles in a single night. They staged more than 20 deception operations in France, Luxembourg, and Germany. Their radio operators imitated entire phantom divisions, so German listeners heard more enemy units than actually existed - sometimes a force of 30,000 men. The sound trucks they used had speakers that could project the noise of tanks and infantry miles away. After the war, two members of this unit became famous: the fashion designer Bill Blass and the artist Ellsworth Kelly. They painted and inflated their way through a war, and their story stayed hidden for more than fifty years."""

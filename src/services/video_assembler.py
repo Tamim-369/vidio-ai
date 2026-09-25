@@ -1,13 +1,30 @@
 import os
 import subprocess
 import numpy as np
+from dotenv import load_dotenv
 from PIL import Image
 from moviepy import VideoClip, AudioFileClip
-from src.config.settings import VIDEO_FORMAT, VIDEO_RESOLUTIONS, TEMP_DIR, VIDEO_STYLE, CAPTIONS_ENABLED, CAPTION_ACCENT
+from src.utils.file_helpers import TEMP_DIR
 from src.services.captions import add_captions, accent_for_style, align_words
 from src.utils.file_helpers import output_path
 
+load_dotenv()
+
 FPS = 24
+
+# Video geometry and caption rendering knobs (used only by this module).
+VIDEO_FORMAT = "9:16"         # "9:16" for Shorts/Reels, "16:9" for YouTube
+VIDEO_STYLE = "attraction"    # educational | motivational | ad | storytelling | attraction
+# Image resolution per format.
+VIDEO_RESOLUTIONS = {
+    "9:16": (1080, 1920),
+    "16:9": (1920, 1080),
+}
+# Styled word-by-word "karaoke" captions burned into the frames (matches the
+# video vibe via VIDEO_STYLE accent color). Disable to render caption-free.
+CAPTIONS_ENABLED = os.getenv("CAPTIONS_ENABLED", "1") == "1"
+# Optional accent override (hex, e.g. "#FFC94D"). Empty = auto from VIDEO_STYLE.
+CAPTION_ACCENT = os.getenv("CAPTION_ACCENT", "")
 
 
 def _load_image(img_path: str, size: tuple) -> np.ndarray:
@@ -118,6 +135,60 @@ def _line_frames(asset_paths: list, total_duration: float, size: tuple) -> np.nd
     return all_frames
 
 
+def _line_assets(line: dict) -> list:
+    """The image paths for a line, with single-asset backward compat."""
+    asset_paths = line.get("asset_paths", [])
+    if not asset_paths and line.get("asset_path"):
+        asset_paths = [line.get("asset_path")]
+    return asset_paths
+
+
+def _render_line(line: dict, size: tuple) -> str | None:
+    """Render one line (images + captions + audio) to a temp mp4 segment.
+
+    Returns the segment path, or None when the line has no usable assets/audio.
+    """
+    asset_paths = _line_assets(line)
+    audio_path = line.get("audio_path")
+    if not asset_paths or not audio_path:
+        print(f"  [assembler] Skipping line {line['id']} — missing assets or audio")
+        return None
+
+    total_duration = line["actual_duration"]
+    print(f"  [assembler] Line {line['id']}: Processing {len(asset_paths)} image(s) over {total_duration:.1f}s...")
+
+    # Build ONLY this line's frames, then render it to a temp file and free.
+    frames = _line_frames(asset_paths, total_duration, size)
+
+    # Burn styled karaoke captions onto this line's frames (after crossfades).
+    if CAPTIONS_ENABLED and line.get("text") and audio_path:
+        accent = accent_for_style(VIDEO_STYLE, CAPTION_ACCENT)
+        word_times = align_words(audio_path, line["text"])
+        frames = add_captions(frames, line["text"], total_duration, accent=accent, word_times=word_times, frame_rate=FPS)
+
+    def make_frame(t, f=frames):
+        idx = min(int(t * FPS), len(f) - 1)
+        return f[idx]
+
+    video_clip = VideoClip(make_frame, duration=total_duration)
+    audio = AudioFileClip(audio_path)
+    video_clip = video_clip.with_audio(audio)
+
+    seg = os.path.join(TEMP_DIR, f"line_{line['id']}.mp4")
+    print(f"  [assembler] Rendering line {line['id']} → {seg}")
+    # preset="veryfast": libx264 speed/quality tradeoff is imperceptible for
+    # short social clips with captions, and cuts encode time by 2-4x here.
+    video_clip.write_videofile(seg, fps=FPS, codec="libx264", audio_codec="aac",
+                               preset="veryfast", logger=None)
+
+    # Free this line's frames array and clip before the next one.
+    del frames
+    del make_frame
+    del video_clip
+    audio.close()
+    return seg
+
+
 def _concat_segments(segment_paths: list, out: str) -> None:
     """Concatenate pre-rendered mp4 segments with ffmpeg concat demuxer (no re-encode)."""
     list_file = os.path.join(TEMP_DIR, "concat_list.txt")
@@ -139,52 +210,11 @@ def assemble(script: dict) -> str:
     line_duration = 0.0
 
     for line in script["lines"]:
-        audio_path = line.get("audio_path")
-        asset_paths = line.get("asset_paths", [])
-        
-        # Backward compatibility: check for single asset_path
-        if not asset_paths and line.get("asset_path"):
-            asset_paths = [line.get("asset_path")]
-        
-        if not asset_paths or not audio_path:
-            print(f"  [assembler] Skipping line {line['id']} — missing assets or audio")
+        seg = _render_line(line, size)
+        if seg is None:
             continue
-
-        total_duration = line["actual_duration"]
-
-        print(f"  [assembler] Line {line['id']}: Processing {len(asset_paths)} image(s) over {total_duration:.1f}s...")
-
-        # Build ONLY this line's frames, then render it to a temp file and free.
-        frames = _line_frames(asset_paths, total_duration, size)
-
-        # Burn styled karaoke captions onto this line's frames (after crossfades).
-        if CAPTIONS_ENABLED and line.get("text") and audio_path:
-            accent = accent_for_style(VIDEO_STYLE, CAPTION_ACCENT)
-            word_times = align_words(audio_path, line["text"])
-            frames = add_captions(frames, line["text"], total_duration, accent=accent, word_times=word_times, frame_rate=FPS)
-
-        def make_frame(t, f=frames):
-            idx = min(int(t * FPS), len(f) - 1)
-            return f[idx]
-
-        video_clip = VideoClip(make_frame, duration=total_duration)
-        audio = AudioFileClip(audio_path)
-        video_clip = video_clip.with_audio(audio)
-
-        seg = os.path.join(TEMP_DIR, f"line_{line['id']}.mp4")
-        print(f"  [assembler] Rendering line {line['id']} → {seg}")
-        # preset="veryfast": libx264 speed/quality tradeoff is imperceptible for
-        # short social clips with captions, and cuts encode time by 2-4x here.
-        video_clip.write_videofile(seg, fps=FPS, codec="libx264", audio_codec="aac",
-                                   preset="veryfast", logger=None)
-
-        # Free this line's frames array and clip before the next one.
-        del frames
-        del make_frame
-        del video_clip
-        audio.close()
         segment_paths.append(seg)
-        line_duration += total_duration
+        line_duration += line["actual_duration"]
 
     if not segment_paths:
         raise RuntimeError("No renderable lines in script")

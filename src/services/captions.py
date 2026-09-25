@@ -22,9 +22,11 @@ import math
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from src.config.settings import FONT_PATH
 
-# Vibe -> accent color. Matches VIDEO_STYLE in settings.py.
+# Caption font (single fixed path, used only here).
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+# Vibe -> accent color. Matches VIDEO_STYLE in video_assembler.py.
 THEME_ACCENTS = {
     "attraction": "#FFC94D",   # amber / high-energy
     "educational": "#5AF0FF",  # cyan / clear
@@ -120,6 +122,44 @@ def align_words(audio_path: str, text: str) -> list:
     return word_times_from_waveform(np.asarray(y, dtype=np.float32), sr, text)
 
 
+def _split_bursts(active: np.ndarray, times: np.ndarray) -> list:
+    """Contiguous active runs -> (start, end) speech bursts.
+
+    Merges silences shorter than ~70ms (word-internal energy dips), so a
+    natural sentence pause still splits the clip into discrete bursts.
+    """
+    MIN_PAUSE_HOPS = 7  # ~70ms -- shorter dips are just word-internal energy
+    labels = np.zeros(len(active), dtype=int)
+    label = 0
+    last_end = -10 ** 9
+    for i, a in enumerate(active):
+        if not a:
+            continue
+        if i - last_end > MIN_PAUSE_HOPS:
+            label += 1
+        labels[i] = label
+        last_end = i
+
+    bursts = []
+    if label > 0:
+        for lab in range(1, label + 1):
+            idx = np.where(labels == lab)[0]
+            bursts.append((times[idx[0]], times[idx[-1]] + HOP_S))
+    return bursts
+
+
+def _burst_word_counts(burst_dur: np.ndarray, n_words: int) -> np.ndarray:
+    """How many words each burst claims, proportional to its duration."""
+    total = burst_dur.sum()
+    shares = np.round(burst_dur / total * n_words).astype(int)
+    shares = np.maximum(shares, 1)
+    while shares.sum() > n_words:
+        shares[np.argmax(shares)] -= 1
+    while shares.sum() < n_words:
+        shares[np.argmin(shares)] += 1
+    return shares
+
+
 def word_times_from_waveform(y: np.ndarray, sr: int, text: str) -> list:
     """Core word-timing model used by align_words(), run on in-memory audio.
 
@@ -141,25 +181,7 @@ def word_times_from_waveform(y: np.ndarray, sr: int, text: str) -> list:
     times = np.arange(n_frames) * HOP_S
 
     thr = env.max() * SILENCE_RATIO
-    active = env > thr
-
-    # Speech bursts: contiguous active runs; merge gaps shorter than MIN_PAUSE.
-    MIN_PAUSE_HOPS = 7  # ~70ms -- shorter dips are just word-internal energy
-    labels = np.zeros(len(active), dtype=int)
-    label = 0
-    last_end = -10 ** 9
-    for i, a in enumerate(active):
-        if not a:
-            continue
-        if i - last_end > MIN_PAUSE_HOPS:
-            label += 1
-        labels[i] = label
-        last_end = i
-    bursts = []
-    if label > 0:
-        for lab in range(1, label + 1):
-            idx = np.where(labels == lab)[0]
-            bursts.append((times[idx[0]], times[idx[-1]] + HOP_S))
+    bursts = _split_bursts(env > thr, times)
     if not bursts:
         # Still too flat to split -- treat whole clip as one continuous burst.
         bursts = [(0.0, times[-1] + HOP_S)]
@@ -175,13 +197,7 @@ def word_times_from_waveform(y: np.ndarray, sr: int, text: str) -> list:
     # Distribute words across bursts: each burst claims its share of total
     # burst time; nearest index quantized so a burst can own >=1 word.
     burst_dur = np.asarray([b - a for a, b in bursts])
-    total = burst_dur.sum()
-    shares = np.round(burst_dur / total * n_words).astype(int)
-    shares = np.maximum(shares, 1)
-    while shares.sum() > n_words:
-        shares[np.argmax(shares)] -= 1
-    while shares.sum() < n_words:
-        shares[np.argmin(shares)] += 1
+    shares = _burst_word_counts(burst_dur, n_words)
 
     starts = []
     idx = 0
@@ -293,6 +309,39 @@ def _scale_alpha(overlay: Image.Image, a: float) -> Image.Image:
     return overlay
 
 
+def _active_part(part_ranges: list, current: int) -> int:
+    """Index of the spoken part that currently holds word `current`."""
+    for pi, (ps, pe) in enumerate(part_ranges):
+        if ps <= current < pe:
+            return pi
+    return 0
+
+
+def _draw_word(d, word: str, x: int, y: int, font, fill: tuple,
+               shadow_off: int, stroke_w: int, stroke: tuple) -> None:
+    """Draw one caption word with its soft drop shadow."""
+    # Soft drop shadow first (offsets by shadow_off).
+    d.text((x + shadow_off, y + shadow_off), word, font=font,
+           fill=(0, 0, 0, 130), stroke_width=stroke_w, stroke_fill=(0, 0, 0, 130))
+    d.text((x, y), word, font=font, fill=fill,
+           stroke_width=stroke_w, stroke_fill=stroke)
+
+
+def _draw_part_overlay(overlay: Image.Image, positions: list, local: int,
+                       accent_rgba: tuple, dim: tuple, shadow_off: int,
+                       stroke_w: int, font) -> None:
+    """Draw the active part's words: past=white, current=accent, future=dim."""
+    d = ImageDraw.Draw(overlay)
+    for j, (word, x, y) in enumerate(positions):
+        if j < local:
+            fill, stroke = (255, 255, 255, 255), (0, 0, 0, 255)
+        elif j == local:
+            fill, stroke = accent_rgba, (0, 0, 0, 255)
+        else:
+            fill, stroke = dim, (0, 0, 0, 120)
+        _draw_word(d, word, x, y, font, fill, shadow_off, stroke_w, stroke)
+
+
 def add_captions(frames: np.ndarray, text: str, duration: float, accent: str = None,
                  word_times: list = None, frame_rate: float = 24.0) -> np.ndarray:
     """Draw chunked karaoke captions onto each frame in `frames`.
@@ -341,7 +390,6 @@ def add_captions(frames: np.ndarray, text: str, duration: float, accent: str = N
         layouts.append(_layout_words(part, font, max_w, h, w))
         part_ranges.append((s, e))
 
-    white = (255, 255, 255, 255)
     dim = _hex("#FFFFFF", alpha=110)
     accent_rgba = _hex(accent or DEFAULT_ACCENT)
 
@@ -357,30 +405,13 @@ def add_captions(frames: np.ndarray, text: str, duration: float, accent: str = N
         current = max(0, min(current, n_words - 1))
 
         overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        d = ImageDraw.Draw(overlay)
 
         if t_now >= starts_t[0]:
-            # Active part: the one holding `current`.
-            p = 0
-            for pi, (ps, pe) in enumerate(part_ranges):
-                if ps <= current < pe:
-                    p = pi
-                    break
+            p = _active_part(part_ranges, current)
             local = current - part_ranges[p][0]
             a = min(1.0, (t_now - starts_t[p]) / PART_FADE_S)
-            positions = layouts[p]
-            for j, (word, x, y) in enumerate(positions):
-                if j < local:
-                    fill, stroke = white, (0, 0, 0, 255)
-                elif j == local:
-                    fill, stroke = accent_rgba, (0, 0, 0, 255)
-                else:
-                    fill, stroke = dim, (0, 0, 0, 120)
-                # Soft drop shadow first (offsets by shadow_off).
-                d.text((x + shadow_off, y + shadow_off), word, font=font,
-                       fill=(0, 0, 0, 130), stroke_width=stroke_w, stroke_fill=(0, 0, 0, 130))
-                d.text((x, y), word, font=font, fill=fill,
-                       stroke_width=stroke_w, stroke_fill=stroke)
+            _draw_part_overlay(overlay, layouts[p], local, accent_rgba, dim,
+                               shadow_off, stroke_w, font)
             if a < 1.0:
                 _scale_alpha(overlay, a)
 

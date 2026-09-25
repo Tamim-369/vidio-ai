@@ -1,4 +1,4 @@
-"""Video-production orchestration — the flows the CLI (src/main.py) signs up to.
+"""Video-production orchestration — the flows the CLI (src/cli/) signs up to.
 
 Public API:
     create_video(topic, raw_data, publish, voice, script_only)  full pipeline for one topic

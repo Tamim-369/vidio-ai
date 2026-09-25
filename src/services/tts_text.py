@@ -227,16 +227,19 @@ def _decimal_words(v: str) -> str:
     return _voice_number(v)
 
 
-def _expand_numbers(text: str) -> str:
-    # Military & isotope designators (exact dict, case-insensitive, plural-safe).
-    def _mil(full: re.Match) -> str:
-        key = full.group(1).upper()
-        spoken = MILITARY.get(key, "")
-        if not spoken:
-            return full.group(0)
-        return _plural_spoken(spoken) if full.group(2) else spoken
+def _military_designator(full: re.Match) -> str:
+    """One military/isotope designator → its spoken form (plural-safe)."""
+    key = full.group(1).upper()
+    spoken = MILITARY.get(key, "")
+    if not spoken:
+        return full.group(0)
+    return _plural_spoken(spoken) if full.group(2) else spoken
 
-    text = MILITARY_RE.sub(_mil, text)
+
+def _expand_weapons_and_formulas(text: str) -> str:
+    """Designators, agent codes, and chemical formulas → spoken forms."""
+    # Military & isotope designators (exact dict, case-insensitive, plural-safe).
+    text = MILITARY_RE.sub(_military_designator, text)
     # Chemical agent codes by letter: "VX" → "V X", "sarin (GB)" → "sarin (G B)".
     text = re.sub(r'\b([A-Z]{1,3})\b',
                   lambda m: _spelled(m.group(1)) if m.group(1).upper() in _SPELL_AGENTS
@@ -248,14 +251,23 @@ def _expand_numbers(text: str) -> str:
     # Digit-less formulas use mixed case (NaCl, HCl, CCl, ChCl): every-cap
     # words are abbreviations, not formulas.
     text = re.sub(r'\b(?=[A-Z]*[a-z])(?:[A-Z][a-z]{0,3}){2,}\b', _formula, text)
-    text = re.sub(r'\b([A-Z][a-z]?)(\d{1,2})\b', lambda m: f"{_element_token(m.group(1))} {_voice_number(m.group(2))}", text)
+    return re.sub(r'\b([A-Z][a-z]?)(\d{1,2})\b',
+                  lambda m: f"{_element_token(m.group(1))} {_voice_number(m.group(2))}", text)
+
+
+def _expand_dates(text: str) -> str:
+    """Full dates and the 9/11 special case → spoken words."""
     # Full dates: 9-11-2001 / 3/13/2003 → "september eleventh two thousand three".
     text = re.sub(r'\b(\d{1,2})[-/](\d{1,2})[-/](\d{4})\b',
                   lambda m: _date_words(m.group(1), m.group(2), m.group(3)), text)
     # 9/11 and 9-11 (optionally a full date 9-11-2001).
     text = re.sub(r'\b9[-/]11[-/](\d{4})\b',
                   lambda m: "nine eleven " + _voice_number(m.group(1)), text)
-    text = re.sub(r'\b9[-/]11\b', 'nine eleven', text, flags=re.IGNORECASE)
+    return re.sub(r'\b9[-/]11\b', 'nine eleven', text, flags=re.IGNORECASE)
+
+
+def _expand_amounts_and_decimals(text: str) -> str:
+    """Ranges, money, percentages, and decimals → spoken words."""
     # Ranges: "60–90" → "sixty to ninety"). An endpoint cannot itself be a
     # comma-grouped number, so "1915 - 400,000" isn't mis-read as 1915→400.
     text = re.sub(r'\b(\d{1,4})(?![\d,])[-–]?\s?[-–]\s*(\d{1,4})(?![\d,])\b',
@@ -267,8 +279,12 @@ def _expand_numbers(text: str) -> str:
     text = re.sub(r'\b(\d{1,4}(?:\.\d+)?)\s*%',
                   lambda m: f"{_decimal_words(m.group(1))} percent", text)
     # Decimals: "7.62" → "seven point sixty two".
-    text = re.sub(r'\b(\d+)\.(\d{1,4})\b',
+    return re.sub(r'\b(\d+)\.(\d{1,4})\b',
                   lambda m: _voice_number(m.group(1)) + " point " + _voice_number(m.group(2)), text)
+
+
+def _expand_ordered_numbers(text: str) -> str:
+    """Ordinals, decades, comma-grouped and bare integers → spoken words."""
     # Ordinals: "3rd" / "173rd".
     text = re.sub(r'\b(\d+)\s*(?:st|nd|rd|th)\b',
                   lambda m: _ordinal_words(int(m.group(1))), text, flags=re.IGNORECASE)
@@ -280,9 +296,15 @@ def _expand_numbers(text: str) -> str:
     text = re.sub(r'\b\d{1,3}(?:,\d{3})+\b',
                   lambda m: _voice_number(m.group(0)), text)
     # Any remaining bare integers.
-    text = re.sub(r'\b(\d{1,9})\b',
+    return re.sub(r'\b(\d{1,9})\b',
                   lambda m: _voice_number(m.group(1)), text)
-    return text
+
+
+def _expand_numbers(text: str) -> str:
+    text = _expand_weapons_and_formulas(text)
+    text = _expand_dates(text)
+    text = _expand_amounts_and_decimals(text)
+    return _expand_ordered_numbers(text)
 
 
 _MONTHS = {1: "january", 2: "february", 3: "march", 4: "april", 5: "may",
@@ -310,97 +332,112 @@ def _plural_decade(two_digits: str) -> str:
     return base + "s"
 
 
-def _clean_text(text: str) -> str:
-    """Normalize text for clean TTS output."""
-    # Unicode normalization
-    # Em-dash → pause-comma. En-dash: stash numeric ranges ("60–90") so the
-    # digit range regex can read them as "to"; everything else is a comma.
+_ABBREVS = {
+    r'\bAI\b': 'A I',
+    r'\bDNA\b': 'D N A',
+    r'\bUN\b': 'U N',
+    r'\bUSA\b': 'U S A',
+    r'\bUSSR\b': 'U S S R',
+    r'\bUK\b': 'U K',
+    r'\bUSAF\b': 'U S A F',
+    r'\bNATO\b': 'N A T O',
+    r'\bRAF\b': 'R A F',
+    r'\bCIA\b': 'C I A',
+    r'\bFBI\b': 'F B I',
+    r'\bNSA\b': 'N S A',
+    r'\bDOD\b': 'D O D',
+    r'\bDHS\b': 'D H S',
+    r'\bDOJ\b': 'D O J',
+    r'\bNASA\b': 'N A S A',
+    r'\bOPEC\b': 'O P E C',
+    r'\bISIS\b': 'ISIS',
+    r'\bBBC\b': 'B B C',
+    r'\bCNN\b': 'C N N',
+    r'\bAP\b': 'A P',
+    r'\bUS\b': 'U S',
+    r'\bUSS\b': 'U S S',
+    r'\bIRGC\b': 'I R G C',
+    r'\bMEK\b': 'M E K',
+    r'\bUSMC\b': 'U S M C',
+    r'\bUSN\b': 'U S N',
+    r'\bSEALs\b': 'seals',
+    r'\bSEAL\b': 'seal',
+    r'\bKGB\b': 'K G B',
+    r'\bGRU\b': 'G R U',
+    r'\bFSB\b': 'F S B',
+    r'\bSPETSNAZ\b': 'spetsnaz',
+    r'\be\.g\.\b': 'for example',
+    r'\bi\.e\.\b': 'that is',
+    r'\bvs\.\b': 'versus',
+    r'\bvs\b': 'versus',
+    r'\bMPH\b': 'miles per hour',
+    r'\bmph\b': 'miles per hour',
+    r'\bKPH\b': 'kilometers per hour',
+    r'\bkph\b': 'kilometers per hour',
+}
+
+
+def _normalize_unicode(text: str) -> str:
+    """Em/en-dashes → comma/pause forms, curly quotes → straight."""
+    # Stash numeric ranges ("60–90") so the digit range regex can read them as
+    # "to"; everything else is a comma.
     text = re.sub(r'(?<=\d)\u2013(?=\d)', '\x02', text)
     text = text.replace("\u2014", ", ").replace("\u2013", ", ")
     text = text.replace("\x02", "\u2013")
     text = text.replace("\u2018", "'").replace("\u2019", "'")
-    text = text.replace("\u201c", '"').replace("\u201d", '"')
+    return text.replace("\u201c", '"').replace("\u201d", '"')
 
-    # Letter-by-letter for acronyms models mangle (Chatterbox/Pocket read them
-    # as words, e.g. "UN" → "un", "DOD" → "dod"). Overlapping-safe: patterns
-    # are word-boundary anchored, order matters when one acronym embeds another.
-    abbrevs = {
-        r'\bAI\b': 'A I',
-        r'\bDNA\b': 'D N A',
-        r'\bUN\b': 'U N',
-        r'\bUSA\b': 'U S A',
-        r'\bUSSR\b': 'U S S R',
-        r'\bUK\b': 'U K',
-        r'\bUSAF\b': 'U S A F',
-        r'\bNATO\b': 'N A T O',
-        r'\bRAF\b': 'R A F',
-        r'\bCIA\b': 'C I A',
-        r'\bFBI\b': 'F B I',
-        r'\bNSA\b': 'N S A',
-        r'\bDOD\b': 'D O D',
-        r'\bDHS\b': 'D H S',
-        r'\bDOJ\b': 'D O J',
-        r'\bNASA\b': 'N A S A',
-        r'\bOPEC\b': 'O P E C',
-        r'\bISIS\b': 'ISIS',
-        r'\bBBC\b': 'B B C',
-        r'\bCNN\b': 'C N N',
-        r'\bAP\b': 'A P',
-        r'\bUS\b': 'U S',
-        r'\bUSS\b': 'U S S',
-        r'\bIRGC\b': 'I R G C',
-        r'\bMEK\b': 'M E K',
-        r'\bUSMC\b': 'U S M C',
-        r'\bUSN\b': 'U S N',
-        r'\bSEALs\b': 'seals',
-        r'\bSEAL\b': 'seal',
-        r'\bKGB\b': 'K G B',
-        r'\bGRU\b': 'G R U',
-        r'\bFSB\b': 'F S B',
-        r'\bSPETSNAZ\b': 'spetsnaz',
-        r'\bFBI\b': 'F B I',
-        r'\be\.g\.\b': 'for example',
-        r'\bi\.e\.\b': 'that is',
-        r'\bvs\.\b': 'versus',
-        r'\bvs\b': 'versus',
-        r'\bMPH\b': 'miles per hour',
-        r'\bmph\b': 'miles per hour',
-        r'\bKPH\b': 'kilometers per hour',
-        r'\bkph\b': 'kilometers per hour',
-    }
-    for pattern, replacement in abbrevs.items():
+
+def _spell_acronyms(text: str) -> str:
+    """Letter-by-letter for acronyms models mangle. Word-boundary anchored;
+    order matters when one acronym embeds another."""
+    for pattern, replacement in _ABBREVS.items():
         text = re.sub(pattern, replacement, text)
+    return text
 
-    # Distance/speed units, compact or spaced ("12 km", "12km", "900km/h").
-    # The LLM writes these a lot; leaving "km" raw makes the voice read it as
-    # "K M". Order matters: km/h before km, attached-number forms first.
+
+def _expand_units(text: str) -> str:
+    """Distance/speed units, compact or spaced ("12 km", "12km", "900km/h").
+    Order matters: km/h before km, attached-number forms first."""
     text = re.sub(r'\b(\d+(?:\.\d+)?)\s?km/h\b', r'\1 kilometers per hour',
                   text, flags=re.IGNORECASE)
     text = re.sub(r'\bkm/h\b', 'kilometers per hour', text, flags=re.IGNORECASE)
     text = re.sub(r'\b(\d+(?:\.\d+)?)\s?km\b', r'\1 kilometers',
                   text, flags=re.IGNORECASE)
-    text = re.sub(r'\bkm\b', 'kilometers', text, flags=re.IGNORECASE)
+    return re.sub(r'\bkm\b', 'kilometers', text, flags=re.IGNORECASE)
 
-    # Fix known TTS pronunciation issues
-    # "through" often comes out muffled/hollow — use phonetic-friendly "thru"
-    text = re.sub(r'\bthrough\b', 'thru', text, flags=re.IGNORECASE)
 
-    # Sloppy number formatting before word expansion:
-    #  - "400, 000" → "400,000" (space between thousands-grouped digits; only
-    #    when the comma starts an exact 3-digit group, so "2001, 2002" is safe)
-    #  - "2,900-kilometer" → "2,900 kilometer" (split hyphenated units, the
-    #    military/date hyphen tokens are handled later and unaffected here)
+def _fix_pronunciation(text: str) -> str:
+    """Known TTS pronunciation issues. "through" often comes out
+    muffled/hollow — use phonetic-friendly "thru"."""
+    return re.sub(r'\bthrough\b', 'thru', text, flags=re.IGNORECASE)
+
+
+def _fix_number_hyphens(text: str) -> str:
+    """Sloppy number formatting before word expansion:
+      - "400, 000" → "400,000" (space between thousands-grouped digits; only
+        when the comma starts an exact 3-digit group, so "2001, 2002" is safe)
+      - "2,900-kilometer" → "2,900 kilometer" (split hyphenated units, the
+        military/date hyphen tokens are handled later and unaffected here)
+    """
     text = re.sub(r'(?<=\d),\s+(?=\d{3}(?!\d))', ',', text)
-    text = re.sub(r'\b(\d[\d,]*(?:\.\d+)?)-(?=[A-Za-z])', r'\1 ', text)
+    return re.sub(r'\b(\d[\d,]*(?:\.\d+)?)-(?=[A-Za-z])', r'\1 ', text)
 
-    # Spell digits properly (years, counts, ordinals, money, ranges).
-    text = _expand_numbers(text)
 
-    # Ensure proper spacing after punctuation (but don't split "!!" or "!?" into two)
+def _final_spacing(text: str) -> str:
+    """Ensure proper spacing after punctuation, collapse whitespace."""
+    # Don't split "!!" or "!?" into two.
     text = re.sub(r'([?!])(?=[^\s?!])', r'\1 ', text)
     text = re.sub(r'([.])([A-Z])', r'\1 \2', text)  # Space after periods before capitals
+    return re.sub(r'\s+', ' ', text).strip()
 
-    # Clean up multiple spaces
-    text = re.sub(r'\s+', ' ', text).strip()
 
-    return text
+def _clean_text(text: str) -> str:
+    """Normalize text for clean TTS output."""
+    text = _normalize_unicode(text)
+    text = _spell_acronyms(text)
+    text = _expand_units(text)
+    text = _fix_pronunciation(text)
+    text = _fix_number_hyphens(text)
+    text = _expand_numbers(text)
+    return _final_spacing(text)

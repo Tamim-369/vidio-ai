@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.services.llm import call_text
+from src.services.providers import call_text
 
 CHANNELS = [
     ("DarkDocs", "https://www.youtube.com/@DarkDocs/videos"),
@@ -54,9 +54,9 @@ def fetch_top_videos(channel_url):
 def fetch_transcript(vid):
     for lang in ["en", "en-GB"]:
         path = os.path.join(TMP, f"{vid}.{lang}.vtt")
-        out = run(["uvx", "yt-dlp", "--skip-download", "--write-auto-subs", "--sub-langs", lang,
-                   "--sub-format", "vtt", "--write-subs", "-o", os.path.join(TMP, f"{vid}.%(ext)s"),
-                   f"https://www.youtube.com/watch?v={vid}"])
+        run(["uvx", "yt-dlp", "--skip-download", "--write-auto-subs", "--sub-langs", lang,
+             "--sub-format", "vtt", "--write-subs", "-o", os.path.join(TMP, f"{vid}.%(ext)s"),
+             f"https://www.youtube.com/watch?v={vid}"])
         if os.path.exists(path):
             break
     else:

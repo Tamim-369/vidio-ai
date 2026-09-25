@@ -2,13 +2,8 @@
 # Generated from a codebase audit: only packages actually imported by code
 # under src/ are listed. Install with:
 #   pip install -r requirements.txt
-#
-# NOTE: chatterbox-tts declares strict transitive pins (librosa==0.11.0,
-# torch==2.6.0) that this repo intentionally overrides (librosa 1.0, torch
-# 2.13). If pip hits a resolution conflict, install the TTS block separately
-# with --no-deps / --no-build-isolation.
 
-# --- TTS core (src/services/tts.py, tts_dsp.py, src/voice_tests/) ---
+# --- TTS core (src/services/tts.py, tts_dsp.py) ---
 soundfile
 librosa
 numpy
@@ -16,10 +11,10 @@ scipy
 torch
 torchaudio
 
-# --- Local TTS models (src/voices_to_clone/, src/voice_tests/) ---
-chatterbox-tts       # import chatterbox
+# --- Local TTS engine (Pocket-TTS narrator; main branch audio) ---
 pocket-tts           # import pocket_tts
-# qwen-tts            # optional: only used by voice_tests/test_qwen_0.6b_base.py in its own .venv-qwen
+# chatterbox-tts is used only on the wizdom branch (cloned persona voices):
+#   chatterbox-tts       # import chatterbox
 
 # --- HTTP / asset fetching (src/services/asset_fetcher.py) ---
 requests
