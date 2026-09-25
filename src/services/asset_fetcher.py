@@ -7,8 +7,9 @@ Strategy (validated on wet runs):
    visual angles) — never a single topic-level keyword list. No Groq/Gemini
    anywhere in this file.
 2. Download candidate images per query from license-safe sources (Pexels,
-   Wikimedia Commons, Openverse, DuckDuckGo restricted to Wikimedia-hosted
-   files only), tagging each file with its origin line.
+   Wikimedia Commons, Openverse, DuckDuckGo restricted to known-free hosts),
+   tagging each file with its origin line. All providers refuse paid-stock
+   and news-wire/press hosts (BLOCKED_DOMAINS + _BLOCKED_NEWS_SITES).
 3. REJECT TEXT-SLOP deterministically (pytesseract OCR, no LLM): any image whose
    readable text covers > ASSET_MAX_TEXT_AREA of its area (captions/memes/big
    watermark blocks) is dropped.
@@ -40,12 +41,42 @@ from src.config.settings import (
     ASSET_MAX_TEXT_AREA,
     ASSET_TEXT_MIN_CONF,
 )
+from urllib.parse import urlsplit
+
 from src.services.asset_agent import assign as local_assign
 from src.services.asset_agent import keywords as local_keywords
 from src.services.query_agent import build_search_queries
 
 HEADERS = {"User-Agent": "VideoPipeline/1.0 (history/mystery shorts; contact: local)"}
-BLOCKED_DOMAINS = ["shutterstock", "gettyimages", "alamy", "istockphoto", "dreamstime"]
+# Paid-stock watermarked hosts + news-wire/press hosts (their photos are
+# copyrighted and cannot be used). Applied to EVERY provider, not just DDG.
+# These are DISTINCTIVE substrings matched against the hostname only.
+BLOCKED_DOMAINS = [
+    # paid stock agencies with watermarks / licenses
+    "shutterstock", "gettyimages", "alamy", "istockphoto", "dreamstime",
+    "123rf", "adobestock", "depositphotos", "bigstockphoto", "corbisimages",
+    "agefotostock", "graphicstock", "pinterest", "pinimg", "newscom",
+    "flash89", "vecteezy", "envatostock", "storyblocks", "created-by",
+    # news-wire / press image pools (copyrighted photojournalism)
+    "reuters", "apimages", "apnews", "afpforum", "afp.com", "upi.com",
+    "zumapress", "epaimages", "pressassociation", "pa.media", "getty.images",
+    "wireimage", "newzones", "oddweirder", "imrg",
+]
+# Full site domains of major news outlets whose photos are all copyrighted.
+_BLOCKED_NEWS_SITES = [
+    "cnn.com", "foxnews.com", "nbcnews.com", "abcnews.go.com", "cbsnews.com",
+    "msnbc.com", "nytimes.com", "wsj.com", "washingtonpost.com",
+    "theguardian.com", "dailymail.co.uk", "dailystar.co.uk", "express.co.uk",
+    "thesun.co.uk", "mirror.co.uk", "telegraph.co.uk", "bbc.co.uk",
+    "aljazeera.com", "upi.com", "reuters.com", "apnews.com",
+]
+# Openverse provider/source names that are news-wire pools (their CC/PD
+# claim is unreliable for commercial use). Brand tokens only - matched
+# case-insensitively against the provider/source field.
+_NEWS_WIRE_PROVIDER_TOKENS = (
+    "getty", "reuters", "associated press", "afp", "upi", "zuma press",
+    "epaimages", "press association", "pa media", "ap images", "wire photos",
+)
 MAX_ASPECT_RATIO = ASSET_MAX_ASPECT_RATIO
 MAX_PARALLEL_WORKERS = ASSET_MAX_PARALLEL_WORKERS
 TARGET_IMAGES = ASSET_TARGET_IMAGES  # aim for this many topic images
@@ -80,7 +111,22 @@ def _file_hash(path: str) -> str:
     return f"{size}:{hash(sample)}"
 
 
+def _is_blocked_host(url: str) -> bool:
+    """True if the URL's host is a paid-stock or news-wire/press host."""
+    try:
+        host = (urlsplit(url).netloc or "").lower()
+    except Exception:
+        host = (url or "").lower()
+    if not host:
+        return False
+    if any(site in host for site in _BLOCKED_NEWS_SITES):
+        return True
+    return any(token in host for token in BLOCKED_DOMAINS)
+
+
 def _download_image(url: str, path: str, headers: dict = HEADERS) -> bool:
+    if not url or _is_blocked_host(url):
+        return False
     try:
         r = requests.get(url, timeout=12, headers=headers)
         if r.status_code == 200 and "image" in r.headers.get("Content-Type", ""):
@@ -203,27 +249,33 @@ def _fetch_wikimedia_commons(search_term: str, base_path: str, count: int = 1) -
     return downloaded
 
 
-# Stock aggregators that always need paid licences / watermark their images.
-_DDG_BLOCKED_HOSTS = BLOCKED_DOMAINS + [
-    "alamy.com", "gettyimages.com", "shutterstock.com", "istockphoto.com",
-    "dreamstime.com", "123rf.com", "adobestock.com", "depositphotos.com",
-    "bigstockphoto.com", "corbisimages.com", "agefotostock.com", "graphicstock.com",
-    "pinterest.com", "pinimg.com", "dailymail.co.uk", "dailymail.com",
-    "dailystar.co.uk", "newscom.com", "flash89.com",
-]
-
-# A known-free fallback: if an image eventually has no license info, these
-# hosts are trusted to be free/copyright-safe (Commons + Openverse CDNs).
+# DuckDuckGo can return arbitrary hosts, so it is restricted to a known-free
+# whitelist (see _on_free_host). The global download gate
+# (BLOCKED_DOMAINS + _BLOCKED_NEWS_SITES) additionally rejects paid-stock and
+# news-wire hosts from EVERY provider.
+# A known-free whitelist: DDG results are restricted to these hosts only
+# (Commons + Flickr CC + Openverse CDN + a couple of trusted archives), so a
+# random news or stock image host can never slip into the channel from DDG.
 _FREE_HOST_SUFFIXES = ("upload.wikimedia.org", "upload.wikimediausercontent.org",
-                       "live.staticflickr.com", "openverse.org")
+                       "live.staticflickr.com", "openverse.org",
+                       "archive.org", "loc.gov", "nara.gov", "si.edu")
+
+
+def _on_free_host(url: str) -> bool:
+    try:
+        host = (urlsplit(url).netloc or "").lower()
+    except Exception:
+        host = (url or "").lower()
+    return host.endswith(_FREE_HOST_SUFFIXES) or any(h in host for h in _FREE_HOST_SUFFIXES)
 
 
 def _fetch_ddg(search_term: str, base_path: str, count: int = 1) -> list:
-    """DuckDuckGo as a general source with license filter + stock blocklist.
+    """DuckDuckGo as a fallback general source - FREE HOSTS ONLY.
 
-    Not restricted to a single host. Uses DDG's `license:` filter for
-    free-to-use photos and drops the known watermark/paid-stock hosts; images
-    that slip through still pass the Groq feature check downstream.
+    Restricted to hosts with guaranteed-free imagery (Wikimedia Commons,
+    CC-licensed Flickr, Openverse CDN, government/museum archives), with DDG's
+    `license:` filter on Public/Share as a second check. News-wire and
+    paid-stock hosts cannot appear, so this source is copyright-safe.
     """
     downloaded = []
     try:
@@ -240,7 +292,7 @@ def _fetch_ddg(search_term: str, base_path: str, count: int = 1) -> list:
                     if len(downloaded) >= count:
                         break
                     url = r.get("image", "")
-                    if any(host in url.lower() for host in _DDG_BLOCKED_HOSTS):
+                    if not url or not _on_free_host(url):
                         continue
                     path = f"{base_path}_d{i}.jpg"
                     if url and _download_image(url, path) and \
@@ -273,6 +325,9 @@ def _fetch_openverse(search_term: str, base_path: str, count: int = 1) -> list:
             w = it.get("width") or 0
             h = it.get("height") or 0
             if not url or (h and (w / h) > MAX_ASPECT_RATIO):
+                continue
+            prov = it.get("provider") or it.get("source") or ""
+            if any(tok in str(prov).lower() for tok in _NEWS_WIRE_PROVIDER_TOKENS):
                 continue
             lic = it.get("license") or "cc0"
             ver = it.get("license_version") or ""

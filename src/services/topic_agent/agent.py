@@ -2,12 +2,12 @@
 
 Writes a batch file in the exact shape the pipeline expects
 (topics/batch_YYYYMMDD_HHMMSS.json, list of topic dicts read by
-load_latest_topics()). Selection is niche-weighted so the 2026 war news
-dominates without starving the history/experiments/dark pillars.
+load_latest_topics()). Selection is niche-weighted so the crazy experiment
+pillar leads without starving dark legends and WW1/WW2 war stories.
 
 Standalone use:
     uv run python -m src.services.topic_agent.agent --target 12
-    uv run python -m src.services.topic_agent.agent --niche war_news --target 6
+    uv run python -m src.services.topic_agent.agent --niche experiments --target 6
 """
 from __future__ import annotations
 
@@ -27,10 +27,9 @@ from src.services.topic_agent.score import score_lead
 BATCH_DIR = os.path.join("topics")
 
 NICHE_WEIGHTS = {
-    "war_news": 0.35,
-    "war_history": 0.25,
-    "experiments": 0.20,
-    "dark_history": 0.20,
+    "experiments": 0.45,
+    "dark_legends": 0.35,
+    "ww1_ww2_stories": 0.20,
 }
 
 
@@ -114,7 +113,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Topic agent (sourced topic generation)")
     parser.add_argument("--target", type=int, default=24, help="Topics to select (default 24)")
     parser.add_argument("--niche", nargs="+", default=None,
-                        help="Restrict to niche(s): war_news war_history experiments dark_history")
+                        help="Restrict to niche(s): experiments dark_legends ww1_ww2_stories")
     args = parser.parse_args()
     run_topic_agent(target=args.target, niches=args.niche)
 

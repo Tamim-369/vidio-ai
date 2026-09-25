@@ -85,9 +85,11 @@ def _resolve_topic(vid, title, transcript):
         "Angle rules: mystery = secrets/cover-ups/unsolved unknowns; scary = horror/fear/terror "
         "in the story itself; injustice = institutional betrayal, innocent victims, cruel neglect; "
         "heroic = underdog soldiers, impossible stands, bravery. Never default to 'other'.\n"
-        "Reject (niche_fit=no) if it's true crime, serial killers, missing persons, boring weapon "
-        "specs, OR paranormal/cryptid/folklore content (ghosts, skinwalkers, aliens, giants, "
-        "man-eating creatures, monsters). Stick to documented history.\n"
+        "Reject (niche_fit=no) if it's true crime, serial killers, missing persons, "
+        "or boring weapon specs. Folklore and supernatural legends (ghosts, curses, "
+        "hauntings, unexplained creatures, folklore) are ALLOWED when framed as a "
+        "story or legend tied to documented history. Stick to WW1/WW2 stories, "
+        "human/animal experiments, and dark legends.\n"
         f"Video title: {title}\nTranscript (first 6000 chars):\n{transcript[:6000]}"
     )
     raw = call_text([{"role": "user", "content": prompt}], temperature=0.3)

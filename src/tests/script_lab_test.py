@@ -1,11 +1,11 @@
 """Standalone lab test for the staged script pipeline (does NOT touch main.py).
 
 Run:
-    uv run python -u src/tests/script_lab_test.py [--theme arnold|trump] [--topic "..."] [--story "..."]
+    uv run python -u src/tests/script_lab_test.py [--style narrator|arnold|trump|andrew_tate] [--topic "..."] [--story "..."]
 
 Prints every layer's output so we can eyeball script quality and virality
 before this logic ever moves into the main pipeline. Default input is the
-Ghost Army (a real, fact-dense WWII story) so extraction has plenty to grab.
+Ghost Army (a real, fact-dense WWII story) so the story stage has plenty to grab.
 """
 import argparse
 import sys
@@ -21,7 +21,7 @@ DEFAULT_STORY = """The Ghost Army was a real United States Army unit that won ba
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--theme", default="arnold", choices=["arnold", "trump"])
+    parser.add_argument("--style", default="arnold", choices=["narrator", "arnold", "trump", "andrew_tate"])
     parser.add_argument("--topic", default=DEFAULT_TOPIC)
     parser.add_argument("--story", default=DEFAULT_STORY)
     args = parser.parse_args()
@@ -29,14 +29,14 @@ def main():
     result = run_pipeline(
         topic=args.topic,
         story=args.story,
-        theme=args.theme,
+        style=args.style,
     )
 
     print(f"\n{'='*70}\nRESULT\n{'='*70}")
-    print(f"facts   : {len(result['facts'])}")
+    print(f"story  : {len(result['story'].splitlines())} lines")
     print(f"lines   : {len(result['lines'])}")
     print(f"queries : {sum(len(l.get('queries', [])) for l in result['lines'])} "
-          f"(>=2 per line expected)")
+          f"(>=3 per line expected)")
 
 
 if __name__ == "__main__":

@@ -48,5 +48,5 @@ def _generate(prompt: str, temperature: float, budget_tag: str, repeat_penalty: 
     return val
 
 
-def _local(prompt: str, temperature: float = 0.5, tag: str = "facts", repeat_penalty: float = 1.1) -> str:
+def _local(prompt: str, temperature: float = 0.5, tag: str = "story", repeat_penalty: float = 1.1) -> str:
     return _generate(prompt, temperature, tag, repeat_penalty)

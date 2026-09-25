@@ -20,25 +20,29 @@ from src.config.settings import GEMINI_API_KEY, GEMINI_MODEL
 
 PROMPT = """You brainstorm viral topic ideas for a faceless YouTube Shorts channel.
 
-NICHE: modern and historical WAR STORIES — the current 2026 US–Iran war and the
-Middle East crisis it triggered (Houthi strikes, Strait of Hormuz blockade),
-plus Iraq War battles, Vietnam War firefights and sieges, Cold War nuclear close
-calls and spy incidents, and weird/secret military experiments. The money angles
-are: SCARY (the horror and terror of combat), INJUSTICE (soldiers betrayed by
-their own commanders, ignored warnings, needless deaths), HEROIC (outnumbered
-stands, impossible rescues), and MYSTERY (secret programs, cover-ups of what
-really happened).
+NICHE: CRAZY and brutal experiments run on HUMANS and ANIMALS by the great
+powers in World War I and World War II (Unit 731, Nazi medical experiments,
+chemical and radiation tests on prisoners and soldiers, secret labs that
+treated living people as specimens), plus EPIC true stories from WW1/WW2
+(impossible last stands, rescue missions, outnumbered units), and SCARY
+legends, curses, hauntings and cover-ups rooted in real history. The money
+angles are: SCARY (the horror and terror), INJUSTICE (victims betrayed or
+used as pawns by their own governments, hidden truth, needless deaths),
+HEROIC (outnumbered stands, impossible rescues), and MYSTERY (secret
+programs, cover-ups of what really happened, unexplained events).
 
 RULES:
-- Each topic must be a CONCRETE named subject: a specific battle, operation,
-  incident, unit, person, or experiment. No vague concepts like "the Iraq war".
-- It must be REAL and DOCUMENTED. Use your search grounding to verify each one
-  actually happened and has a factual record. Never invent or embellish.
+- Each topic must be a CONCRETE named subject: a specific experiment, battle,
+  operation, incident, unit, person, curse, legend or haunt. No vague
+  concepts like "WW2".
+- It must be REAL and DOCUMENTED (experiments, battles, history) — or a
+  LEGEND/FOLKLORE story that is genuinely told and documented as such. Use
+  your search grounding to verify each one actually has a record. Never
+  invent or embellish.
 - NEVER repeat any title in the BLOCKLIST below (exact or near-identical).
 - Prefer topics that are little-known but well-documented — a dramatic story
   most people have never heard.
-- No true crime, no serial killers, no missing-person cases, no paranormal/
-  cryptid/folklore (ghosts, aliens, skinwalkers, giants, monsters), no boring
+- No true crime, no serial killers, no missing-person cases, no boring
   weapon/aircraft spec catalogs.
 
 Return ONLY a JSON array of {target} objects, each:

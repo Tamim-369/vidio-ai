@@ -1,127 +1,27 @@
-"""Query Agent: turns script lines into precise, on-topic image search queries.
+"""Query Agent: topic-grounded image-search queries for a video script.
 
-Separate LOCAL pass after script generation. Reads the whole script + topic,
-applies the image-search query rules below, and returns, for EVERY line, a
-handful of ready-to-search query strings. The prompt is written like a lesson
-plan so the model builds each query step by step instead of guessing.
+One local LLM pass after script generation. Reads the WHOLE script + the
+TOPIC, and writes every line's queries WITH THE TOPIC AS GROUND TRUTH - not
+the sentence's literal words. Nicknames/vague references are resolved to the
+real named subject this topic owns ("Hitler's buzzsaw" -> MG42), era/junk/kind
+words are applied, and any query that is not about the topic is replaced with
+one that is. Per-line `search_term`/narration text is the only fallback, so
+asset fetching never blocks on this agent.
 
-Runs on the local model (Ollama via the staged lab's `_local`) — the full
-lesson-plan prompt is kept verbatim; only the provider changed from Groq/Gemini
-to local. If the local model is down, per-line `search_term`/narration text is
-the fallback so asset fetching never blocks.
+If every line already carries search_queries (the staged lab pipeline fills
+these during script generation), those are reused directly - no redundant
+model call.
 """
-import json
+from __future__ import annotations
+
 import re
 
+from src.config.script_lab_prompts import QUERY_BUILDER_PROMPT
 from src.services.script_lab.llm import _local
+from src.services.script_lab.text import _render
 
-QUERIES_PER_LINE = 5
+QUERIES_PER_LINE = 3
 MAX_LINES = 40
-
-SYSTEM_QUERY_PROMPT = """You are a search-query teacher. Your only job is to teach
-yourself how to write the BEST image search queries — the kind that find REAL,
-ON-TOPIC photographs and almost no junk. You will read a video script (each line
-is one sentence of narration) and the video topic, then write search queries for
-every line. Follow the lessons below, in order, for EVERY line. Think like you
-are carefully explaining each step to a curious child: first UNDERSTAND, then
-NAME, then REFINE, then CHECK YOUR WORK.
-
-LESSON 1 — FIGURE OUT WHAT THE VIEWER MUST SEE.
-Read the sentence. Pause the video in your head. Ask: "If the sound were off,
-what picture must be on screen while this sentence is said?" Write that down.
-It must be ONE concrete, real, photographable thing:
-- A real weapon, vehicle, plane, ship, tank, missile system (F-35, S-300, USS Nimitz).
-- A real place (city, camp, base, border, river, Strait of Hormuz).
-- A real person or uniform (a general, a pilot, a soldier in 1960s gear).
-- A real artifact or memorial (a war memorial, a captured flag, a museum piece).
-- A clean map of the place (only when the sentence is about shots, routes, or geography).
-- The aftermath or wreckage of something (a destroyed bridge, a crash site).
-NEVER write a feeling, an idea, a metaphor, or a number. "3 million men invaded"
-is a NUMBER, not a picture. "the situation was desperate" is an IDEA. Cross those
-out and find the real thing behind them.
-
-LESSON 2 — GIVE IT ITS REAL NAME.
-Search engines match words, so use the name the world actually calls it:
-the exact model ("F-35 Lightning II", not "stealth fighter jet"), the exact place
-("Diego Garcia", not "remote island base"), the exact operation ("Operation Desert
-Storm", not "the 1991 war"). If the real name has more than one word, put it in
-quotes: "F-35 Lightning II". Quotes tell the search engine these words belong
-together and cannot be shuffled. NEVER describe without naming first.
-
-LESSON 3 — ADD THE KIND OF PICTURE.
-After the subject, add one honest word that tells the engine which KIND of image
-you mean. For this channel you almost always want photos, not drawings:
-"photo", "photograph", "archive photo", "old photo", "aerial view", "map".
-This quietly filters out clipart, illustrations, logos and cartoons.
-
-LESSON 4 — MENTION THE ERA.
-This channel tells historical and war stories. A modern-looking photo of the wrong
-fashion, or a satellite view when the story is 1969, looks wrong to the viewer.
-When the sentence is about a specific time, add the era word: "1960s", "Vietnam
-War era", "Cold War", "1940s", "1979 revolution". This stops the search engine
-from giving you the modern version of the same thing.
-
-LESSON 5 — BOOT THE JUNK.
-Real-name searches pull in toys, game renders, memes, coins, posters, and stock
-illustrations. Add do-not-show words with a minus sign so they vanish:
--Render -toy -model -meme -game -coins -poster -clipart -illustration -logo -action_figure
-The more real and niche the subject, the fewer exclusions you need. Do not add
-them when they change the meaning (never exclude the thing itself!).
-
-LESSON 6 — KEEP IT SHORT.
-A good query is 2 to 6 words + a few minus words. It is a SEARCH STRING, not a
-sentence. No "why", "what", "how", "when", "was", "that", "someone". Search
-engines treat extra words as noise. If you can say it in 4 words, say it in 4.
-
-LESSON 7 — SERVE EVERY LINE WITH VARIETY.
-Each line gets 5 DIFFERENT queries, and every query hunts a different angle so
-the video has real visual variety:
-1. THE THING ITSELF — the main subject named exactly.
-2. THE PLACE — where it happened (city, base, border, strait, desert).
-3. THE PEOPLE or UNIFORMS — the soldiers, protesters, pilots, officials.
-4. THE ARTIFACT or AFTERMATH — the weapon, wreck, memorial, map, flag.
-5. A DIFFERENT REAL QUERY — another real name, a period photo, a museum shot,
-   an aerial view: anything real that is not a repeat of 1-4.
-Two queries are never the same query. If a sentence is only about a place (a
-strike on a base), use the place photo, the base name photo, the aftermath, the
-equipment used, and a clean map.
-
-LESSON 8 — ADJUST FOR THE TOPIC.
-Read the topic. It is the ground truth of the video. If a line says "the attack"
-but the topic is "Iran shot down US F-35s in 2026", then "the attack" means
-air-defense missiles striking F-35s — write queries for the missile battery, the
-F-35 squadron, the intercept, plus the map of the region. The topic is the
-context that removes all ambiguity. Use it.
-
-LESSON 9 — NO EXCUSES FOR EMPTY SENTENCES.
-Some narration lines are pure bridging ("But things were about to change...").
-They have no subject of their own. For those, pick the closest REAL adjacent scene
-that stock and archive sites own: the era in general ("Iran 1970s street scene"),
-the region, the mood via a real place ("Strait of Hormuz tanker traffic"). Always
-give it the 5 queries anyway. NEVER return an empty list for any line.
-
-LESSON 10 — CHECK YOUR WORK (do this OUT LOUD, every line).
-Before you write the answer for a line, say this checklist:
-- "Is the subject real, named, and photographable?" (not an idea or number)
-- "Does the word 'photo' or 'archive' appear, pushing toward photographs?"
-- "Are the junk words excluded with a minus sign?"
-- "Does the era match the story?"
-- "Would THIS picture embarrass a documentary channel? If yes, fix it."
-Only after the checklist passes, write the 5 queries.
-
-Now, THE OUTPUT. Think VERY hard about quality. Then reply with ONLY this JSON,
-with one entry for EVERY line id, 5 uncapitalized query strings per entry, in
-order 1..5. No markdown, no explanations, no empty lists:
-{"1": ["\"F-35 Lightning II\" 2026 photo -render -toy", "...", "...", "...", "..."], "2": [...]}
-
-Example of what a GOOD entry for "Iran shot down the American jets with its
-air-defense missiles" looks like:
-{"7": ["\"S-300\" air defense system photo -render -toy -model",
-       "\"F-35 Lightning II\" aircraft photo -render -toy -meme",
-       "Iran air defense missile launch 2026 photo",
-       "\"F-35\" crash site wreckage photo",
-       "Persian Gulf Strait of Hormuz map"]}
-"""
 
 
 def _strip_thinking_tags(text: str) -> str:
@@ -134,17 +34,18 @@ def _extract_queries(raw: str, line_ids: list) -> dict:
     """Robustly pull {line_id: [query, ...]} out of a local model reply.
 
     The small local model frequently writes its own escaped-quote scheme
-    (``""phrase""`` instead of ``"phrase"``) and empty placeholder strings. We
-    collapse runs of quotes to a single quote and then scan ``"line": [...]``
-    buckets with a tolerant pattern, so malformed bits just drop out instead of
-    failing the whole pass. Real queries always survive; empties are filtered
-    by the caller.
+    (``""phrase""`` instead of ``"phrase"``), curly/smart quotes (``\u201c``/
+    ``\u201d``), and empty placeholder strings. We normalize quotes and scan
+    ``"line": [...]`` buckets with a tolerant pattern, so malformed bits just
+    drop out instead of failing the whole pass. Real queries always survive;
+    empties are filtered by the caller.
     """
     block = re.search(r"\{.*\}", raw, flags=re.DOTALL)
     if not block:
         return {}
     block = block.group(0).replace('\\"', '"')
-    block = re.sub(r'"{2,}', '"', block)
+    block = block.replace("\u201c", '"').replace("\u201d", '"')
+    block = re.sub(r'"+', '"', block)
 
     out: dict = {}
     valid = {int(lid) for lid in line_ids if str(lid).isdigit()} or set(line_ids)
@@ -154,7 +55,7 @@ def _extract_queries(raw: str, line_ids: list) -> dict:
             continue
         arr = m.group(2)
         tok = re.findall(r'"([^"]*)"', arr)
-        qs = [t.strip() for t in tok if t.strip() and t.strip() != ","]
+        qs = [t.strip().strip(",") for t in tok if t.strip() and t.strip() != ","]
         out[str(lid)] = qs
     return out
 
@@ -167,7 +68,7 @@ def _clean_queries(raw_list: list) -> list:
         q = q.strip()
         if q.startswith('"') and q.endswith('"') and len(q) > 2:
             q = q[1:-1].strip()
-        if 2 <= len(q.split()) <= 14:
+        if len(q.split()) >= 2:
             out.append(q)
         if len(out) >= QUERIES_PER_LINE:
             break
@@ -183,7 +84,8 @@ def build_search_queries(lines: list, topic: str = "") -> dict:
 
     If every line already carries search_queries (the staged lab pipeline fills
     these locally during script generation), those are reused directly - no
-    redundant model call.
+    redundant model call. Entries with no useful line text contribute an
+    empty list.
     """
     if lines and all(ln.get("search_queries") for ln in lines):
         for ln in lines:
@@ -191,17 +93,17 @@ def build_search_queries(lines: list, topic: str = "") -> dict:
         return {ln["id"]: list(ln["search_queries"]) for ln in lines}
 
     script = "\n".join(
-        f'line {ln["id"]}: "{ln.get("text", "")}"'
+        f'{ln["id"]}. {ln.get("text", "")}'
         for ln in lines[:MAX_LINES]
     )
-    user_prompt = (
-        f'VIDEO TOPIC: "{topic}"\n\n'
-        "SCRIPT (write search queries for these lines):\n"
-        f"{script}"
+    user_prompt = _render(
+        QUERY_BUILDER_PROMPT,
+        topic=(topic or "unknown"),
+        script=script,
     )
     try:
         raw = _local(
-            f"{SYSTEM_QUERY_PROMPT}\n\n{user_prompt}",
+            user_prompt,
             temperature=0.2,
             tag="queries",
         )

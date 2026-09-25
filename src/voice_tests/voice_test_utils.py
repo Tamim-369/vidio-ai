@@ -5,7 +5,7 @@ Instead of re-running the whole main pipeline (research + LLM script gen +
 asset fetch + upload), each voice test file:
 
 1. GENERATES its test script ONCE with the local script lab
-   (src/services/script_lab.build_lab_script + the voice's theme) and
+   (src/services/script_lab.build_lab_script + the voice's speaking style) and
    saves it (plus images, when fetched) into this folder.
 2. On every later run, REUSES the cached script so only TTS rendering
    (chatterbox) and video assembly run — no research, no LLM, no downloads.
@@ -37,7 +37,7 @@ sys.path.insert(0, str(_ROOT))
 from src.config.voices import get_voice
 from src.config.writing_styles import get_style
 from src.services.data_source import research
-from src.services.script_lab import build_lab_script, theme_for_style
+from src.services.script_lab import build_lab_script, speaking_style_for_style
 from src.services.asset_fetcher import fetch_assets
 from src.services.tts import generate_audio, _clean_text
 from src.services.video_assembler import assemble
@@ -165,7 +165,7 @@ def generate_script(voice_id: str, topic: str, fetch_images: bool = False) -> di
     script = build_lab_script(
         topic,
         str(raw_data or ""),
-        theme=theme_for_style(style),
+        style=speaking_style_for_style(style),
     )
     script.setdefault("topic", topic)
     print(f"   {len(script['lines'])} lines generated")

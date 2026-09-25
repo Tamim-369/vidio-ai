@@ -1,11 +1,11 @@
 """Standalone content-research pipeline.
 
-Sources fresh material per niche (ancient mysteries / WW2 secret experiments /
-obscure secret history) from Wikipedia categories + search, feeds it to the
-Ollama LLM (minimax-m3:cloud) to extract structured video ideas, dedups
-against everything already produced, scores for novelty/angle-balance, and
-writes an approved queue to topics/batch_*.json — the same queue the video
-pipeline already reads.
+Sources fresh material per niche (crazy WW1/WW2 human & animal experiments /
+dark legends, curses and scary history / epic WW1 & WW2 battle stories) from
+Wikipedia categories + search, feeds it to the Ollama LLM (minimax-m3:cloud)
+to extract structured video ideas, dedups against everything already produced,
+scores for novelty/angle-balance, and writes an approved queue to
+topics/batch_*.json — the same queue the video pipeline already reads.
 
 Deliberately NOT wired into run_topic_generation: this is the standalone
 "research" half, run on its own schedule, with a human review gate between
@@ -31,21 +31,18 @@ TOPICS_OUTPUT_DIR = "topics"
 
 # ---------------------------------------------------------------- vetting
 
-# Hard reject: true crime / serial killers / missing persons / paranormal /
-# cryptid / folklore. Mirror of the channel-miner gate.
+# Hard reject: true crime / serial killers / missing persons — still out of
+# scope. Paranormal, cryptid and folklore are NOT rejected: scary stories and
+# legends (ghosts, curses, hauntings, unexplained creatures) are part of the
+# niche, as long as they read as a legend/story rather than true crime.
 # "was killed" is intentionally ABSENT — casualty language is the substance of
 # war-story topics.
 VET_BLOCK = [
     "serial killer", "murder", "rapist", "stalker", "cctv",
     "kidnap", "abduction", "missing person", "body found",
     "school shooting", "mass shooter", "arrested", "police", "criminal",
-    "manslaughter", "ghost", "haunted", "ghost ship", "poltergeist",
-    "cryptid", "skinwalker", "werewolf", "vampire", "zombie", "bigfoot",
-    "sasquatch", "chupacabra", "loch ness", "alien", "aliens", "alien abduction",
-    "ufo", "extraterrestrial", "paranormal", "supernatural", "occult ritual",
-    "satanic", "demonic", "possession", "exorcism", "curse of the mummy",
-    "sea monster", "giant squid attack", "man-eating", "man eater",
-    "human trafficking", "drug cartel", "cartel", "gang", "gangster",
+    "manslaughter", "human trafficking", "drug cartel", "cartel", "gang",
+    "gangster",
 ]
 
 # Angle classifier: mystery | scary | injustice | heroic
@@ -79,6 +76,11 @@ def _vet_idea(idea: dict) -> dict:
     text = f"{idea['title']} {idea.get('hook', '')} {idea.get('why_viral', '')}".lower()
     if any(b in text for b in VET_BLOCK):
         return None
+    # Modern-era items (20xx) are off-niche: we produce WW1/WW2 stories,
+    # history-rooted legends, and 20th-century experiments, not current-events
+    # or pop-culture internet lore.
+    if re.search(r"\b(?:20[0-9]{2}|19[89][0-9])\b", text):
+        return None
     for angle, keywords in ANGLE_RULES:
         if any(k in text for k in keywords):
             idea["angle"] = angle
@@ -90,110 +92,88 @@ def _vet_idea(idea: dict) -> dict:
 
 # ---------------------------------------------------------------- niches
 
-# Each niche has its own Wikipedia categories + search queries + prompt focus.
-# This keeps sourcing and prompt tuning separate per category (no dilution).
-# The "war_*" niches additionally merge in the LIVE source pool
-# (src/services/war_stories.py: Google News RSS for the current wars, and
-# long-form war-history magazine feeds) so modern conflicts surface as they
-# break. War/story/war-experiment topics replace the old mystery niches.
+# The channel's pillars, in priority order:
+#   1. Classified human/animal experiments run by the great powers in the
+#      world wars (Unit 731, Nazi medicine, chemical weapons test subjects…).
+#   2. Dark legends, scary stories, cover-ups, curses and hauntings.
+#   3. Epic true stories of WW1 / WW2 — the battles and the people in them.
 NICHES = {
-    # 2026 US–Iran war — the flagship modern-war niche, news-driven.
-    "iran_360": {
+    # The money niche: crazy, brutal, off-the-books experiments on humans and
+    # animals run by big powers around WW1/WW2.
+    "experiments": {
         "categories": [
-            "Category:Iran–United States relations",
-            "Category:2020s in Iran",
-            "Category:2026 in Iran",
-            "Category:Wars involving Iran",
-            "Category:Red Sea crisis",
-        ],
-        "queries": [
-            "US Iran war 2026", "Iran war February 2026", "Iran missile attack 2026",
-            "US strikes Iran 2026", "Houthi Yemen 2026", "Houthi Red Sea attacks 2026",
-            "Strait of Hormuz 2026", "Iran naval blockade 2026", "US garrison attack 2026",
-        ],
-        "prompt": (
-            "the 2026 US–Iran war and the wider Middle East crisis it triggered: "
-            "aerial strikes, missile/drone barrages on US bases and Gulf states, "
-            "the Houthi offensive in Yemen, the Strait of Hormuz naval blockade, "
-            "and the troops caught in it"
-        ),
-        "live": True,
-        "floor_bonus": 2,  # war news is the money niche — feed more of it
-    },
-    # Iraq war — insurgent operations, battles, and the gates-of-hades fighting.
-    "iraq_war": {
-        "categories": [
-            "Category:Iraq War",
-            "Category:Military operations of the Iraq War",
-            "Category:Military history of Iraq",
-            "Category:People of the Iraq War",
-        ],
-        "queries": [
-            "Iraq war battle fallen city", "Iraq war ambush convoy",
-            "insurgent attack Iraq", "Fallujah battle", "Baghdad war 2003",
-            "Iraq war helicopter downed", "Iraq war soldier story",
-        ],
-        "prompt": (
-            "stories of the Iraq War: urban battles like Fallujah, ambushed convoys "
-            "and downed helicopters, brutal insurgency operations, and the soldiers "
-            "who fought through them"
-        ),
-    },
-    # Vietnam War — first-hand combat stories, tunnels, and big-unit battles.
-    "vietnam_war": {
-        "categories": [
-            "Category:Vietnam War",
-            "Category:Battles and operations of the Vietnam War",
-            "Category:Vietnam War casualties",
-        ],
-        "queries": [
-            "Vietnam war battle Ia Drang", "Khe Sanh siege 1968",
-            "Tet Offensive battle", "Vietnam war tunnel rat",
-            "Vietnam war ambush platoon", "Cu Chi tunnels",
-        ],
-        "prompt": (
-            "stories from the Vietnam War: desperate firefights and sieges like Ia Drang "
-            "and Khe Sanh, tunnel operations, ambushed patrols, and the grunts who "
-            "fought a war they weren't told they could win"
-        ),
-    },
-    # Cold War / proxy conflicts — Berlin, nuclear close-calls, secret missions.
-    "cold_war": {
-        "categories": [
-            "Category:Cold War conflicts",
-            "Category:Cold War",
-            "Category:Cuban Missile Crisis",
-        ],
-        "queries": [
-            "cold war brush with nuclear war", "Cuban missile crisis day by day",
-            "spy plane shot down cold war", "Cold war submarine incident",
-            "proxy war cold war Africa Asia", "Berlin blockade airlift",
-            "Kursk submarine disaster", "nuclear submarine collision",
-        ],
-        "prompt": (
-            "Cold War stories: nuclear close calls and hair-trigger incidents, "
-            "spy-plane shootdowns and submarine collisions, Berlin and the airlift, "
-            "and the proxy wars waged around the world from Africa to Asia"
-        ),
-    },
-    # Weird military experiments (kept) — secret projects, test failures,
-    # radiation/nuclear mishaps, and bizarre prototypes.
-    "war_experiments": {
-        "categories": [
-            "Category:V-weapons",
-            "Category:World War II weapons of Germany",
-            "Category:Secret military programs",
+            "Category:Japanese human subject research",
+            "Category:Nazi human subject research",
+            "Category:Medical experimentation on prisoners",
             "Category:Human subject research",
+            "Category:Medical ethics",
+            "Category:Biological warfare",
         ],
         "queries": [
-            "secret military experiment", "nuclear test gone wrong",
-            "weird war weapon prototype", "soldier guinea pig experiment",
-            "secret ww2 project", "chemical weapon test soldier",
+            "Unit 731 biological warfare experiments",
+            "Nazi medical experiments human subjects",
+            "WW2 human experimentation prisoners",
+            "Japanese war crimes vivisection",
+            "chemical weapon testing on soldiers",
+            "radiation experiments humans 1940s",
+            "animal experiments military secret",
         ],
         "prompt": (
-            "weird and classified military experiments: secret weapon programs, "
-            "nuclear and chemical tests that went horribly wrong, and the soldiers "
-            "used as guinea pigs"
+            "human and animal experiments run by the great powers in WW1/WW2: "
+            "Unit 731's biological weapons, Nazi medical atrocities, chemical "
+            "and radiation tests on prisoners and soldiers, and the secret "
+            "labs that treated living people as specimens"
+        ),
+    },
+    # Scary stories, legends, cover-ups and hauntings tied to real history.
+    "dark_legends": {
+        "categories": [
+            "Category:Urban legends",
+            "Category:Folklore",
+            "Category:Curses",
+            "Category:Paranormal",
+            "Category:Conspiracy theories",
+        ],
+        "queries": [
+            "famous urban legend true story",
+            "haunted place curse history",
+            "unsolved mystery cover-up",
+            "legend disappeared soldier unit",
+            "cursed object curse history",
+            "secret men in black story",
+            "vanished submarine mystery",
+        ],
+        "prompt": (
+            "scary stories, legends, curses, hauntings and cover-ups that are "
+            "rooted in real history — the unexplained, the hidden, and the "
+            "things the authorities wanted forgotten"
+        ),
+    },
+    # Epic, dramatic true stories of the world wars: battles, last stands,
+    # impossible rescues, and the soldiers caught in them.
+    "ww1_ww2_stories": {
+        "categories": [
+            "Category:Battles of World War I",
+            "Category:Campaigns of World War I",
+            "Category:Battles and operations of World War II",
+            "Category:Campaigns of World War II",
+            "Category:People of World War II",
+            "Category:Last stands",
+        ],
+        "queries": [
+            "World War 1 last stand battle",
+            "World War 2 outnumbered battle",
+            "WW1 trench raid story",
+            "WW2 impossible rescue mission",
+            "Verdun Somme battle story",
+            "Stalingrad battle story",
+            "Battle of Britain pilot story",
+        ],
+        "prompt": (
+            "epic true stories from World War I and World War II: desperate "
+            "last stands, outnumbered units fighting impossible odds, "
+            "daring rescues and escapes, and the ordinary men and women "
+            "thrown into the biggest wars in history"
         ),
     },
 }
@@ -201,12 +181,7 @@ NICHES = {
 # ---------------------------------------------------------------- source layer
 
 def _fetch_niche_sources(niche: str, limit: int = 25) -> list:
-    """Gather raw candidate articles for one niche (title + url + intro).
-
-    Live-marked niches (e.g. the 2026 US–Iran war) also merge in the external
-    source pool — Google News RSS + war-history magazines — so the current war
-    surfaces alongside the archival Wikipedia material.
-    """
+    """Gather raw candidate articles for one niche (title + url + intro)."""
     spec = NICHES[niche]
     titles = []
     seen = set()
@@ -240,20 +215,6 @@ def _fetch_niche_sources(niche: str, limit: int = 25) -> list:
             "url": f"https://en.wikipedia.org/wiki/{t.replace(' ', '_')}",
             "content": ext,
         })
-
-    # Live layer for current-war niches: news + long-form history feeds.
-    if spec.get("live"):
-        try:
-            from src.services.war_stories import fetch_all_war_sources
-            extra = fetch_all_war_sources(limit=limit)
-            known = {s["title"].lower() for s in sources}
-            for s in extra:
-                if s["title"].lower() not in known:
-                    sources.append(s)
-                    known.add(s["title"].lower())
-        except Exception as e:
-            print(f"    [war] live source pool failed: {e}")
-        print(f"  {len(sources)} sources (incl. live war pool)")
 
     if not sources:
         print(f"  [source] {niche}: nothing usable")
@@ -457,15 +418,13 @@ def _generate_ideas(niche: str, sources: list, max_ideas: int = 10) -> list:
 # FIRST `target` titles we have not already made a video about, and produce.
 
 LIGHT_SUBJECTS = {
-    "iran_360": "the Iran-Iraq war",
-    "iraq_war": "the Iraq War",
-    "vietnam_war": "the Vietnam War",
-    "cold_war": "the Cold War",
-    "war_experiments": "mid-century military science and experiments",
+    "experiments": "secret WW1/WW2 human and animal experiments by the great powers",
+    "dark_legends": "dark legends, curses, hauntings and scary true history",
+    "ww1_ww2_stories": "epic stories from World War I and World War II",
 }
 
 LIGHT_IDEAS_PROMPT = """List documentary video titles about {subject}.
-Titles must be under 70 characters, use strong action verbs, and name specific, real, confirmed events, units, or figures from documented history (no supernatural or tabloid claims). Prefer stories a general audience has not already seen everywhere.
+Titles must be under 70 characters, use strong action verbs, and name specific, real, confirmed events, units, or figures from documented history (legends and supernatural folklore are allowed when framed as a story or legend — no true-crime serial killers or missing-person cases). Prefer stories a general audience has not already seen everywhere.
 Return ONLY a JSON array of strings, e.g. ["Title one", "Title two"], and nothing else.
 """
 
@@ -700,9 +659,9 @@ def run_research_pipeline(target: int = 24, min_per_niche: int = 6) -> list:
     topics.sort(key=lambda t: t["score"], reverse=True)
 
     # Category quota balance: don't let one bucket flood the queue.
-    # Research niches get at least min_per_niche(+floor_bonus); no bucket exceeds
-    # ~40% of target. The 2026 Iran war niche gets a bigger floor because the
-    # live news layer feeds it fresh material continuously.
+    # Research niches get at least min_per_niche; no bucket exceeds ~40% of
+    # target. The experiments pillar is the money niche but the cap still
+    # forces the legends and WW1/WW2-story pillars to get airtime.
     selected, counts = [], {}
     per_niche_floor = {
         n: min_per_niche + NICHES[n].get("floor_bonus", 0) for n in NICHES

@@ -2,31 +2,34 @@
 
 Everything outside this package talks to the video pipeline's script shape,
 never to the lab's internal dicts. `build_lab_script` runs the staged pipeline
-and normalizes it deterministically (no extra LLM calls); `theme_for_style`
-maps a voice writing-style dict onto a supported theme.
+and normalizes it deterministically (no extra LLM calls); `speaking_style_for_style`
+maps a voice writing-style dict onto a supported speaking style.
 """
 from __future__ import annotations
 
 from src.services.script_lab.lines import _text_of
 from src.services.script_lab.pipeline import run_pipeline
 from src.services.script_lab.queries import _coerce
+from src.utils.file_helpers import dump_artifact
 
 
-def theme_for_style(style: dict | None) -> str:
-    """Resolve a voice writing-style dict to a script theme id.
+def speaking_style_for_style(style: dict | None) -> str:
+    """Resolve a voice writing-style dict to a speaking style id.
 
-    Styles that map onto a persona theme (arnold/trump) get that theme; the
-    plain narrator style passes the story through unchanged.
+    Styles that map onto a persona (arnold/trump/tate) get that speaking style;
+    the plain narrator style maps to the neutral speaking style.
     """
     name = ((style or {}).get("name") or "").lower()
     if "arnold" in name:
         return "arnold"
     if "trump" in name:
         return "trump"
+    if "tate" in name:
+        return "andrew_tate"
     return "narrator"
 
 
-def build_lab_script(topic: str, story: str, theme: str = "") -> dict:
+def build_lab_script(topic: str, story: str, style: str = "") -> dict:
     """Run the staged lab pipeline and normalize its output to the script dict
     shape the rest of the video pipeline expects.
 
@@ -35,9 +38,9 @@ def build_lab_script(topic: str, story: str, theme: str = "") -> dict:
     search_term/image_expectation/image_features/image_type/duration/loud and
     search_queries. We fill those deterministically - no extra LLM calls.
     """
-    if not theme:
-        theme = "arnold"
-    result = run_pipeline(topic, story, theme=theme)
+    if not style:
+        style = "narrator"
+    result = run_pipeline(topic, story, style=style)
 
     lines = []
     for i, ln in enumerate(result["lines"], 1):
@@ -60,10 +63,10 @@ def build_lab_script(topic: str, story: str, theme: str = "") -> dict:
             "loud": tone == "shout",
         })
 
-    return {
+    script = {
         "topic": topic,
         "lines": lines,
-        "facts": result["facts"],
         "story": result["story"],
-        "themed": result["themed"],
     }
+    dump_artifact("script", script, topic)
+    return script

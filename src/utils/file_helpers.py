@@ -2,8 +2,13 @@ import json
 import os
 import re
 import shutil
+import time
 
 from src.config.settings import OUTPUT_DIR, TEMP_DIR
+
+DEBUG_DIR = "debug_output"
+
+_ARTIFACT_SEQ = 0
 
 
 def ensure_dirs():
@@ -25,6 +30,32 @@ def save_json(data: dict, path: str):
 def load_json(path: str) -> dict:
     with open(path, "r") as f:
         return json.load(f)
+
+
+def dump_artifact(step: str, data, topic: str = "") -> str:
+    """Write one pipeline step's output to debug_output/ for inspection.
+
+    Strings are saved as .txt, everything else as .json. Each write gets a
+    timestamp + sequence prefix so files never clobber each other within or
+    across runs. Returns the file path.
+    """
+    global _ARTIFACT_SEQ
+    _ARTIFACT_SEQ += 1
+    os.makedirs(DEBUG_DIR, exist_ok=True)
+    slug = re.sub(r"[^a-z0-9]+", "_", (topic or "").lower()).strip("_")[:40]
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    name = f"{stamp}_{_ARTIFACT_SEQ:02d}_{step}"
+    if slug:
+        name += f"_{slug}"
+    suffix = ".txt" if isinstance(data, str) else ".json"
+    path = os.path.join(DEBUG_DIR, name + suffix)
+    with open(path, "w", encoding="utf-8") as f:
+        if isinstance(data, str):
+            f.write(data)
+        else:
+            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+    print(f"  [artifact] {step} -> {path}")
+    return path
 
 
 def output_path(topic: str) -> str:

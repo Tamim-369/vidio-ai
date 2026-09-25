@@ -5,8 +5,8 @@ Formula (transparent, tunable via weights below):
   score = 100 * (0.35*authority + 0.35*freshness + 0.30*specificity)
 
   authority   — how much the source is trusted for the niche (0..1).
-  freshness   — recency decay; news decays over ~3 days, history over ~60d.
-                Missing dates imply a freshly-crawled page → treated as fresh.
+  freshness   — recency decay; history niches age over ~60d. Missing dates
+                imply a freshly-crawled page → treated as fresh.
   specificity — density of factual tokens (years, counts, %, proper nouns)
                 in the available text; topic-finding wants numbers & names.
 """
@@ -18,8 +18,7 @@ from datetime import datetime, timezone
 from src.services.topic_agent.leads import Lead
 from src.services.topic_agent.sources import AUTHORITY
 
-_NEWS_HALF_LIFE_H = 72          # war news goes stale fast
-_HISTORY_HALF_LIFE_H = 60 * 24  # history stories age slower
+_HISTORY_HALF_LIFE_H = 60 * 24  # history stories age slowly
 
 _FACT_YEAR = re.compile(r"\b(1[6-9]\d{2}|20\d{2})\b")
 _FACT_NUM = re.compile(r"\d[\d,]*\.?\d*\s*(?:%|km|miles?|kg|tons?|deaths?|soldiers?|troops?|patients?|victims?|men|planes?|ships?|tanks?)", re.I)
@@ -53,10 +52,9 @@ def _freshness(lead: Lead, half_life_h: float) -> float:
 def score_lead(lead: Lead) -> tuple[int, dict]:
     """Return (score, breakdown) for a single lead."""
     freshest = {
-        "war_news": _NEWS_HALF_LIFE_H,
-        "war_history": _HISTORY_HALF_LIFE_H,
         "experiments": _HISTORY_HALF_LIFE_H,
-        "dark_history": _HISTORY_HALF_LIFE_H,
+        "dark_legends": _HISTORY_HALF_LIFE_H,
+        "ww1_ww2_stories": _HISTORY_HALF_LIFE_H,
     }.get(lead.niche, _HISTORY_HALF_LIFE_H)
 
     authority = AUTHORITY.get(lead.source_key, 0.5)

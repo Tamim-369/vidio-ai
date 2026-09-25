@@ -1,4 +1,4 @@
-"""Pipeline driver: runs the five stages in ONE fixed order.
+"""Pipeline driver: runs the stages in ONE fixed order.
 
 This is the single place where execution order lives. Every downstream module
 (main.py, script_lab_test.py) calls `run_pipeline`; nothing else is allowed to
@@ -10,60 +10,44 @@ from __future__ import annotations
 import time
 
 from src.services.script_lab.config import LOCAL_MODEL
-from src.services.script_lab.facts import extract_facts
+from src.services.script_lab.story import build_story
 from src.services.script_lab.lines import to_lines
-from src.services.script_lab.queries import generate_queries
-from src.services.script_lab.story import write_story
-from src.services.script_lab.theme import apply_theme
+from src.services.script_lab.queries import build_queries
+from src.utils.file_helpers import dump_artifact
 
 # Source of truth for the ordered stage list (logging + any tooling that needs
 # to enumerate the pipeline). The function calls below are what actually run.
-STAGES = ["facts", "story", "theme", "lines", "queries"]
+STAGES = ["story", "agent", "queries"]
 
 
-def run_pipeline(topic: str, story: str, theme: str = "arnold") -> dict:
-    print(f"\n{'='*70}\nPIPELINE: {topic}  (theme={theme}, model={LOCAL_MODEL})\n{'='*70}")
+def run_pipeline(topic: str, story: str, style: str = "narrator") -> dict:
+    print(f"\n{'='*70}\nPIPELINE: {topic}  (style={style}, model={LOCAL_MODEL})\n{'='*70}")
 
     t = time.monotonic()
-    print("\n[1/5] FACTS")
-    facts = extract_facts(story)
-    for f in facts:
-        print(f"    - {f.get('fact')}  [{f.get('kind')}={f.get('value')}]")
-    if not facts:
-        raise RuntimeError("facts stage returned nothing - cannot continue")
+    print("\n[1/3] STORY")
+    story_text = build_story(story, style=style, topic=topic)
+    print(story_text)
     print(f"     ({time.monotonic() - t:.0f}s)")
+    dump_artifact("story", story_text, topic)
 
     t = time.monotonic()
-    print("\n[2/5] STORY")
-    story_prose = write_story(topic, facts)
-    print(story_prose)
-    print(f"     ({time.monotonic() - t:.0f}s)")
-
-    t = time.monotonic()
-    print(f"\n[3/5] THEME ({theme})")
-    themed = apply_theme(story_prose, theme, facts=facts)
-    print(themed)
-    print(f"     ({time.monotonic() - t:.0f}s)")
-
-    t = time.monotonic()
-    print("\n[4/5] JSON LINES")
-    lines = to_lines(themed)
+    print("\n[2/3] SCRIPT AGENT")
+    lines = to_lines(story_text)
     for i, ln in enumerate(lines, 1):
         print(f"    {i:2d}. [{ln.get('beat','?'):8}|{ln.get('tone','?'):6}] {ln['text']}")
     print(f"     ({time.monotonic() - t:.0f}s)")
+    dump_artifact("lines", lines, topic)
 
     t = time.monotonic()
-    print("\n[5/5] IMAGE QUERIES")
-    lines = generate_queries(topic, story, lines)
+    print("\n[3/3] QUERY BUILDER (topic-grounded)")
+    lines = build_queries(lines, topic=topic)
     for i, ln in enumerate(lines, 1):
-        print(f"    {i:2d}. {ln['text']}")
-        for q in ln["queries"]:
-            print(f"         - {q}")
+        for q in ln.get("queries", []):
+            print(f"    {i:2d}. - {q}")
     print(f"     ({time.monotonic() - t:.0f}s)")
+    dump_artifact("queries", lines, topic)
 
     return {
-        "facts": facts,
-        "story": story_prose,
-        "themed": themed,
+        "story": story_text,
         "lines": lines,
     }

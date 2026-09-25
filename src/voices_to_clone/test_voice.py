@@ -27,7 +27,7 @@ def list_voices():
         status = "enabled" if v.get("enabled") else "disabled"
         print(f"  - {vid:16} {v['name']:28} [{v['engine']}] [{v.get('writing_style')}] ({status})")
     print("\nWriting styles:")
-    for sid in ["narrator", "trump", "tristan_tate", "arnold"]:
+    for sid in ["narrator", "trump", "andrew_tate", "arnold"]:
         style = get_style(sid)
         print(f"  - {sid:16} {style['name']}")
 

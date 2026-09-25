@@ -29,6 +29,49 @@ _BODY_CAP_CHARS = 6000
 _MAX_LINKS_PER_PAGE = 30
 _MAX_QUERIES = 4
 
+# Boilerplate that leaks into article bodies from template-heavy sites:
+# image-caption chrome, edit/author footers, donation appeals, glossaries.
+_BOILERPLATE_PATTERNS = (
+    (re.compile(r"More information about this image", re.I), ""),
+    (re.compile(r"Close Image Lightbox", re.I), ""),
+    (re.compile(
+        r"Last Edited:.*?View the list of all donors", re.S | re.I
+    ), ""),
+    (re.compile(
+        r"Feedback.*?View the list of all donors", re.S | re.I
+    ), ""),
+    (re.compile(
+        r"Glossary\s+Full Glossary\s+Close glossary", re.I
+    ), ""),
+    (re.compile(r"\bAuthor\(s\):\s*[A-Z][A-Za-z ,.]*", re.I), ""),
+)
+
+
+def strip_boilerplate(text: str) -> str:
+    """Remove site-level chrome (captions, footers, donor/glossary blocks)."""
+    if not text:
+        return text
+    for pattern, repl in _BOILERPLATE_PATTERNS:
+        text = pattern.sub(repl, text)
+    return clean_text(text)
+
+
+def extract_article_body(url: str, selectors: list[str] | None = None) -> str:
+    """Fetch one URL and return its cleaned article body ("" if unusable).
+
+    Public entry point for pulling a full article body from a plain URL —
+    used where a lead/rss summary is too thin to script from (e.g. story
+    research at script time).
+    """
+    try:
+        html = fetch(url, timeout=20)
+    except RequestException:
+        return ""
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    return _extract_body(soup, selectors or _GENERIC_BODY_SELECTORS)
+
 
 def collect(spec: dict, limit: int = 200) -> list[Lead]:
     """Run the collector matching spec['kind']. Never raises."""
@@ -181,7 +224,7 @@ def _extract_body(soup: BeautifulSoup, selectors: list[str]) -> str:
     best = max(candidates, key=lambda el: len(el.get_text(" ", strip=True)))
     for tag in best.find_all(["script", "style", "nav", "aside", "form", "iframe"]):
         tag.decompose()
-    return clean_text(best.get_text(" ", strip=True))[:_BODY_CAP_CHARS]
+    return strip_boilerplate(best.get_text(" ", strip=True))[:_BODY_CAP_CHARS]
 
 
 def _meta_date(soup: BeautifulSoup) -> datetime | None:

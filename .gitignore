@@ -28,6 +28,7 @@ temp/
 cookie
 /topics
 raw_*.txt
+debug_output/
 voice_tests/test_output/*
 voice_tests/*.wav
 voice_tests/scripts/*

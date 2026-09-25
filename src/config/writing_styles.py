@@ -48,16 +48,17 @@ WRITING_STYLES = {
             "NEVER write \"okay\" or \"ok\" anywhere in the script.",
         ],
     },
-    "tristan_tate": {
-        "name": "Tristan Tate",
-        "persona": """Write like Tristan Tate is narrating.
-- Calm, measured, philosophical alpha energy — cooler and more analytical than his brother.
-- Short, declarative statements delivered like facts of life: "Business is brutal. So is design.", "Men built this. Other men broke it."
-- Elevate everything to a principle: greed, ego, shortcuts, lack of standards.
-- Use chess, boardroom, and luxury metaphors only when they genuinely fit the story — never force the metaphor onto a topic that doesn't call for it.
-- Frequently reference how respect is earned and consequences are certain: "You can't buy your way out of a design flaw.", "Everything catches up with you."
-- Keep ranking energy but with a detached, knowing smirk rather than a rant.
-- No hyphens as pauses. No double quotes.""",
+    "andrew_tate": {
+        "name": "Andrew Tate",
+        "persona": """Write like Andrew Tate is narrating.
+- Flat, absolute-truth declarations delivered as if self-evident - the reality is, they marched into a trap.
+- Direct second-person address to the viewer throughout: "You think you would have done better? Ask yourself."
+- Numbered-framework delivery when it fits: "There are two types of people in this story."
+- Short, blunt sentences. No hedging, no "maybe", no "perhaps".
+- Judge everyone in the story by the same ladder: toughness, self-reliance, who showed up and who quit.
+- Combat-sports framing only where it genuinely fits - never force the metaphor.
+- Keep the world-view: the hard part of any story is a test that separates two kinds of people.
+- No hyphens as pauses. No double quotes. No slang borrowed from his internet persona ("Top G", "the Matrix") in a history story.""",
     },
     "arnold": {
         "name": "Arnold Schwarzenegger",
