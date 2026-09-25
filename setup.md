@@ -13,23 +13,21 @@ Builds faceless YouTube Shorts: research/viral-topic generation → story/script
 
 ## Install
 
+One command does everything: checks prerequisites, creates `.venv`, installs
+requirements, installs Playwright Chromium, creates `.env` from the template,
+and checks the narrator voice.
+
 ```bash
 git clone https://github.com/Tamim-369/vidio-ai.git && cd vidio-ai
-
-# Dependencies (the .venv is created on first use)
-uv pip install -r requirements.txt
-
-# Playwright (optional topic source; the generator falls back to plain requests
-# if it is not installed). Download a browser the first time:
-uv run playwright install chromium
-
-# Copy the env template and fill in your keys — see "Environment" below.
-cp .env.example .env
+bash setup.sh
 ```
 
-> Note: `uv sync` will NOT install the dependencies — `pyproject.toml` is
-> empty and the project installs purely from `requirements.txt`, so use
-> `uv pip install -r requirements.txt` (or plain `pip`).
+Flags: `--no-playwright` (skip the optional ~150 MB browser download),
+`--no-voice-check`. Then edit `.env` and add your keys — see below.
+
+---
+
+Manual install (if you prefer the steps yourself):
 
 If using pip directly:
 
