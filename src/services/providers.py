@@ -1,18 +1,17 @@
-"""Single seam for LLM calls (Groq + Gemini + Cloudflare).
+"""Single seam for LLM calls (Groq + Cloudflare).
 
 Owns the provider lifecycle and fallback chain. The primary pathway is:
 
-    call_text()    -> Groq (3 rotating keys) -> Gemini -> Cloudflare (last resort).
-    call_groq()    -> Groq (3 rotating keys), then Gemini fallback.
+    call_text()    -> Groq (3 rotating keys) -> Cloudflare (last resort).
+    call_groq()    -> Groq (3 rotating keys).
 
 Groq keys rotate across GROQ_API_KEY / GROQ_API_KEY_SECOND / GROQ_API_KEY_THIRD
 on retriable or hard failures, and repeated calls pick up where the last one
-succeeded, so a dead key is never re-hit first; when all three are exhausted
-``call_groq`` falls back to Gemini (``call_gemini``, rotating
-GEMINI_API_KEY_ONE..FIVE). Cloudflare is demoted to a final safety net since it
-rate-limits (429) constantly and was the main reason research/script generation
-felt like forever. No service builds its own client or retry loop: use
-``call_text`` / ``call_groq`` and forget the plumbing.
+succeeded, so a dead key is never re-hit first. Cloudflare is demoted to a
+final safety net since it rate-limits (429) constantly. There is intentionally
+NO Gemini/Google in the chain: the project models text with Groq (default) or
+local Ollama (see ``src/agents/common/llm.py``). No service builds its own
+client or retry loop: use ``call_text`` / ``call_groq`` and forget the plumbing.
 
 Note: there is NO vision seam anymore. Image verification was removed from the
 pipeline — image selection is driven by the per-line query agent, so model
@@ -39,32 +38,20 @@ CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
 # Arnold-style prompt).
 CLOUDFLARE_MODEL = os.getenv("CLOUDFLARE_MODEL", "@cf/meta/llama-3.3-70b-instruct-fp8-fast")
 
-# Groq — 3 keys: rotate on failure, fall back to Gemini when all three exhausted.
+# Groq — 3 keys: rotate on failure; Cloudflare is the only last resort.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_KEY_SECOND = os.getenv("GROQ_API_KEY_SECOND")
 GROQ_API_KEY_THIRD = os.getenv("GROQ_API_KEY_THIRD")
 GROQ_API_KEY_BACKUP = os.getenv("GROQ_API_KEY_BACKUP")  # Legacy alias
-# TEXT model (script/research): gpt-oss-20b is a fast, standard service model.
-# gpt-oss-120b returns empty completions on this Groq org, so it is avoided
-# (the retry chain now treats empty content as a failure and rotates keys).
-GROQ_MODEL = "openai/gpt-oss-20b"
+# TEXT model (script/research): qwen is the fast on-demand service model, used
+# EVERYWHERE by default. gpt-oss-120b is the automatic fallback, tried only
+# when qwen is down/exhausted on all keys (the retry chain treats empty
+# content as a failure, so a dead/unavailable model is never silently empty).
+GROQ_MODEL = "qwen/qwen3.8-27b"
+GROQ_MODEL_FALLBACK = "openai/gpt-oss-120b"
 
-# Gemini (final fallback after the 3 Groq keys, plus the topic brainstormer).
-# Flash is the free-tier workhorse (~15 RPM, ~1500 RPD). Rotated in key order
-# ONE..FIVE.
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-GEMINI_KEYS = [
-    key for key in (
-        os.getenv("GEMINI_API_KEY_ONE"),
-        os.getenv("GEMINI_API_KEY_TWO"),
-        os.getenv("GEMINI_API_KEY_THREE"),
-        os.getenv("GEMINI_API_KEY_FOUR"),
-        os.getenv("GEMINI_API_KEY_FIVE"),
-    ) if key
-]
-if GEMINI_API_KEY and GEMINI_API_KEY not in GEMINI_KEYS:
-    GEMINI_KEYS.append(GEMINI_API_KEY)
+# Gemini removed from the chain (no Google in this project). The fallback after
+# the 3 Groq keys is Cloudflare only.
 
 CF_ENDPOINT = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions"
 
@@ -85,6 +72,17 @@ _clients = _clients or [_primary]
 
 _attempted = set()
 _last_good = 0  # last Groq key that succeeded -> next call starts here
+
+
+def _groq_keys_present() -> bool:
+    """True when at least one Groq key is configured in .env.
+
+    The central LLM seam (src.agents.common.llm) uses this to decide between
+    Groq and local Ollama: Groq is only ever used when a real key exists.
+    """
+    return any(k for k in (
+        GROQ_API_KEY, GROQ_API_KEY_SECOND, GROQ_API_KEY_THIRD, GROQ_API_KEY_BACKUP
+    ) if k)
 
 
 def _get_client():
@@ -135,11 +133,9 @@ def call_cloudflare(messages: list, temperature: float = 0.7, model: str = None,
                     max_retries: int = 3, max_tokens: int = None, tag: str = "cf") -> str:
     """OpenAI-compatible Chat Completions against Cloudflare Workers AI.
 
-    Primary provider pipeline. The model is a reasoning model (@cf/google/
-    gemma-4-26b-a4b-it) so its light reasoning (~150-200 tokens) is emitted in
-    ``reasoning_content`` and the actual answer lands in ``content`` — callers
-    only ever see the answer. Retries with exponential backoff on rate limits /
-    5xx / capacity, raising on persistent failure so callers can fall back.
+    Last-resort provider (only reached when all Groq keys fail). The model is
+    fast and busy under load, so requests retry with exponential backoff; raise
+    on persistent failure so callers can fall back.
     """
     if model is None:
         model = CLOUDFLARE_MODEL
@@ -173,19 +169,18 @@ def call_cloudflare(messages: list, temperature: float = 0.7, model: str = None,
 
 def call_text(messages: list, temperature: float = 0.7, model: str = None,
               max_retries: int = 3, max_tokens: int = None, tag: str = "text") -> str:
-    """Default text-generation seam: Groq first, Gemini, Cloudflare last.
+    """Default text-generation seam: Groq first, Cloudflare last.
 
-    Groq is now the primary path (fast, 3 rotating keys with a Gemini fallback),
-    so script/research calls stop paying the Cloudflare 429 retry wall on every
-    single request. Cloudflare remains as a last resort — it only runs when all
-    Groq keys AND Gemini are exhausted, so nothing about output is lost.
+    Groq is the primary path (fast, 3 rotating keys). Cloudflare remains as a
+    last resort — it only runs when all Groq keys are exhausted, so nothing
+    about output is lost. No Gemini/Google anywhere in the chain.
     """
     groq_model = model or GROQ_MODEL
     try:
         return call_groq(messages, temperature=temperature, model=groq_model,
                          max_retries=max_retries, max_tokens=max_tokens, tag=tag)
     except Exception as e:
-        print(f"    [{tag}] Groq/Gemini unavailable ({str(e)[:120]}) - falling back to Cloudflare")
+        print(f"    [{tag}] Groq unavailable ({str(e)[:120]}) - falling back to Cloudflare")
     cf_model = model or CLOUDFLARE_MODEL
     return call_cloudflare(messages, temperature=temperature, model=cf_model,
                            max_retries=max_retries, max_tokens=max_tokens, tag=tag)
@@ -193,121 +188,69 @@ def call_text(messages: list, temperature: float = 0.7, model: str = None,
 
 def call_groq(messages: list, temperature: float = 0.7, model: str = None,
               max_retries: int = 3, max_tokens: int = None, tag: str = "groq") -> str:
-    """Chat completions with 3-key rotation + Gemini final fallback.
+    """Chat completions with 3-key rotation + model fallback.
+
+    Primary model is GROQ_MODEL (qwen) by default; GROQ_MODEL_FALLBACK
+    (gpt-oss-120b) is tried only when qwen fails on every key, so calls never
+    die just because the primary service model is down. An explicit ``model``
+    arg uses that model alone (no automatic fallback).
 
     Retries only on rate-limit/413/token errors (exponential backoff 1s, 2s,
-    4s). On a retriable failure it first rotates to the next Groq key; once all
-    keys have been tried and failed it falls back to Gemini (``call_gemini``).
-    Non-retriable failures advance keys immediately. Returns the stripped text.
+    4s) up to ``max_retries`` on the same key; only then does it rotate to the
+    next Groq key, and once all keys have been tried and failed on a model it
+    moves to the fallback model. Non-retriable failures and empty responses
+    rotate keys immediately. Returns the stripped text.
     """
     global _rotating, _last_good
-    if model is None:
-        model = GROQ_MODEL
-
-    retriable = None
-    for pos in range(len(_clients)):
-        key_idx = (_last_good + pos) % len(_clients)
-        _rotating = key_idx
-        _attempted.add(key_idx)
-        try:
+    models = [model] if model else [GROQ_MODEL, GROQ_MODEL_FALLBACK]
+    _model_err = None
+    for model in models:
+        _model_err = None
+        for pos in range(len(_clients)):
+            key_idx = (_last_good + pos) % len(_clients)
+            _rotating = key_idx
+            _attempted.add(key_idx)
             for attempt in range(max_retries):
-                kwargs = dict(model=model, messages=messages, temperature=temperature)
-                if max_tokens:
-                    # The on-demand qwen model caps OUTPUT tokens at 1000/min, so a
-                    # caller asking for e.g. max_tokens=8192 (script JSON) would be
-                    # rejected at request time. Clamp to the limit ONLY for that
-                    # model; standard models (llama-3.3-70b-versatile) accept
-                    # larger outputs, and callers downsample gracefully on partial
-                    # JSON anyway.
-                    if "qwen3.8-27b" in model:
-                        kwargs["max_tokens"] = min(max_tokens, 1000)
+                try:
+                    kwargs = dict(model=model, messages=messages, temperature=temperature)
+                    if max_tokens:
+                        # The on-demand qwen model caps OUTPUT tokens at 1000/min, so a
+                        # caller asking for e.g. max_tokens=8192 (script JSON) would be
+                        # rejected at request time. Clamp to the limit ONLY for that
+                        # model; standard models accept larger outputs, and callers
+                        # downsample gracefully on partial JSON anyway.
+                        if "qwen3.8-27b" in model:
+                            kwargs["max_tokens"] = min(max_tokens, 1000)
+                        else:
+                            kwargs["max_tokens"] = min(max_tokens, 16384)
+                    response = _get_client().chat.completions.create(**kwargs)
+                    content = (response.choices[0].message.content or "").strip()
+                    if content:
+                        _last_good = key_idx
+                        return content
+                    print(f"    [{tag}] Key {key_idx + 1}/{len(_clients)} returned empty content")
+                    _model_err = "empty content from groq"
+                    break  # empty content on this key -> rotate to next key
+                except Exception as e:
+                    _model_err = str(e)[:120]
+                    error_msg = str(e).lower()
+                    retriable = ("rate_limit" in error_msg or "413" in error_msg
+                                 or "tokens" in error_msg or "429" in error_msg)
+                    print(f"    [{tag}] Key {key_idx + 1}/{len(_clients)} attempt {attempt + 1}/{max_retries} failed ({_model_err})")
+                    if retriable and attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        print(f"    [{tag}] retrying same key in {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+                    if retriable:
+                        wait_time = 2 ** attempt
+                        print(f"    [{tag}] all attempts failed - next key in {wait_time}s...")
+                        time.sleep(wait_time)
                     else:
-                        kwargs["max_tokens"] = min(max_tokens, 16384)
-                response = _get_client().chat.completions.create(**kwargs)
-                content = (response.choices[0].message.content or "").strip()
-                if content:
-                    _last_good = key_idx
-                    return content
-                print(f"    [{tag}] Key {key_idx + 1}/{len(_clients)} returned empty content - next key")
-                raise RuntimeError("empty content from groq")
-        except Exception as e:
-            error_msg = str(e).lower()
-            print(f"    [{tag}] Key {key_idx + 1}/{len(_clients)} failed ({str(e)[:120]})")
-            retriable = ("rate_limit" in error_msg or "413" in error_msg
-                         or "tokens" in error_msg or "429" in error_msg)
-            if retriable and pos < len(_clients) - 1:
-                wait_time = 2 ** min(pos, 3)
-                print(f"    [{tag}] rotating to next Groq key in {wait_time}s...")
-                time.sleep(wait_time)
-            elif not retriable and pos < len(_clients) - 1:
-                print(f"    [{tag}] rotating to next Groq key...")
-        # keep going to next key regardless
-    print(f"    [{tag}] All {len(_clients)} Groq keys failed - falling back to Gemini")
-    return call_gemini(messages, temperature=temperature, model=None,
-                       max_tokens=max_tokens, tag=tag)
-
-
-def call_gemini(messages: list, temperature: float = 0.7, model: str = None,
-                max_tokens: int = None, tag: str = "gemini") -> str:
-    """Gemini Flash completion via google-genai, rotating GEMINI_KEYS.
-
-    Used as the final fallback after the 3 Groq keys. Handles both plain text
-    and multimodal (inline image) messages. Raises a RuntimeError when
-    every Gemini key fails so the caller's own fallback chain still runs.
-    """
-    if model is None:
-        model = GEMINI_MODEL
-    if not GEMINI_KEYS:
-        raise RuntimeError("[gemini] no GEMINI_API_KEY_* configured in .env")
-
-    last_err = None
-    for key in GEMINI_KEYS:
-        try:
-            from google import genai
-            from google.genai import types
-
-            client = genai.Client(api_key=key)
-            contents = []
-            for c in messages:
-                if not isinstance(c, dict):
-                    continue
-                role = "model" if c.get("role") == "assistant" else "user"
-                parts = _gemini_parts(c.get("content"))
-                contents.append(types.Content(role=role, parts=parts))
-            config = {"temperature": temperature}
-            if max_tokens:
-                config["max_output_tokens"] = min(max_tokens, 8192)
-            resp = client.models.generate_content(
-                model=model, contents=contents,
-                config=types.GenerateContentConfig(**config),
-            )
-            text = (resp.text or "").strip()
-            if text:
-                return text
-            last_err = "empty response"
-        except Exception as e:
-            last_err = str(e)[:160]
-            print(f"    [{tag}] Gemini key failed ({last_err}) - trying next")
-            time.sleep(1)
-    raise RuntimeError(f"[{tag}] all Gemini keys failed: {last_err}")
-
-
-def _gemini_parts(content):
-    """Convert an OpenAI-style message content to google-genai Parts."""
-    from google.genai import types
-    if isinstance(content, str):
-        return [types.Part(text=content)]
-    parts = []
-    for p in content:
-        if not isinstance(p, dict):
+                        print(f"    [{tag}] rotating to next key...")
+                    break  # exhausted retries on this key -> rotate
+        if _model_err and len(models) > 1:
+            print(f"    [{tag}] {model} failed on all keys - trying fallback model")
             continue
-        if p.get("type") == "text" and p.get("text"):
-            parts.append(types.Part(text=p["text"]))
-        elif p.get("type") == "image_url":
-            url = (p.get("image_url") or {}).get("url", "")
-            if url.startswith("data:"):
-                mime, _, b64 = url[5:].partition(";base64,")
-                if b64:
-                    parts.append(types.Part(inline_data=types.Blob(
-                        mime_type=mime or "image/jpeg", data=b64)))
-    return parts
+        break
+    raise RuntimeError(f"[{tag}] all {len(_clients)} Groq keys failed (last: {_model_err})")

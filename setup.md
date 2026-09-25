@@ -128,8 +128,7 @@ committed.
 | `GROQ_API_KEY` | primary LLM | at least one LLM key |
 | `GROQ_API_KEY_SECOND` | second Groq key, rotated on failure | no |
 | `GROQ_API_KEY_THIRD` | third Groq key, rotated on failure | no |
-| `GEMINI_API_KEY` | Gemini fallback LLM | no |
-| `GEMINI_API_KEY_ONE` .. `GEMINI_API_KEY_FIVE` | five Gemini keys, rotated in order | no |
+| `LLM_PROVIDER` | `groq` (default) or `ollama`; when `groq`, the 3 Groq keys above are used, otherwise local Ollama | no |
 | `CLOUDFLARE_API_TOKEN` | Cloudflare Workers AI access token | no |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account id | no |
 | `PEXELS_API_KEY` | image search | for images |
@@ -296,6 +295,7 @@ Main CLI flags:
 | `--script-only` | stop after topics + scripts |
 | `--limit N` | posts per source when researching (default 100) |
 | `--target N` | how many topics to research (default 24) |
+| `--concurrency N` | render up to N videos at once in batch mode (moving assembly line; default 1) |
 
 ## Tests
 
@@ -339,8 +339,8 @@ src/tests/          standalone tests
 | `[setup] ERROR: 'sox' is required...` | install the system package (see table above) |
 | `No Pocket-TTS narrator voice state` | you have no voice; do Step 5 |
 | `VOICE_CLONING_UNSUPPORTED` | you tried to build a voice without the gated model; do Step 4 |
-| `[cf] CLOUDFLARE_API_TOKEN ... missing` | LLM chain ran out of keys; add a Groq or Gemini key |
-| `[gemini] no GEMINI_API_KEY_* configured` | same as above |
+| `[cf] CLOUDFLARE_API_TOKEN ... missing` | LLM chain ran out of keys; add a Groq key |
+| `[groq] all N Groq keys failed` | all Groq keys failed; set `LLM_PROVIDER=ollama` or add valid keys |
 | upload not working | check YouTube OAuth setup, Step 6 |
 | first run very slow | the TTS model is downloading; it is a one time download |
 | `where are the videos` | they are written to `output/<slug>.mp4` |

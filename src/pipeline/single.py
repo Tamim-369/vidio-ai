@@ -7,7 +7,7 @@ else; batch.py just calls these per topic.
 """
 import time
 
-from src.utils.file_helpers import ensure_dirs, cleanup_temp, dump_artifact
+from src.utils.file_helpers import ensure_workspace, cleanup_temp, dump_artifact
 from src.agents.research.sources import research
 from src.agents.asset.agent import fetch_assets
 from src.agents.voice import agent as voice_manager
@@ -15,6 +15,7 @@ from src.services.tts import generate_audio
 from src.services.video_assembler import assemble
 from src.services.youtube_upload import publish_video
 from src.pipeline.lab import build_lab_script, speaking_style_for_style
+from src.agents.common.llm import LOCAL_MODEL
 
 
 def _format_timing(timing: dict) -> str:
@@ -55,7 +56,7 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
     style = voice_manager.get_writing_style(voice_id, voice_cfg)
     print(f"\n🗣️  Voice: {voice_cfg['name']} ({voice_id}) — style: {style['name']}")
 
-    ensure_dirs()
+    ensure_workspace(topic)
 
     if raw_data:
         print(f"\n📚 Using provided story for: {topic}")
@@ -65,11 +66,11 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
     timing["research"] = time.monotonic() - t0
     dump_artifact("research", raw_data, topic)
 
-    print("\n📝 Building script (100% local, Ollama phi4-mini)...")
+    print(f"\n📝 Building script (100% local, Ollama {LOCAL_MODEL})...")
     try:
         script = _timed("script", build_lab_script,
                         topic, str(raw_data or ""),
-                        style=speaking_style_for_style(style))
+                        style=speaking_style_for_style(style), timing=timing)
     except Exception as e:
         print(f"   ❌ Local script lab failed: {e}")
         raise
@@ -86,10 +87,10 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
     script["lines"] = _timed("assets", fetch_assets, script["lines"], topic=topic, timing=timing)
 
     print("\n🎙️  Generating voiceover...")
-    script["lines"] = _timed("audio", generate_audio, script["lines"], voice=voice_cfg, timing=timing)
+    script["lines"] = _timed("audio", generate_audio, script["lines"], voice=voice_cfg, topic=topic, timing=timing)
 
     print("\n🎬 Assembling video...")
-    output = _timed("assemble", assemble, script, timing=timing)
+    output = _timed("assemble", assemble, script, topic=topic, timing=timing)
 
     # Record the topic as done so it is never regenerated (fuzzy + exact dedup).
     from src.agents.topic.helpers import record_made_video
@@ -101,7 +102,7 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
     else:
         print("\n⏭️  Skipping YouTube upload (pass --no-upload to keep it local)")
 
-    cleanup_temp()
+    cleanup_temp(topic)
     timing["total"] = time.monotonic() - t0
     print(f"\n⏱️  Build time: {_format_timing(timing)}")
     print(f"\n✅ Done! Video saved to: {output}\n")

@@ -1,10 +1,10 @@
 """Asset agent: per-line query, license-safe image fetching (NO vision).
 
 Strategy (validated on wet runs):
-1. QUERY AGENT (local): the 10-lesson query agent (src/agents/query/agent.py,
-   on Ollama) turns the whole script + topic into precise search queries PER
-   narration line (exact names, photo/era tokens, exclusions, a variety of
-   visual angles) — never a single topic-level keyword list. No Groq/Gemini
+1. QUERY AGENT: the 10-lesson query agent (src/agents/query/agent.py, on the
+   central LLM seam) turns the whole script + topic into precise search queries
+   PER narration line (exact names, photo/era tokens, exclusions, a variety of
+   visual angles) — never a single topic-level keyword list. No Gemini
    anywhere in this file.
 2. Download candidate images per query from license-safe sources (Pexels,
    Wikimedia Commons, Openverse, DuckDuckGo restricted to known-free hosts),
@@ -23,6 +23,7 @@ Strategy (validated on wet runs):
 """
 import os
 import re
+import time
 import threading
 import requests
 import pytesseract
@@ -47,7 +48,7 @@ ASSET_REJECT_TEXT_OVERLAY = os.getenv("ASSET_REJECT_TEXT_OVERLAY", "1") == "1"
 ASSET_MAX_TEXT_AREA = float(os.getenv("ASSET_MAX_TEXT_AREA", "0.04"))
 ASSET_TEXT_MIN_CONF = int(os.getenv("ASSET_TEXT_MIN_CONF", "50"))
 
-from src.utils.file_helpers import TEMP_DIR
+from src.utils.file_helpers import workspace_path
 from urllib.parse import urlsplit
 
 from src.agents.asset import assign as local_assign
@@ -93,9 +94,18 @@ REJECT_TEXT_OVERLAY = ASSET_REJECT_TEXT_OVERLAY  # OCR slop filter on/off
 MAX_TEXT_AREA = ASSET_MAX_TEXT_AREA              # text coverage => image skipped
 TEXT_MIN_CONF = ASSET_TEXT_MIN_CONF              # OCR word confidence floor
 
-_file_hashes = {}
+_file_hashes = {}       # (workspace, hash) -> path   - dedup scoped per video
 _file_hash_lock = threading.Lock()
-_source_meta = {}   # path -> {"license": str, "source": str}
+_source_meta = {}       # path -> {"license": str, "source": str}
+
+# Wikimedia throttles burst API access with empty/non-JSON bodies, so the
+# Commons *search* call is globally serialized with a small inter-call gap
+# (Downloads to upload.wikimedia.org are separate hosts and stay parallel).
+_COMMONS_SEARCH_LOCK = threading.Lock()
+_commons_last = 0.0
+_commons_gap_s = 0.35
+# DuckDuckGo similarly rate-limits aggressive parallel scraping.
+_DDG_SEM = threading.BoundedSemaphore(3)
 
 
 def _is_usable_image(content: bytes) -> bool:
@@ -135,7 +145,7 @@ def _download_image(url: str, path: str, headers: dict = HEADERS) -> bool:
     if not url or _is_blocked_host(url):
         return False
     try:
-        r = requests.get(url, timeout=12, headers=headers)
+        r = requests.get(url, timeout=8, headers=headers)
         if r.status_code == 200 and "image" in r.headers.get("Content-Type", ""):
             if _is_usable_image(r.content):
                 with open(path, "wb") as f:
@@ -146,13 +156,24 @@ def _download_image(url: str, path: str, headers: dict = HEADERS) -> bool:
     return False
 
 
+def _workspace_of(path: str) -> str:
+    """The temp/<slug> root a path lives under (dedup scope for concurrency)."""
+    parts = path.split(os.sep)
+    if len(parts) >= 2 and parts[0] == "temp":
+        return parts[1]
+    return ""
+
+
 def _remember(path: str, license: str, source: str) -> bool:
-    """Return True iff this is a NEW unique download. Records license+source."""
+    """Return True iff this is a NEW unique download. Records license+source.
+    Dedup is scoped per workspace so parallel videos never reject each other's
+    (hash-identical) images, while within one video duplicates still collapse."""
     h = _file_hash(path)
+    ws = _workspace_of(path)
     with _file_hash_lock:
-        if h in _file_hashes:
+        if (ws, h) in _file_hashes:
             return False
-        _file_hashes[h] = path
+        _file_hashes[(ws, h)] = path
     _source_meta.setdefault(path, {"license": license or "unspecified", "source": source or ""})
     return True
 
@@ -210,6 +231,30 @@ def _fetch_pexels(search_term: str, base_path: str, count: int = 1) -> list:
     return downloaded
 
 
+def _commons_search(params: dict) -> dict:
+    """Run a Wikimedia Commons API search with the global burst throttle.
+
+    Returns the parsed JSON dict ({} on failure). Wikimedia rate-limits burst
+    API access with empty bodies AND HTML throttle pages, so a non-JSON body is
+    treated as "no results" for the retry logic below.
+    """
+    with _COMMONS_SEARCH_LOCK:
+        global _commons_last
+        wait = _commons_gap_s - (time.monotonic() - _commons_last)
+        if wait > 0:
+            time.sleep(wait)
+        r = requests.get("https://commons.wikimedia.org/w/api.php", params=params,
+                         headers={"User-Agent": HEADERS["User-Agent"]}, timeout=15)
+        _commons_last = time.monotonic()
+    if "json" not in r.headers.get("Content-Type", ""):
+        return {}
+    try:
+        data = r.json()
+    except ValueError:
+        return {}
+    return data or {}
+
+
 def _fetch_wikimedia_commons(search_term: str, base_path: str, count: int = 1) -> list:
     """Wikimedia Commons images with explicit, allowed licenses (PD/CC0/CC BY/CC BY-SA)."""
     downloaded = []
@@ -225,9 +270,12 @@ def _fetch_wikimedia_commons(search_term: str, base_path: str, count: int = 1) -
             "iiprop": "url|extmetadata|size",
             "iiurlwidth": 1400,
         }
-        r = requests.get("https://commons.wikimedia.org/w/api.php", params=params,
-                         headers={"User-Agent": HEADERS["User-Agent"]}, timeout=15)
-        pages = (r.json().get("query", {}) or {}).get("pages", {}) or {}
+        data = _commons_search(params)
+        pages = (data.get("query", {}) or {}).get("pages", {}) or {}
+        if not pages:
+            # A throttled burst returns an empty body; one quieter retry.
+            data = _commons_search(params)
+            pages = (data.get("query", {}) or {}).get("pages", {}) or {}
         for key in sorted(pages, key=lambda k: pages[k].get("index", 0)):
             if len(downloaded) >= count:
                 break
@@ -279,10 +327,10 @@ def _on_free_host(url: str) -> bool:
 def _fetch_ddg(search_term: str, base_path: str, count: int = 1) -> list:
     """DuckDuckGo as a fallback general source - FREE HOSTS ONLY.
 
-    Restricted to hosts with guaranteed-free imagery (Wikimedia Commons,
-    CC-licensed Flickr, Openverse CDN, government/museum archives), with DDG's
-    `license:` filter on Public/Share as a second check. News-wire and
-    paid-stock hosts cannot appear, so this source is copyright-safe.
+    DDG results are restricted to hosts whose imagery is reliably free and
+    stable over time (see _on_free_host whitelist), with DDG's `license:`
+    filter on Public/Share as a second check. News-wire and paid-stock hosts
+    cannot appear, so this source is copyright-safe.
     """
     downloaded = []
     try:
@@ -291,8 +339,9 @@ def _fetch_ddg(search_term: str, base_path: str, count: int = 1) -> list:
                 if len(downloaded) >= count:
                     break
                 try:
-                    results = list(ddgs.images(
-                        search_term, max_results=count * 5, license_image=lic))
+                    with _DDG_SEM:
+                        results = list(ddgs.images(
+                            search_term, max_results=count * 5, license_image=lic))
                 except Exception:
                     continue
                 for i, r in enumerate(results):
@@ -447,19 +496,28 @@ def _image_has_text_overlay(path: str) -> bool:
 def _describe_and_filter_candidates(candidates: dict, facets_tokens: set | None = None, topic: str = "") -> dict:
     """Deterministic filter only (OCR text-overlay rejection) — no vision.
     candidates: {path: (query, line_id)}. Returns {path: (query, query, line_id)}
-    in insertion order; the query doubles as the image's feature text. Pixels are
-    never described or verified: the per-line query agent pins images to topic."""
-    """Deterministic filter only (OCR text-overlay rejection) — no vision.
-    candidates: {path: (query, line_id)}. Returns {path: (query, query, line_id)}
     in insertion order; the query doubles as the image's feature text.
     The facets_tokens gate is intentionally removed: the per-line query agent
     already pins images to the topic, so pixel-level verification is gone."""
-    kept = {}
-    for p, (q, lid) in candidates.items():
+    items = list(candidates.items())
+
+    def _filter_pair(pair):
+        p, (q, lid) = pair
         if _image_has_text_overlay(p):
             print(f"      [text] ✗ text overlay (> {MAX_TEXT_AREA:.0%} area) — skip: {os.path.basename(p)}")
-            continue
-        kept[p] = (q, q, lid)
+            return None
+        return p, (q, q, lid)
+
+    if len(items) <= 1:
+        results = [_filter_pair(pair) for pair in items]
+    else:
+        # pytesseract releases the GIL, so a thread pool scales the OCR pass.
+        with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_WORKERS, len(items))) as ex:
+            results = list(ex.map(_filter_pair, items))
+    kept = {}
+    for res in results:
+        if res is not None:
+            kept[res[0]] = res[1]
     return kept
 
 
@@ -498,7 +556,7 @@ def _assign_images_to_lines(images: dict, lines: list, topic: str) -> dict:
     """images: {path: (features, query, line_id)}. Returns {line_id: [paths]}.
     Local agent proposes the plan (with one repair pass); the deterministic
     greedy token-overlap matcher fills in entirely when no usable plan came
-    back. No Groq/Gemini is involved in assignment anymore."""
+    back. No cloud LLM is involved in assignment anymore."""
     if not images or not lines:
         return {ln["id"]: list(images.keys()) for ln in lines}
 
@@ -607,7 +665,7 @@ def _backfill_gaps(lines: list, kept: dict) -> None:
 
 def fetch_assets(lines: list, topic: str = "") -> list:
     """Per-line query, OCR-clean, license-safe asset fetch (no vision)."""
-    assets_dir = os.path.join(TEMP_DIR, "assets")
+    assets_dir = os.path.join(workspace_path(topic), "assets")
     os.makedirs(assets_dir, exist_ok=True)
 
     print(f"  [asset] Topic: {topic}")

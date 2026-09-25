@@ -6,10 +6,13 @@ self-contained phases:
 - _select_topics(): decide WHERE the topic queue comes from — fresh (topic
   agent -> light idea pass -> deep research, each only when the previous
   produced nothing) or the last saved batch.
-- _produce_topics(): render every selected topic through
-  create_video_from_topic(), round-robining voices, with per-topic timing.
+- _produce_topics(): render topics through create_video_from_topic() on a
+  moving assembly line: up to `concurrency` videos in flight at once, each in
+  its own temp workspace, round-robining voices. Serializing instructions
+  land in parallel workers here; per-video timing is still reported.
 """
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from src.utils.file_helpers import dump_artifact
 from src.agents.voice import agent as voice_manager
@@ -47,23 +50,39 @@ def _select_topics(generate: bool, target: int) -> list:
     return topics
 
 
-def _produce_topics(topics: list, publish: bool, voice: str, script_only: bool = False) -> None:
-    """Render one video per topic (or build only scripts), reporting timing."""
+def _produce_topics(topics: list, publish: bool, voice: str, script_only: bool = False,
+                    concurrency: int = 1) -> None:
+    """Render topics on a moving assembly line, reporting per-topic timing.
+
+    Voice assignment happens BEFORE any worker starts so the round-robin cursor
+    stays deterministic (pick_voice is not thread-safe). Each worker's
+    create_video_from_topic runs in its own temp workspace, so none of them
+    collide on temp/ paths even when they are mid-flight at the same time.
+    """
     voice_manager.list_voices()
 
-    print(f"\n🎬 Processing {len(topics)} topics...")
+    print(f"\n🎬 Processing {len(topics)} topics ({concurrency} at a time)...")
+    assigned = [(t, voice_manager.pick_voice(preferred=voice)[0]) for t in topics]
+
     batch_t0 = time.monotonic()
     per_video = []
-    for i, topic in enumerate(topics, 1):
-        print(f"\n{'=' * 60}\n[{i}/{len(topics)}] {topic['title']}")
+
+    def _work(topic_vid):
+        topic, vid = topic_vid
         v_t0 = time.monotonic()
         try:
-            # Round-robin across enabled voices: trim → arnold → trim → arnold...
-            vid, _ = voice_manager.pick_voice(preferred=voice)
             create_video_from_topic(topic, publish=publish, voice=vid, script_only=script_only)
         except Exception as e:
-            print(f"❌ Failed on topic {i}: {e}")
-        per_video.append((topic["title"], time.monotonic() - v_t0))
+            print(f"❌ Failed on topic: {e}")
+        return (topic["title"], time.monotonic() - v_t0)
+
+    if concurrency <= 1:
+        for t in assigned:
+            per_video.append(_work(t))
+    else:
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            for result in ex.map(_work, assigned):
+                per_video.append(result)
 
     batch_el = time.monotonic() - batch_t0
     print(f"\n{'=' * 60}\n⏱️  Batch: {batch_el/60:.1f}m total across {len(per_video)} topic(s)")
@@ -73,7 +92,7 @@ def _produce_topics(topics: list, publish: bool, voice: str, script_only: bool =
 
 
 def run_batch(generate: bool = True, limit: int = 100, target: int = 24, publish: bool = True,
-              voice: str = "", script_only: bool = False):
+              voice: str = "", script_only: bool = False, concurrency: int = 1):
     """Pick the first `target` fresh topics (no ranking) and produce a video each."""
     topics = _select_topics(generate=generate, target=target)
 
@@ -83,4 +102,5 @@ def run_batch(generate: bool = True, limit: int = 100, target: int = 24, publish
         print("❌ No topics available. Run without --use-saved to generate new ones.")
         return
 
-    _produce_topics(topics, publish=publish, voice=voice, script_only=script_only)
+    _produce_topics(topics, publish=publish, voice=voice, script_only=script_only,
+                    concurrency=concurrency)

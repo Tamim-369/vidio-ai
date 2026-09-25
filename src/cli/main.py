@@ -41,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Only generate topics + scripts (no assets, audio, video, or upload)")
     parser.add_argument("--limit", type=int, default=100, help="Posts per source when researching topics")
     parser.add_argument("--target", type=int, default=24, help="How many topics to research")
+    parser.add_argument("--concurrency", type=int, default=1, metavar="N",
+                        help="Videos to render in parallel in batch mode (moving assembly line)")
     return parser
 
 
@@ -52,13 +54,13 @@ def main() -> None:
         voice_manager.list_voices()
     elif args.batch:
         run_batch(generate=not args.use_saved, limit=args.limit, target=args.target, publish=publish,
-                  voice=args.voice, script_only=args.script_only)
+                  voice=args.voice, script_only=args.script_only, concurrency=args.concurrency)
     elif args.topic:
         create_video(args.topic, publish=publish, voice=args.voice, script_only=args.script_only)
     else:
         # Default: generate topics from Reddit and make videos for all of them
         run_batch(generate=True, limit=args.limit, target=args.target, publish=publish,
-                  voice=args.voice, script_only=args.script_only)
+                  voice=args.voice, script_only=args.script_only, concurrency=args.concurrency)
 
 
 if __name__ == "__main__":

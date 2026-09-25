@@ -9,6 +9,7 @@ tracking, and niche-filtering behave identically everywhere.
 import json
 import os
 import re
+import threading
 
 from src.utils.file_helpers import OUTPUT_DIR
 
@@ -88,6 +89,10 @@ USED_TOPICS_FILE = "used_topics.json"
 TOPICS_OUTPUT_DIR = "topics"
 TARGET_TOPICS = 20
 
+# Concurrent batch workers all call record_made_video when their video finishes;
+# the read-modify-write must be serialized or a finished topic can be lost.
+_used_lock = threading.Lock()
+
 # Filter thresholds (from spec)
 MIN_SCORE = 500
 MIN_SELFTEXT = 1500
@@ -138,7 +143,7 @@ NICHE_CONTEXT = [
 def _min_selftext(c: dict) -> int:
     if c.get("source") == "wikipedia":
         return 500
-    if c.get("source") == "gemini":
+    if c.get("source") == "llm":
         return 40  # summaries are short by design
     if c.get("source", "").startswith("channel:"):
         return 500
@@ -151,7 +156,7 @@ def _min_selftext(c: dict) -> int:
 def _min_score(c: dict) -> int:
     if c.get("source") == "wikipedia":
         return 0
-    if c.get("source") == "gemini":
+    if c.get("source") == "llm":
         return 0
     if c.get("source", "").startswith("channel:"):
         return 0
@@ -195,8 +200,8 @@ def _is_niche(c: dict) -> bool:
         context_hits = sum(1 for k in NICHE_CONTEXT if k in low_body)
         return body_hits >= 2 or (body_hits >= 1 and context_hits >= 2)
 
-    if c.get("source") == "gemini":
-        # Gemini is prompted to stay in-niche and grounded; trust the proposal.
+    if c.get("source") == "llm":
+        # The LLM is prompted to stay in-niche and grounded; trust the proposal.
         return True
 
     if c.get("source", "").startswith("channel:"):
@@ -334,7 +339,7 @@ def _to_topic(c: dict) -> dict:
 def _rank_key(c: dict):
     if c.get("source", "").startswith("channel:"):
         return (0, 4, c["score"])  # by views — proven viral topics surface first
-    if c.get("source") == "gemini":
+    if c.get("source") == "llm":
         return (0, 3, c["score"])  # fresh proposals, grounded but unproven
     if c.get("source") == "wikipedia":
         return (0, 2, c["title"])  # backstop source
@@ -353,8 +358,9 @@ def record_made_video(topic_title: str) -> None:
     (so the exact topic is blocked) and is reconciled with output/ on the
     next generation run regardless.
     """
-    used = list(dict.fromkeys(_load_used() + [topic_title]))
-    _save_used(used)
+    with _used_lock:
+        used = list(dict.fromkeys(_load_used() + [topic_title]))
+        _save_used(used)
 
 
 def load_latest_topics() -> list:

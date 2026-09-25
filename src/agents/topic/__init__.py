@@ -7,7 +7,7 @@ Two generation paths:
     virality heuristic, and selects into the same topics/batch_*.json queue the
     video pipeline already reads. Web scraping only — no inferred topics.
   * ``generator.py`` / ``run_topic_generation`` — blank-prompt generation
-    (Gemini brainstorm + channel mining + Wikipedia + Reddit backstop).
+    (LLM brainstorm + channel mining + Wikipedia + Reddit backstop).
 
 Shared deterministic helpers (dedupe, used/made tracking, niche filters, used
 topic queue) live in ``helpers.py``; the Wikipedia crawl in ``wikipedia.py``;

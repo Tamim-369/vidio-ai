@@ -202,6 +202,8 @@ def word_times_from_waveform(y: np.ndarray, sr: int, text: str) -> list:
     starts = []
     idx = 0
     for (b_start, b_end), cnt in zip(bursts, shares):
+        if cnt <= 0:
+            continue  # burst with no word budget (more bursts than words) - skip it
         w_fracs = fracs[idx:idx + cnt]  # boundaries for words in this burst
         # Normalize within-burst: fraction span [w_fracs[0]..w_fracs[-1]]
         lo, hi = w_fracs[0], w_fracs[-1]

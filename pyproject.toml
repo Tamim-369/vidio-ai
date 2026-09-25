@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "videoai"
+version = "0.1.0"
+description = "Faceless YouTube Shorts pipeline: topic -> story -> TTS -> assets -> MP4 -> upload"
+requires-python = ">=3.12"
+dependencies = [
+    # TTS core
+    "soundfile",
+    "librosa",
+    "numpy",
+    "scipy",
+    "torch",
+    "torchaudio",
+    "pocket-tts",
+    # HTTP / asset fetching
+    "requests",
+    "urllib3",
+    "ddgs",
+    "wikipedia",
+    # Topic scraping
+    "beautifulsoup4",
+    "lxml",
+    "feedparser",
+    # LLM APIs
+    "groq",
+    "ollama",
+    "google-genai",
+    "playwright",
+    "pytesseract",
+    # YouTube upload
+    "google-api-python-client",
+    "google-auth-httplib2",
+    "google-auth-oauthlib",
+    # Video assembly
+    "moviepy",
+    "Pillow",
+    # Config / env
+    "python-dotenv",
+]
+
+[project.scripts]
+videoai = "src.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

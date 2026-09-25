@@ -2,6 +2,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 
 DEBUG_DIR = "debug_output"
@@ -12,6 +13,7 @@ OUTPUT_DIR = "output"
 TEMP_DIR = "temp"
 
 _ARTIFACT_SEQ = 0
+_ARTIFACT_LOCK = threading.Lock()
 
 
 def ensure_dirs():
@@ -20,9 +22,29 @@ def ensure_dirs():
     os.makedirs(f"{TEMP_DIR}/audio", exist_ok=True)
 
 
-def cleanup_temp():
-    if os.path.exists(TEMP_DIR):
-        shutil.rmtree(TEMP_DIR)
+def workspace_path(topic: str) -> str:
+    """Per-topic scratch dir so concurrent batch videos never collide.
+
+    Each video's assets/audio/segments live under temp/<topic-slug> instead of
+    a shared temp/ root. cleanup_temp() only ever removes a single workspace,
+    so one finished video can't nuke a peer's in-flight files.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "_", (topic or "generic").lower()).strip("_")
+    slug = slug[:40] or "video"
+    return os.path.join(TEMP_DIR, slug)
+
+
+def ensure_workspace(topic: str) -> str:
+    ws = workspace_path(topic)
+    os.makedirs(f"{ws}/assets", exist_ok=True)
+    os.makedirs(f"{ws}/audio", exist_ok=True)
+    return ws
+
+
+def cleanup_temp(topic: str = None):
+    target = workspace_path(topic) if topic else TEMP_DIR
+    if os.path.exists(target):
+        shutil.rmtree(target)
 
 
 def dump_artifact(step: str, data, topic: str = "") -> str:
@@ -33,11 +55,13 @@ def dump_artifact(step: str, data, topic: str = "") -> str:
     across runs. Returns the file path.
     """
     global _ARTIFACT_SEQ
-    _ARTIFACT_SEQ += 1
+    with _ARTIFACT_LOCK:
+        _ARTIFACT_SEQ += 1
+        seq = _ARTIFACT_SEQ
     os.makedirs(DEBUG_DIR, exist_ok=True)
     slug = re.sub(r"[^a-z0-9]+", "_", (topic or "").lower()).strip("_")[:40]
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    name = f"{stamp}_{_ARTIFACT_SEQ:02d}_{step}"
+    name = f"{stamp}_{seq:02d}_{step}"
     if slug:
         name += f"_{slug}"
     suffix = ".txt" if isinstance(data, str) else ".json"

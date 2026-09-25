@@ -366,9 +366,9 @@ _ABBREVS = {
     r'\bGRU\b': 'G R U',
     r'\bFSB\b': 'F S B',
     r'\bSPETSNAZ\b': 'spetsnaz',
-    r'\be\.g\.\b': 'for example',
-    r'\bi\.e\.\b': 'that is',
-    r'\bvs\.\b': 'versus',
+    r'\be\.g\.(?!\w)': 'for example',
+    r'\bi\.e\.(?!\w)': 'that is',
+    r'\bvs\.(?!\w)': 'versus',
     r'\bvs\b': 'versus',
     r'\bMPH\b': 'miles per hour',
     r'\bmph\b': 'miles per hour',
@@ -432,10 +432,30 @@ def _final_spacing(text: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 
+_TITLES = {
+    r'\bDr\.(?!\w)': 'Doctor',
+    r'\bDrs\.(?!\w)': 'Doctors',
+    r'\bMr\.(?!\w)': 'Mister',
+    r'\bMrs\.(?!\w)': 'Missus',
+    r'\bMs\.(?!\w)': 'Miss',
+    r'\bProf\.(?!\w)': 'Professor',
+    r'\bJr\.(?!\w)': 'junior',
+    r'\bSr\.(?!\w)': 'senior',
+}
+
+
+def _spell_titles(text: str) -> str:
+    """Title abbreviations -> spoken words. 'Dr.' -> 'Doctor'."""
+    for pattern, replacement in _TITLES.items():
+        text = re.sub(pattern, replacement, text)
+    return text
+
+
 def _clean_text(text: str) -> str:
     """Normalize text for clean TTS output."""
     text = _normalize_unicode(text)
     text = _spell_acronyms(text)
+    text = _spell_titles(text)
     text = _expand_units(text)
     text = _fix_pronunciation(text)
     text = _fix_number_hyphens(text)

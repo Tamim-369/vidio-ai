@@ -3,7 +3,7 @@
 Wikipedia is the primary backstop source (stable, not ISP-blocked, API is
 documented). ``fetch_wikipedia_candidates`` collects niche topic candidates
 from search + category passes, returning them in the SAME dict shape as the
-Reddit/Gemini/channel paths so filtering/ranking/output stay shared.
+Reddit/LLM/channel paths so filtering/ranking/output stay shared.
 """
 import re
 import time

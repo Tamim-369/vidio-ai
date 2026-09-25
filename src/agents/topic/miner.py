@@ -17,7 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.agents.topic.prompts import resolve_topic_prompt
-from src.services.providers import call_text
+from src.agents.common.llm import _local
 
 # Competitor channels (NuttyHistory is frequently blocked — it simply yields nothing).
 CHANNELS = [
@@ -78,7 +78,7 @@ def _fetch_transcript(vid, tmp):
 
 def _resolve_topic(vid, title, transcript):
     prompt = resolve_topic_prompt(title, transcript)
-    raw = call_text([{"role": "user", "content": prompt}], temperature=0.3)
+    raw = _local(prompt, temperature=0.3, tag="research")
     try:
         m = re.search(r"\{.*\}", raw, re.S)
         seed = json.loads(m.group(0))

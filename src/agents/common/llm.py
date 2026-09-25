@@ -1,15 +1,19 @@
-"""Local Ollama generation plumbing shared by every stage.
+"""Central LLM plumbing shared by every stage.
 
-All stages call the model through `_local`. A wedged Ollama HTTP response
-(rare but seen on this CPU box) must not stall the whole pipeline forever,
-and runaway generation must not be able to write until context limit. The
-daemon thread lets a timed-out request be abandoned without blocking
-interpreter exit.
+This module is the ONE seam every stage calls: the script stages (scene /
+story / script / query), the asset agent, and research all go through
+``_local``. Provider routing:
 
-Model routing is per-stage, because tokens are the bottleneck on this CPU
-box. Stages that need judgment (story write, showrunner verdict) run on the
-big model; stages that are short extraction (scene pick) run on the fast
-model, which is ~3x quicker and fine for a 300-token JSON brief.
+  * default: Groq — uses exactly the 3 keys GROQ_API_KEY / GROQ_API_KEY_SECOND
+    / GROQ_API_KEY_THIRD from .env, and the chain only touches Groq when at
+    least one of those keys is actually present.
+  * set LLM_PROVIDER=ollama in .env -> local Ollama (LOCAL_MODEL).
+  * if LLM_PROVIDER=groq but no Groq key exists in .env -> local Ollama
+    fallback so the pipeline still runs.
+
+There is NO Gemini/Google anywhere. Groq calls go through
+:mod:`src.services.providers` (3-key rotation -> Cloudflare last resort);
+Ollama calls use the worker below with a hard wall-clock timeout.
 """
 from __future__ import annotations
 
@@ -22,9 +26,13 @@ import ollama
 
 load_dotenv()
 
-# The big local model used by story/script/query/asset stages on this CPU box.
-# .env is loaded above so the module-level read below sees the real value.
+# The big local model used by story/script/query/asset stages on this CPU box
+# when LLM_PROVIDER=ollama (or no Groq key is configured). .env is loaded
+# above so the module-level read below sees the real value.
 LOCAL_MODEL = os.getenv("LOCAL_MODEL", "gemma3:4b")
+
+# Provider selection. "groq" is the default; "ollama" opts into the local box.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").strip().lower()
 
 # Token budgets and hard wall-clock timeout for local generation, keyed by
 # stage tag (see NUM_PREDICT below). "scene" explicitly maps to the BIG model
@@ -46,12 +54,50 @@ NUM_PREDICT = {
 _MODELS: dict[str, str] = {"scene": LOCAL_MODEL}
 
 
+def _provider() -> str:
+    """Resolve the active provider: "groq" (default) or "ollama".
+
+    Groq is used ONLY when a Groq key actually exists in .env — if the user
+    asked for groq but no key is present (or deliberately set ollama), the
+    pipeline falls back to local Ollama instead of failing.
+    """
+    if LLM_PROVIDER == "ollama":
+        return "ollama"
+    if LLM_PROVIDER == "groq":
+        from src.services.providers import _groq_keys_present
+        if _groq_keys_present():
+            return "groq"
+        print("  [llm] LLM_PROVIDER=groq but no GROQ_API_KEY* in .env — using local Ollama")
+        return "ollama"
+    print(f"  [llm] unknown LLM_PROVIDER={LLM_PROVIDER!r} — using local Ollama")
+    return "ollama"
+
+
 def _model_for(tag: str) -> str:
     return _MODELS.get(tag, LOCAL_MODEL)
 
 
 def _generate(prompt: str, temperature: float, budget_tag: str, model: str | None = None, repeat_penalty: float = 1.1) -> str:
-    """Local Ollama generation with a hard wall-clock timeout and token cap."""
+    """One generation call through the central seam.
+
+    Groq (default) when a key exists; local Ollama otherwise. `budget_tag`
+    selects the token budget / model routing (NUM_PREDICT above) so each stage
+    keeps its existing quotas on both backends.
+    """
+    if _provider() == "groq":
+        from src.services.providers import call_groq
+        # No max_tokens here: qwen (primary) caps output tokens per minute and
+        # gpt-oss-120b (fallback) is a reasoning model whose small caps are
+        # consumed by its `reasoning` field, leaving `content` empty. Let Groq
+        # run to completion; token budgets only constrain the local Ollama path
+        # (NUM_PREDICT below).
+        return call_groq(
+            [{"role": "user", "content": prompt}],
+            temperature=temperature,
+            tag=budget_tag,
+        )
+
+    # --- local Ollama path ---
     box = queue.Queue(maxsize=1)
     m = model or _model_for(budget_tag)
 

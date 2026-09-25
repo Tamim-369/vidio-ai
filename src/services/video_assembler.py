@@ -1,16 +1,33 @@
 import os
 import subprocess
+import threading
+import multiprocessing
 import numpy as np
 from dotenv import load_dotenv
 from PIL import Image
+from concurrent.futures import ProcessPoolExecutor
 from moviepy import VideoClip, AudioFileClip
-from src.utils.file_helpers import TEMP_DIR
+from src.utils.file_helpers import workspace_path
 from src.services.captions import add_captions, accent_for_style, align_words
 from src.utils.file_helpers import output_path
 
 load_dotenv()
 
 FPS = 24
+
+# Number of worker processes for parallel line rendering. Each line pays a full
+# numpy pre-render + libx264 encode, and none of it releases the GIL, so this
+# uses processes (fork) not threads. Default: all cores minus a reservation for
+# the TTS workers (3 by default, each pinned to one thread). When multiple
+# videos run in parallel they share this pool, so sizing it up to the box helps
+# their line renders overlap too.
+ASSEMBLER_WORKERS = max(2, int(os.getenv(
+    "ASSEMBLER_WORKERS",
+    str(max(2, (os.cpu_count() or 4) - int(os.getenv("POCKET_TTS_INSTANCES", "3")))),
+)))
+
+_assemble_pool = None
+_assemble_pool_lock = threading.Lock()
 
 # Video geometry and caption rendering knobs (used only by this module).
 VIDEO_FORMAT = "9:16"         # "9:16" for Shorts/Reels, "16:9" for YouTube
@@ -143,7 +160,7 @@ def _line_assets(line: dict) -> list:
     return asset_paths
 
 
-def _render_line(line: dict, size: tuple) -> str | None:
+def _render_line(line: dict, size: tuple, ws: str) -> str | None:
     """Render one line (images + captions + audio) to a temp mp4 segment.
 
     Returns the segment path, or None when the line has no usable assets/audio.
@@ -174,7 +191,7 @@ def _render_line(line: dict, size: tuple) -> str | None:
     audio = AudioFileClip(audio_path)
     video_clip = video_clip.with_audio(audio)
 
-    seg = os.path.join(TEMP_DIR, f"line_{line['id']}.mp4")
+    seg = os.path.join(ws, f"line_{line['id']}.mp4")
     print(f"  [assembler] Rendering line {line['id']} → {seg}")
     # preset="veryfast": libx264 speed/quality tradeoff is imperceptible for
     # short social clips with captions, and cuts encode time by 2-4x here.
@@ -189,9 +206,9 @@ def _render_line(line: dict, size: tuple) -> str | None:
     return seg
 
 
-def _concat_segments(segment_paths: list, out: str) -> None:
+def _concat_segments(segment_paths: list, out: str, ws: str) -> None:
     """Concatenate pre-rendered mp4 segments with ffmpeg concat demuxer (no re-encode)."""
-    list_file = os.path.join(TEMP_DIR, "concat_list.txt")
+    list_file = os.path.join(ws, "concat_list.txt")
     with open(list_file, "w") as f:
         for p in segment_paths:
             f.write(f"file '{os.path.abspath(p)}'\n")
@@ -203,14 +220,37 @@ def _concat_segments(segment_paths: list, out: str) -> None:
     )
 
 
-def assemble(script: dict) -> str:
+def _get_assemble_pool():
+    """Get-or-create the shared line-rendering process pool (fork context)."""
+    global _assemble_pool
+    if _assemble_pool is None:
+        with _assemble_pool_lock:
+            if _assemble_pool is None:
+                ctx = multiprocessing.get_context("fork")
+                _assemble_pool = ProcessPoolExecutor(
+                    max_workers=ASSEMBLER_WORKERS,
+                    mp_context=ctx,
+                )
+                print(f"  [assembler] render pool ready: {ASSEMBLER_WORKERS} worker(s)")
+    return _assemble_pool
+
+
+def assemble(script: dict, topic: str = "") -> str:
     size = VIDEO_RESOLUTIONS[VIDEO_FORMAT]
-    os.makedirs(TEMP_DIR, exist_ok=True)
+    ws = workspace_path(topic or script.get("topic", ""))
+    os.makedirs(ws, exist_ok=True)
+    pool = _get_assemble_pool()
     segment_paths = []
     line_duration = 0.0
 
+    # Submit every line's segment render at once so the numpy pre-render +
+    # libx264 encode of each line run in parallel across the pool workers.
+    jobs = {}
     for line in script["lines"]:
-        seg = _render_line(line, size)
+        jobs[pool.submit(_render_line, line, size, ws)] = line
+
+    for fut, line in jobs.items():
+        seg = fut.result()
         if seg is None:
             continue
         segment_paths.append(seg)
@@ -223,7 +263,7 @@ def assemble(script: dict) -> str:
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
     print(f"  [assembler] Concatenating {len(segment_paths)} segments → {out}")
-    _concat_segments(segment_paths, out)
+    _concat_segments(segment_paths, out, ws)
 
     for p in segment_paths:
         try:

@@ -1,7 +1,7 @@
-"""Blank-prompt topic generator (Reddit + Gemini + Wikipedia + channel mining).
+"""Blank-prompt topic generator (LLM brainstorm + Wikipedia + channel mining).
 
 This is the original ``run_topic_generation`` pipeline: brainstorm viral seeds
-with Gemini, mine competitor channels for proven-viral topics, backstop with a
+with the LLM seam, mine competitor channels for proven-viral topics, backstop with a
 Wikipedia crawl, and optionally pull Reddit — then filter, dedupe against
 everything already made, rank, and save the batch queue. Kept alongside the
 newer sourced agent (``agent.py``); both share ``helpers.py``.
@@ -242,23 +242,23 @@ def fetch_reddit_playwright(subreddits: list, limit: int = 100) -> list:
 
 
 def _collect_raw_sources(limit: int, target: int, used: list, use_browser: bool) -> list:
-    """Gather raw candidates from Gemini, channel mining, Wikipedia, Reddit."""
+    """Gather raw candidates from the LLM seam, channel mining, Wikipedia, Reddit."""
     raw = []
 
-    # 1) Gemini brainstorm: fresh viral topic seeds, grounded in search.
-    print("Brainstorming viral topics with Gemini...")
+    # 1) LLM brainstorm: fresh viral topic seeds.
+    print("Brainstorming viral topics with the LLM seam...")
     gemini_seeds = brainstorm_topics(count=target, blocklist=used)
     verified = []
     for s in gemini_seeds:
         if _is_duplicate(s["title"], used):
             continue
         if not _verify_on_wikipedia(s["title"]):
-            print(f"  [gemini] dropped (not on Wikipedia): {s['title']}")
+            print(f"  [llm] dropped (not on Wikipedia): {s['title']}")
             continue
         verified.append(s)
     for s in verified:
         raw.append({
-            "source": "gemini",
+            "source": "llm",
             "category": s["angle"],
             "title": s["title"],
             "content": s["summary"],
@@ -266,7 +266,7 @@ def _collect_raw_sources(limit: int, target: int, used: list, use_browser: bool)
             "upvote_ratio": 1.0,
             "source_urls": [],
         })
-    print(f"  [gemini] {len(verified)}/{len(gemini_seeds)} seeds verified")
+    print(f"  [llm] {len(verified)}/{len(gemini_seeds)} seeds verified")
 
     # 2) Competitor-channel mining: proven-viral topics ranked by views.
     #    Cached on disk + parallel LLM calls, so re-runs are fast.
@@ -277,14 +277,14 @@ def _collect_raw_sources(limit: int, target: int, used: list, use_browser: bool)
         print(f"  [miner] failed: {e}")
 
     # 3) Primary backstop: Wikipedia (stable, not ISP-blocked). Runs only if
-    #    Gemini + miner came up short, so the slow crawl is a rarity.
+    #    LLM + miner came up short, so the slow crawl is a rarity.
     target_covered = target * 3
     if len(raw) < target_covered:
         print("Pulling niche topics from Wikipedia as backstop...")
         raw.extend(fetch_wikipedia_candidates(
             limit=limit, target=target_covered - len(raw), used_titles=used))
     else:
-        print("Enough from Gemini + channels — skipping Wikipedia")
+        print("Enough from LLM + channels — skipping Wikipedia")
 
     # 4) Secondary: Reddit (best-effort — unreliable on this ISP).
     #    Skipped unless REDDIT_ENABLED=1 (or --limit high forces it) to keep runs fast.
@@ -346,7 +346,7 @@ def run_topic_generation(limit: int = 100, target: int = TARGET_TOPICS, use_brow
     passed = [c for c in raw if _passes_filters(c) and not _is_duplicate(c["title"], used)]
     print(f"After filters + dedupe: {len(passed)}")
 
-    # Rank: proven-viral channel topics first (by views), then fresh Gemini
+    # Rank: proven-viral channel topics first (by views), then fresh LLM
     # proposals, then Wikipedia, then Reddit.
     passed.sort(key=_rank_key, reverse=True)
     topics = [_to_topic(c) for c in passed[:target]]

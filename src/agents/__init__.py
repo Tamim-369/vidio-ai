@@ -6,7 +6,7 @@ supporting modules, and is driven by src/pipeline/* as orchestrator.
     story/     writer + showrunner + fact-gate -> story draft
     script/    story -> spoken scene lines
     query/     per-line / per-image search queries
-    topic/     topic sourcing (reddit/wikipedia/gemini/channel mining)
+    topic/     topic sourcing (reddit/wikipedia/llm/channel mining)
     research/  research pipeline for the daily topic round
     asset/     image gathering + line->image assignment
     voice/     voice selection and writing-style lookup
