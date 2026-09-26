@@ -39,17 +39,21 @@ class TestBuildScript:
         script = build_script([Quote(text="  "), Quote(text="Real one.")])
         assert [l["text"] for l in script["lines"]] == ["Real one."]
 
-    def test_topic_is_the_first_quote(self):
+    def test_topic_is_the_subject(self):
+        # The subject names the file and titles the upload; a random joke as the
+        # topic produced titles that read like the joke itself.
+        script = build_script([Quote(text="Opening line."), Quote(text="Second quote.")],
+                              "War and military strategy")
+        assert script["topic"] == "War and military strategy"
+        assert script["subject"] == "War and military strategy"
+
+    def test_topic_falls_back_to_the_first_quote_without_a_subject(self):
         script = build_script([Quote(text="Opening line."), Quote(text="Second quote.")])
         assert script["topic"] == "Opening line."
 
-    def test_quote_metadata_is_preserved(self):
-        q = Quote(text="Some line.", format="fake_attribution",
-                  source="Marcus Aurelius", figure="marcus aurelius")
-        assert build_script([q])["quotes"][0] == {
-            "text": "Some line.", "format": "fake_attribution",
-            "source": "Marcus Aurelius", "figure": "marcus aurelius",
-        }
+    def test_quote_text_is_preserved(self):
+        assert build_script([Quote(text="Some line.")], "Money")["quotes"] == \
+            [{"text": "Some line."}]
 
     def test_no_quotes_raises(self):
         with pytest.raises(RuntimeError, match="no narration lines"):
@@ -77,7 +81,8 @@ def wired(monkeypatch):
             return result(a, k) if callable(result) else result
         return fn
 
-    voice_cfg = {"name": "Donald", "writing_style": "M3", "face": "src/faces/Trump.png"}
+    voice_cfg = {"name": "Donald", "writing_style": "M3", "face": "src/faces/Trump.png",
+                 "subject": "War and military strategy"}
     monkeypatch.setattr(quote_video, "pick_voice",
                         lambda preferred="": ("donald-trump", voice_cfg))
     monkeypatch.setattr(quote_video, "get_writing_style",
@@ -150,7 +155,10 @@ class TestCreateVideo:
     def test_quotes_are_requested_from_the_agent(self, wired):
         create_video(n_quotes=2, publish=False)
         quotes_call = next(c for c in wired if c[0] == "quotes")
-        assert quotes_call[2] == {"n": 2}
+        # The subject comes from the character, so the joke matches the
+        # narrator, and the character picks which prompt wrote it.
+        assert quotes_call[2] == {"n": 2, "subject": "War and military strategy",
+                                  "explain": False, "character": "donald-trump"}
 
     def test_generated_lines_reach_the_tts(self, wired):
         create_video(publish=False)
@@ -184,15 +192,15 @@ class TestCreateVideo:
         create_video(publish=False)
         assert "publish" not in _names(wired)
 
-    def test_publish_uses_the_quote_as_the_title(self, wired):
+    def test_publish_uses_the_subject_as_the_title(self, wired):
         create_video(publish=True)
         call = next(c for c in wired if c[0] == "publish")
-        assert call[1][1] == "A real quote."
+        assert call[1][1] == "War and military strategy"
 
     def test_script_only_stops_after_the_quotes(self, wired):
         result = create_video(publish=False, script_only=True)
         assert _names(wired) == ["ensure_dirs", "quotes", "artifact"]
-        assert result["topic"] == "A real quote."
+        assert result["topic"] == "War and military strategy"
     def test_script_only_does_not_publish(self, wired):
         create_video(publish=True, script_only=True)
         assert "publish" not in _names(wired)

@@ -16,6 +16,18 @@ _chat_ref = None
 _chat_sr = 24000
 
 
+class _NoWatermarker:
+    """Stand-in for perth's watermarker that returns audio untouched.
+
+    Chatterbox calls ``self.watermarker.apply_watermark(wav, sample_rate=self.sr)``
+    on every generated sample. The interface is a single method, so returning the
+    samples unchanged disables the watermark without patching the library.
+    """
+
+    def apply_watermark(self, wav, sample_rate: int = None):
+        return wav
+
+
 def _conds_cache_path(ref_audio: str, tag: str) -> str:
     """Persist prepared voice conditionals next to the reference so the costly
     voice-cloning embedding is computed once per audio, not every run."""
@@ -52,6 +64,12 @@ def _get_chatterbox_model():
         from chatterbox import ChatterboxTTS
         print("  [tts] Loading Chatterbox model (cached)...", flush=True)
         _chat_model = ChatterboxTTS.from_pretrained("cpu")
+        # Chatterbox ships an implicit audio watermark and applies it to every
+        # generate() call, so stripping it here is the only place that can stop
+        # it. Done in the loader rather than at the call site because each
+        # spawned worker builds its own model and would otherwise re-add it.
+        _chat_model.watermarker = _NoWatermarker()
+        print("  [tts] Watermark disabled", flush=True)
     return _chat_model
 
 

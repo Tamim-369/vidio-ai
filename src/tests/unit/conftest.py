@@ -29,3 +29,18 @@ if str(ROOT) not in sys.path:
 def project_root() -> Path:
     """Absolute path to the repository root."""
     return ROOT
+
+
+@pytest.fixture(autouse=True)
+def isolated_voice_rotation(tmp_path, monkeypatch):
+    """Keep the test suite out of the real voice-rotation cursor.
+
+    ``pick_voice()`` persists the last character to src/state/voice_rotation.json
+    so separate CLI runs advance the cycle. A test calling it without an explicit
+    path would move that cursor, and the user's next real video would start on an
+    arbitrary character instead of the intended next one. Redirecting the module
+    default to tmp_path means forgetting the path argument is harmless.
+    """
+    from src.agents.voice_cast import agent as cast
+
+    monkeypatch.setattr(cast, "ROTATION_FILE", str(tmp_path / "voice_rotation.json"))

@@ -44,6 +44,14 @@ warnings.filterwarnings("ignore",
     message=r"`output_attentions=True` is not supported with `attn_implementation`",
     category=UserWarning,
 )
+# perth (Chatterbox's watermark dependency) imports pkg_resources at module
+# import. A setuptools<81 pin does not silence it, so filter it here instead.
+# This module is imported by every spawned worker before it imports chatterbox,
+# so the filter is in place before the warning can fire in any process.
+warnings.filterwarnings("ignore",
+    message=r"pkg_resources is deprecated as an API",
+    category=UserWarning,
+)
 import logging
 logging.getLogger("transformers.integrations.sdpa_attention").setLevel(logging.ERROR)
 

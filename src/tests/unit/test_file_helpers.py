@@ -76,28 +76,23 @@ class TestEnsureDirs:
 
 
 class TestPickVoice:
-    @pytest.fixture(autouse=True)
-    def _reset_cursor(self):
-        voice_manager._round_robin_index = 0
-        yield
-        voice_manager._round_robin_index = 0
+    """Smoke coverage only.
 
-    def test_honours_preferred(self):
-        vid, _ = voice_manager.pick_voice(preferred="andrew-tate")
+    Rotation, persistence and subject pairing are covered properly in
+    test_voice_rotation.py. These stay here as a check that the voice manager is
+    wired and exportable, and every one of them passes an explicit tmp path so
+    the suite can never advance the real src/state/voice_rotation.json cursor.
+    """
+
+    def test_honours_preferred(self, tmp_path):
+        vid, _ = voice_manager.pick_voice(preferred="andrew-tate",
+                                          path=str(tmp_path / "rot.json"))
         assert vid == "andrew-tate"
 
-    def test_unknown_preferred_falls_back(self, capsys):
-        vid, _ = voice_manager.pick_voice(preferred="nope")
-        assert vid in {"donald-trump", "arnold-schwarzenegger", "andrew-tate"}
-        assert "Unknown or disabled" in capsys.readouterr().out
-
-    def test_round_robin_cycles(self):
-        first = [voice_manager.pick_voice()[0] for _ in range(3)]
-        assert len(set(first)) == 3, "each of the 3 enabled voices should get a turn"
-
-    def test_never_returns_disabled_voice(self):
+    def test_never_returns_disabled_voice(self, tmp_path):
+        path = str(tmp_path / "rot.json")
         for _ in range(9):
-            vid, _ = voice_manager.pick_voice()
+            vid, _ = voice_manager.pick_voice(path=path)
             assert vid != "narrator"
 
 

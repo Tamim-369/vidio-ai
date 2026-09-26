@@ -12,7 +12,12 @@ import pytest
 from src.agents.voice_cast import voices, writing_styles
 
 # The three clone voices this project is built around.
+# Every clone that must stay registered and complete, whether or not it is
+# currently in rotation. Arnold is temporarily disabled but must not rot.
 REQUIRED_VOICES = ("donald-trump", "arnold-schwarzenegger", "andrew-tate")
+
+# The ones actually in rotation right now.
+ENABLED_VOICES = ("donald-trump", "andrew-tate")
 
 
 class TestVoiceRegistry:
@@ -20,9 +25,16 @@ class TestVoiceRegistry:
     def test_required_voice_exists(self, voice_id):
         assert voices.get_voice(voice_id) is not None
 
-    @pytest.mark.parametrize("voice_id", REQUIRED_VOICES)
+    @pytest.mark.parametrize("voice_id", ENABLED_VOICES)
     def test_required_voice_is_enabled(self, voice_id):
         assert voices.get_voice(voice_id).get("enabled") is True
+
+    def test_arnold_is_temporarily_out_of_rotation(self):
+        # Disabled on purpose, not deleted. He comes back by flipping this to
+        # True, which is why his registry entry and prompt must stay intact.
+        assert voices.get_voice("arnold-schwarzenegger").get("enabled") is False
+        assert voices.get_voice("arnold-schwarzenegger")["engine"] == "chatterbox"
+        assert "arnold-schwarzenegger" not in [v for v, _ in voices.get_enabled_voices()]
 
     @pytest.mark.parametrize("voice_id", REQUIRED_VOICES)
     def test_required_voice_uses_chatterbox(self, voice_id):
@@ -39,9 +51,10 @@ class TestVoiceRegistry:
         style_id = voices.get_voice(voice_id)["writing_style"]
         assert style_id in writing_styles.WRITING_STYLES
 
-    def test_enabled_set_is_exactly_the_three_clones(self):
-        # The legacy Pocket narrator stays registered but out of rotation.
-        assert [vid for vid, _ in voices.get_enabled_voices()] == list(REQUIRED_VOICES)
+    def test_enabled_set_is_exactly_the_expected_clones(self):
+        # The legacy Pocket narrator stays registered but out of rotation, and
+        # so does Arnold for now.
+        assert [vid for vid, _ in voices.get_enabled_voices()] == list(ENABLED_VOICES)
 
     def test_unknown_voice_returns_none(self):
         assert voices.get_voice("does-not-exist") is None

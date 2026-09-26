@@ -1,65 +1,71 @@
-"""The anti-wisdom quote prompt.
+"""One prompt per character.
 
-QUOTE_PROMPT is the user's specification, reproduced verbatim: the generation
-rules, format rotation and self-check list are the contract, and the agent
-re-sends rejected quotes with feedback, so wording changes alter output quality.
+A character's voice and its jokes have to agree, so the prompt is a property of
+the character rather than of the quote agent. Each module here exposes:
 
-Two things live outside the prompt text and are applied by the agent:
-  * OUTPUT_FORMAT asks for one JSON object per line so a batch parses cleanly.
-    The agent strips labels itself rather than trusting the model to comply.
-  * The already-used quotes and figures are supplied each round, so rotation is
-    enforced across videos and not just within one reply."""
+    build_prompt(subject, n) -> str   the prompt, with its variables filled
+    MIN_CHARS / MAX_CHARS             the length window that prompt asks for
 
-# The user's prompt, verbatim.
-QUOTE_PROMPT = '''Generate short, funny "anti-wisdom" quotes.
+Character-specific length bounds live with the prompt because they are part of
+its specification, not a global setting: these prompts cap quotes at 100
+characters, so filtering at 200 for them would contradict what they were told.
 
-Rules:
+Every character prompt ignores ``subject``: the quotes are about the character,
+not about a per-video topic. The signature is kept uniform so one interface
+covers every module. The subject is still used, in assemble.py, to label the
+video's title and filename.
 
-No real wisdom. Punchline can't be a valid point or clever logic, even ironic. If it makes actual sense, it's wrong.
-One punchline, one beat. No "and then," no stacked scenarios, no mini-stories.
-Twist must stay on the same topic as the setup — don't swap to something unrelated.
-Plain, spoken words only. No essay vocabulary. No meme-crutch phrases.
-Default short — one sentence + one punch. Only go longer for one sharp concrete detail, never a scene.
-When twisting a real quote/proverb, you MUST change the wording of the ending/key phrase into something dumb. Never just pair it with a second real proverb — that's still real wisdom, just doubled.
-Source pool for "twisted proverb" quotes: pull specifically from well-known historical wisdom figures — Sun Tzu, Greek philosophers (Socrates, Plato, Aristotle, Epictetus, etc.), Confucius, and classic proverbs. Rotate widely across this pool, don't reuse the same figure/quote repeatedly.
-When using a fake attribution, the quote itself must also be altered/made-up — never attach a fake name to an untouched real quote.
-No recycled meme lines — don't reuse existing internet jokes/t-shirt slogans. Generate something new.
-Rotate formats across a batch: twisted proverb (from the source pool above), fake attribution + altered quote, original one-liner, crude/innuendo.
-Output only the final quotes — no format labels, no self-correction, no meta-commentary. If a quote turns out to be real/unaltered, silently discard and regenerate instead of narrating it.
+A character with no module of its own falls back to ``shared``, which still
+takes a subject because a generic prompt has no persona to fall back on. The
+fallback is deliberately visible in the agent's log line so a missing prompt is
+obvious rather than silent.
+"""
+from __future__ import annotations
 
-Self-check before finalizing each quote:
+from src.agents.quotes import prompt_shared as shared
 
-Does it secretly make sense / is it actually a fair point? → fix.
-Is it just two real sayings paired together? → fix.
-Is the fake-attributed quote actually altered, not just relabeled? → fix.
-Is this a recycled meme I've seen before? → discard, make a new one.
-Any leftover labels, notes, or self-talk in the output? → strip it out.
-Did I pull from Sun Tzu / Greek philosophers / similar classic sources for the twisted-proverb format? → check rotation.'''
+# voice id -> prompt module
+_PROMPTS = {
+    "donald-trump": "don_tzu",
+    "andrew-tate": "andru_tatte",
+}
 
-# Appended per request so a batch parses deterministically. The agent also
-# enforces "no labels, no meta-commentary" itself in quote_agent._clean_candidate.
-OUTPUT_FORMAT = '''
+# Written, but deliberately not in the pipeline yet. Brolexander's quotes kept
+# coming out as gym-metaphor-plus-explanation rather than jokes, and the user
+# chose to keep him aside until that is sorted. He is listed here rather than
+# deleted so the prompt is not lost and switching him back on is a one-line move.
+_ON_HOLD = {
+    "arnold-schwarzenegger": "brolexander",
+}
 
-Return {n} quotes as a JSON array of objects, nothing else:
-[{{"quote": "<the quote text>", "format": "<twisted_proverb|fake_attribution|one_liner|crude>", "source": "<the figure or proverb it twists, or empty>"}}]
 
-Every quote must be a single beat with a dumb punchline. No labels, no commentary, no markdown fences.'''
+def _load(name: str):
+    if name == "shared":
+        return shared
+    from importlib import import_module
+    return import_module(f"src.agents.quotes.prompt_{name}")
 
-# Historical wisdom figures named in the prompt. Used for rotation tracking so
-# the same figure is not twisted twice in a row.
-SOURCE_FIGURES = (
-    "sun tzu",
-    "socrates",
-    "plato",
-    "aristotle",
-    "epictetus",
-    "confucius",
-    "lao tzu",
-    "plutarch",
-    "thales",
-    "heraclitus",
-    "diogenes",
-    "seneca",
-    "marcus aurelius",
-    "buddha",
-)
+
+def get_prompt(character: str = ""):
+    """Return the prompt module for a character, or the shared fallback.
+
+    Args:
+        character: the voice id, e.g. "donald-trump". Unknown, empty and
+            on-hold ids get the shared prompt so a new character cannot break
+            generation.
+    """
+    name = _PROMPTS.get(character, "shared")
+    return _load(name)
+
+
+def characters_with_prompts() -> list:
+    """Voice ids that have a prompt of their own, in registration order."""
+    return list(_PROMPTS)
+
+
+def characters_on_hold() -> list:
+    """Voice ids whose prompt exists but is not in the pipeline."""
+    return list(_ON_HOLD)
+
+
+__all__ = ["get_prompt", "characters_with_prompts", "characters_on_hold", "shared"]

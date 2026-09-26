@@ -41,6 +41,9 @@ VOICES = {
                    "eq": ["highpass 100", "equalizer 3000 1 1.5"],
                    "speed": 1.0},
         "writing_style": "trump",
+        # The joke prompt is written about this subject, so the joke and the
+        # narrator always agree. Rotating the voice rotates the subject.
+        "subject": "War and military strategy",
         "face": "src/faces/Trump.png",
         "quote_authors": [
             "Don Tzu | The Fart of War",
@@ -60,11 +63,16 @@ VOICES = {
                    "repetition_penalty": 1.2, "min_p": 0.05, "top_p": 1.0,
                    "speed": 1.0},
         "writing_style": "arnold",
+        "subject": "Weight lifting and bodybuilding",
         "face": "src/faces/Arnold.png",
         "quote_authors": [
             "Brolexander | The Book of Gainz",
         ],
-        "enabled": True,
+        # Temporarily out of the pipeline at the user's request: Brolexander's
+        # quotes were coming out as gym-metaphor-plus-explanation rather than
+        # jokes. Nothing is deleted, so flipping this back to True restores him
+        # along with his prompt in src/agents/quotes/prompt_brolexander.py.
+        "enabled": False,
     },
 
     "andrew-tate": {
@@ -72,11 +80,14 @@ VOICES = {
         "engine": "chatterbox",
         "ref_audio": "src/experiments/voices_to_clone/candidates/andrew-tate/andrew-tate_ref.wav",
         # A/B selected: prime 103.5–114.0s (119Hz conversational register).
-        # Mod-low temp keeps the aggro-but-composed take. Script style = Arnold's.
+        # Mod-low temp keeps the aggro-but-composed take.
         "params": {"exaggeration": 0.65, "cfg_weight": 0.85, "temperature": 0.55, "gain": 1.02,
                    "repetition_penalty": 1.2, "min_p": 0.05, "top_p": 1.0,
                    "speed": 1.0},
-        "writing_style": "arnold",
+        "writing_style": "andrew_tate",
+        # Not money: he is about life, self-improvement and hard work. This only
+        # labels the video, the prompt itself takes no subject.
+        "subject": "Life and self-improvement",
         "face": "src/faces/Tate.png",
         "quote_authors": [
             "Andru Tatte | The Way of Whatever",

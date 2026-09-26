@@ -6,12 +6,14 @@ Groq calls and runs offline.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
 
 from src.agents.quotes import agent as quote_agent
-from src.agents.quotes.agent import Quote, _Pool, generate_quotes
+from src.agents.quotes import prompt_shared as prompt_mod
+from src.agents.quotes.agent import Quote, _Pool, _build_messages, generate_quotes
 
 
 @pytest.fixture
@@ -21,7 +23,7 @@ def pool_file(tmp_path):
 
 def _reply(*quotes):
     """Build a model reply in the requested JSON array format."""
-    return json.dumps([{"quote": q, "format": "one_liner", "source": ""} for q in quotes])
+    return json.dumps([{"quote": q} for q in quotes])
 
 
 # --- parsing -----------------------------------------------------------------
@@ -34,6 +36,24 @@ class TestParseCandidates:
     def test_reads_bare_array(self):
         assert quote_agent.parse_candidates('["A bare string mock quote, not an object."]')[0]["quote"] == \
             "A bare string mock quote, not an object."
+
+    def test_normalises_the_hyphen_the_model_gets_wrong(self):
+        # The model emits U+2011, which TTS reads as one word and the card font
+        # may not carry, so it has to become a plain hyphen before either sees it.
+        got = quote_agent.parse_candidates(
+            "Invest in yourself; if you can't, invest in a couch and call it a long‑term asset.")[0]["quote"]
+        assert got == "Invest in yourself; if you can't, invest in a couch and call it a long-term asset."
+        assert "‑" not in got
+
+    def test_normalises_lookalike_spaces_and_strips_zero_width(self):
+        got = quote_agent._strip_wrapper("A man who disciplines himself owns nothing.")
+        assert got == "A man who disciplines himself owns nothing."
+
+    def test_keeps_typography_that_is_not_a_confusable(self):
+        # A curly apostrophe is real punctuation and both TTS and the font
+        # handle it, so it must survive untouched.
+        got = quote_agent._strip_wrapper("Money doesn’t talk, it simply screams quietly.")
+        assert "doesn’t" in got
 
     def test_reads_fenced_json(self):
         raw = '```json\n[{"quote": "A fenced mock quote right here."}]\n```'
@@ -61,11 +81,11 @@ class TestParseCandidates:
         assert quote_agent.parse_candidates("   ") == []
         assert quote_agent.parse_candidates(None) == []
 
-    def test_format_and_source_are_lowercased(self):
-        raw = '[{"quote": "A short mock quote for the parser tests.", "format": "One_Liner", "source": "Sun Tzu"}]'
+    def test_ignores_keys_the_prompt_never_asks_for(self):
+        # The joke prompt requests only a quote, but a model may volunteer more.
+        raw = '[{"quote": "A short mock quote for the parser tests.", "format": "one_liner"}]'
         got = quote_agent.parse_candidates(raw)
-        assert got[0]["format"] == "one_liner"
-        assert got[0]["source"] == "Sun Tzu"
+        assert got[0] == {"quote": "A short mock quote for the parser tests."}
 
     def test_plain_text_drops_meta_lines(self):
         raw = "Real quote number one here.\nSelf-check: this one is fine."
@@ -96,18 +116,26 @@ class TestRejectReason:
 
     # --- 30-80 character card budget ---
 
-    def test_the_length_window_is_30_to_80(self):
+    def test_the_length_window_is_30_to_200(self):
+        # The prompt asks for "preferably 10-35 words"; 35 words is ~200 chars.
+        # The old 80-char cap rejected almost every joke the new prompt produced.
         assert quote_agent.MIN_QUOTE_CHARS == 30
-        assert quote_agent.MAX_QUOTE_CHARS == 80
+        assert quote_agent.MAX_QUOTE_CHARS == 200
 
-    def test_an_80_char_quote_is_accepted(self):
-        text = "x" * 80
-        assert quote_agent.reject_reason(
-            {"quote": text, "format": "one_liner"}, _Pool()) == ""
+    def test_a_200_char_quote_is_accepted(self):
+        text = "x" * 200
+        assert quote_agent.reject_reason({"quote": text}, _Pool()) == ""
 
-    def test_81_chars_is_rejected(self):
-        text = "x" * 81
+    def test_201_chars_is_rejected(self):
+        text = "x" * 201
         assert quote_agent.reject_reason({"quote": text}, _Pool()) == "too long"
+
+    def test_a_real_170_char_joke_fits(self):
+        # Length taken from an actual quote the new prompt produced on a live run.
+        text = ("When you surround an army, leave an outlet open. If the army does not "
+                "use the outlet, you have validated your intelligence on their retreat patterns.")
+        assert 30 <= len(text) <= 200
+        assert quote_agent.reject_reason({"quote": text}, _Pool()) == ""
 
     def test_a_30_char_quote_is_accepted(self):
         text = "x" * 30
@@ -125,15 +153,13 @@ class TestRejectReason:
         text = "Know thyself, or at least know where you left the laundry basket."
         assert len(text) == 65
         assert quote_agent.reject_reason({"quote": text}, _Pool()) == ""
-        assert quote_agent.reject_reason({"quote": text + "x" * 16}, _Pool()) == "too long"
+        assert quote_agent.reject_reason({"quote": text + "x" * 136}, _Pool()) == "too long"
 
-    def test_the_prompt_states_both_bounds(self):
-        # Without the numbers in the prompt the model keeps writing 150-char
-        # jokes (or 12-char one-liners) that get thrown away, starving the batch.
-        from src.agents.quotes.agent import _build_messages
-
-        content = _build_messages([], _Pool(), 2)[0]["content"]
-        assert "between 30 and 80 characters" in content
+    def test_the_prompt_states_its_own_length_guidance(self):
+        # The bounds are the agent's card budget, not the prompt's wording, so
+        # the content has to be the prompt this character actually uses.
+        content = _build_messages(_Pool(), 2, "Money", prompt_mod)[0]["content"]
+        assert "10–35 words" in content
 
     def test_rejects_duplicate_regardless_of_case_and_punctuation(self):
         pool = _Pool(quotes=[{"text": "The tank politely exploded, again, on schedule."}])
@@ -145,12 +171,11 @@ class TestRejectReason:
         assert quote_agent.reject_reason({"quote": "The  tank   politely exploded, again, on schedule."}, pool) == \
             "already used"
 
-    def test_rejects_unknown_format(self):
+    def test_ignores_a_volunteered_format_key(self):
+        # The joke prompt asks only for a quote, so a format tag is not a
+        # rejection reason the way it was under the old anti-wisdom prompt.
         cand = {"quote": "A perfectly fine quote here, give or take.", "format": "haiku"}
-        assert quote_agent.reject_reason(cand, _Pool()) == "unknown format 'haiku'"
-
-    def test_allows_missing_format(self):
-        assert quote_agent.reject_reason({"quote": "A perfectly fine quote for the record."}, _Pool()) == ""
+        assert quote_agent.reject_reason(cand, _Pool()) == ""
 
 
 class TestFactRejection:
@@ -191,39 +216,12 @@ class TestFactRejection:
             "reads like a fact, not a joke"
 
 
-# --- figure rotation ---------------------------------------------------------
-
-class TestFigureDetection:
-    @pytest.mark.parametrize("text,source,expected", [
-        ("Sun Tzu would have loved this plan.", "", "sun tzu"),
-        ("A clever twist on the old line", "Socrates", "socrates"),
-        ("Confucius walks into a bar.", "", "confucius"),
-        ("Nobody famous said this one.", "", ""),
-    ])
-    def test_detects_figure(self, text, source, expected):
-        assert quote_agent._detect_figure(text, source) == expected
-
-    def test_unused_figures_are_never_stale(self):
-        pool = _Pool(figures=["sun tzu"])
-        assert quote_agent._figure_is_stale("socrates", pool) is False
-
-    def test_recent_figure_is_stale_once_pool_is_exhausted(self):
-        # Every figure used, and the last one was this -> prefer another.
-        pool = _Pool(figures=list(quote_agent.SOURCE_FIGURES))
-        assert quote_agent._figure_is_stale(pool.figures[-1], pool) is True
-        assert quote_agent._figure_is_stale(pool.figures[0], pool) is False
-
-    def test_no_figure_is_never_stale(self):
-        pool = _Pool(figures=list(quote_agent.SOURCE_FIGURES))
-        assert quote_agent._figure_is_stale("", pool) is False
-
-
 # --- pool persistence --------------------------------------------------------
 
 class TestPool:
     def test_missing_file_gives_empty_pool(self, pool_file):
         pool = quote_agent._load_pool(pool_file)
-        assert pool.quotes == [] and pool.figures == []
+        assert pool.quotes == []
 
     def test_corrupt_file_gives_empty_pool(self, pool_file):
         with open(pool_file, "w") as f:
@@ -232,18 +230,10 @@ class TestPool:
 
     def test_round_trip(self, pool_file):
         pool = _Pool()
-        quote_agent._remember(pool, Quote(text="A remembered mock quote from the old pool.",
-                                          figure="sun tzu"))
+        quote_agent._remember(pool, Quote(text="A remembered mock quote from the old pool."))
         quote_agent._save_pool(pool, pool_file)
         back = quote_agent._load_pool(pool_file)
         assert back.quotes[0]["text"] == "A remembered mock quote from the old pool."
-        assert back.figures == ["sun tzu"]
-
-    def test_figure_recorded_once(self, pool_file):
-        pool = _Pool()
-        for _ in range(3):
-            quote_agent._remember(pool, Quote(text="Some perfectly usable mock quote here.", figure="plato"))
-        assert pool.figures == ["plato"]
 
     def test_creates_parent_directory(self, tmp_path):
         path = str(tmp_path / "deep" / "nested" / "pool.json")
@@ -255,69 +245,127 @@ class TestPool:
         assert quote_agent.STATE_FILE.startswith("src/")
 
 
-class TestPromptIntegrity:
-    """The prompt is the user's specification, reproduced verbatim.
+class TestPromptFidelity:
+    """The prompt is the user's specification and is sent unmodified.
 
-    These assertions fail if the text is reflowed, "improved", or truncated, so
-    a well-meaning edit to the wording surfaces as a test failure.
+    The text is the user's with only SUBJECT and NUMBER filled in. Nothing is
+    appended and no rule is restated, so the fidelity lock is a hash of the
+    built prompt: any edit to the wording, any added instruction, or a dropped
+    line changes it and fails here.
     """
 
+    # sha256 of build_prompt("SUBJECT_TOKEN", 42). Update deliberately, never
+    # to make a failing test go green.
+    FIDELITY_SHA256 = "dae70b8034fb50aa71fd106722768bb292be184d4106a48ad1dfd95afe20b81a"
+
+    def test_the_prompt_matches_the_original_exactly(self):
+        built = prompt_mod.build_prompt("SUBJECT_TOKEN", 42).encode()
+        assert hashlib.sha256(built).hexdigest() == self.FIDELITY_SHA256, (
+            "the prompt text changed; it is the user's specification, so any "
+            "edit has to be deliberate"
+        )
+
+    def test_it_is_a_function_of_subject_and_count(self):
+        assert callable(prompt_mod.build_prompt)
+        assert not hasattr(prompt_mod, "JOKE_PROMPT"), (
+            "the prompt should be built by a function, not a constant"
+        )
+
+    def test_the_subject_lands_in_the_current_request_block(self):
+        built = prompt_mod.build_prompt("Money", 3)
+        assert "SUBJECT: Money" in built
+        # The example list must stay generic, not be rewritten per subject.
+        assert "SUBJECT = WAR" in built
+
+    def test_the_count_lands_in_the_current_request_block(self):
+        built = prompt_mod.build_prompt("Money", 3)
+        assert "NUMBER: 3" in built
+        assert "NUMBER: [number]" in built, "the prompt's own template line is part of the text"
+
+    def test_no_placeholder_token_survives(self):
+        built = prompt_mod.build_prompt("Money", 3)
+        assert "[INSERT" not in built
+        assert "[something]" in built and "[number]" in built, (
+            "the prompt's literal template examples are part of its text"
+        )
+
+    def test_no_uninterpolated_brace_survives(self):
+        built = prompt_mod.build_prompt("Money", 3)
+        assert "{" not in built and "}" not in built
+
+    def test_nothing_is_appended(self):
+        built = prompt_mod.build_prompt("Money", 3)
+        for extra in ("JSON array", "HARD LIMIT", "Return 3 quotes as a JSON",
+                      "markdown fences", "between 30 and 200 characters"):
+            assert extra not in built, f"{extra!r} is not the user's wording"
+
+    def test_the_prompt_still_states_its_own_rules(self):
+        built = prompt_mod.build_prompt("Money", 3)
+        for line in ("Output ONLY the quotes.",
+                     "10–35 words",
+                     "Use one primary mechanism per quote.",
+                     "Do not output the analysis.",
+                     "MAKE WISDOM WRONG IN AN INTERESTING WAY."):
+            assert line in built
+
+    def test_the_prompt_forbids_the_jokes_it_is_avoiding(self):
+        # The anti-punchline and no-random-objects rules are the whole point of
+        # the current wording, so a trim to either should fail here.
+        built = prompt_mod.build_prompt("Money", 3)
+        assert "NO PUNCHLINE LANGUAGE" in built
+        assert "NO RANDOM FUNNY OBJECTS" in built
+        assert "DO NOT MAKE WISDOM FUNNY." in built
+
+    @pytest.mark.parametrize("subject,count", [
+        ("Money", 1), ("Weight lifting and bodybuilding", 6), ("Sleep", 12),
+    ])
+    def test_interpolation_scales(self, subject, count):
+        built = prompt_mod.build_prompt(subject, count)
+        assert f"SUBJECT: {subject}" in built
+        assert f"NUMBER: {count}" in built
+
+
+class TestPromptIntegrity:
+    """Spot-checks on the wording that defines the joke mechanism."""
+
     VERBATIM_LINES = [
-        "No real wisdom. Punchline can't be a valid point or clever logic, even ironic. "
-        "If it makes actual sense, it's wrong.",
-        'One punchline, one beat. No "and then," no stacked scenarios, no mini-stories.',
-        "Twist must stay on the same topic as the setup — don't swap to something unrelated.",
-        "Plain, spoken words only. No essay vocabulary. No meme-crutch phrases.",
-        "Default short — one sentence + one punch. Only go longer for one sharp concrete "
-        "detail, never a scene.",
-        "When twisting a real quote/proverb, you MUST change the wording of the "
-        "ending/key phrase into something dumb. Never just pair it with a second real "
-        "proverb — that's still real wisdom, just doubled.",
-        "When using a fake attribution, the quote itself must also be altered/made-up — "
-        "never attach a fake name to an untouched real quote.",
-        "No recycled meme lines — don't reuse existing internet jokes/t-shirt slogans. "
-        "Generate something new.",
-        "Rotate formats across a batch: twisted proverb (from the source pool above), "
-        "fake attribution + altered quote, original one-liner, crude/innuendo.",
-        "Output only the final quotes — no format labels, no self-correction, no "
-        "meta-commentary. If a quote turns out to be real/unaltered, silently discard "
-        "and regenerate instead of narrating it.",
+        "You are a specialized generator of **fake wisdom quotes**.",
+        "The humor must come from **corrupting genuine wisdom**, not from adding punchlines.",
+        "ARRIVE AT AN ABSURD BUT STRANGELY LOGICAL CONCLUSION",
+        "Do NOT write a normal joke and disguise it as a quotation.",
+        "Use one primary mechanism per quote.",
+        "They are NOT intentionally telling a joke.",
+        "The quote itself must be funny.",
     ]
 
-    SELF_CHECK_LINES = [
-        "Does it secretly make sense / is it actually a fair point? → fix.",
-        "Is it just two real sayings paired together? → fix.",
-        "Is the fake-attributed quote actually altered, not just relabeled? → fix.",
-        "Is this a recycled meme I've seen before? → discard, make a new one.",
-        "Any leftover labels, notes, or self-talk in the output? → strip it out.",
-        "Did I pull from Sun Tzu / Greek philosophers / similar classic sources for the "
-        "twisted-proverb format? → check rotation.",
+    QUALITY_FILTER_LINES = [
+        "it has an obvious punchline",
+        "it introduces a random funny object",
+        "it does not contain genuine wisdom from the SUBJECT",
+        "it is random nonsense",
     ]
 
     @pytest.mark.parametrize("line", VERBATIM_LINES)
     def test_rule_line_present_verbatim(self, line):
-        assert line in quote_agent.QUOTE_PROMPT
+        assert line in prompt_mod.build_prompt("Money", 3)
 
-    @pytest.mark.parametrize("line", SELF_CHECK_LINES)
-    def test_self_check_line_present_verbatim(self, line):
-        assert line in quote_agent.QUOTE_PROMPT
+    @pytest.mark.parametrize("line", QUALITY_FILTER_LINES)
+    def test_quality_filter_present_verbatim(self, line):
+        assert line in prompt_mod.build_prompt("Money", 3)
 
-    def test_source_pool_is_named_in_prompt(self):
-        for fig in ("Sun Tzu", "Socrates", "Confucius"):
-            assert fig in quote_agent.QUOTE_PROMPT
+    @pytest.mark.parametrize("mutation", [
+        "FALSE DEDUCTION", "OVEREXTENSION", "LITERAL INTERPRETATION",
+        "CONFIDENT MISUNDERSTANDING", "SELF-DEFEATING LOGIC", "ABSURD REDEFINITION",
+        "WRONG PRIORITY", "UNEXPECTED CONSEQUENCE", "PHILOSOPHICAL PARADOX",
+        "CONFIDENT IGNORANCE",
+    ])
+    def test_every_mutation_is_listed(self, mutation):
+        assert mutation in prompt_mod.build_prompt("Money", 3)
 
-    def test_prompt_is_not_truncated(self):
-        assert len(quote_agent.QUOTE_PROMPT) > 1500
-
-    def test_every_declared_figure_is_detectable(self):
-        # SOURCE_FIGURES drives rotation, so each must actually be findable.
-        for fig in quote_agent.SOURCE_FIGURES:
-            assert quote_agent._detect_figure(f"{fig} said so, and nobody argued back") == fig
-
-    def test_output_format_asks_for_a_json_array(self):
-        fmt = quote_agent.OUTPUT_FORMAT.format(n=3)
-        assert "JSON array" in fmt
-        assert "3" in fmt
+    def test_the_prompt_refuses_to_assume_one_subject(self):
+        built = prompt_mod.build_prompt("Money", 3)
+        assert "DO NOT assume the subject is always war." in built
+        assert "The SUBJECT can be absolutely anything." in built
 
 
 # --- generation (stubbed network) -------------------------------------------
@@ -330,6 +378,74 @@ class TestGenerateQuotes:
         got = generate_quotes(n=2, pool_path=pool_file)
         assert len(got) == 2
         assert all(isinstance(q, Quote) for q in got)
+
+    def test_the_subject_reaches_the_prompt(self, monkeypatch, pool_file):
+        # The subject is what makes a joke about the character's topic, so it
+        # must be substituted into the user's prompt before the call, not just
+        # printed or used for the filename.
+        captured = []
+
+        def fake(messages, **k):
+            captured.append(messages[0]["content"])
+            return _reply("A perfectly valid mock quote right here.")
+
+        monkeypatch.setattr(quote_agent.llm, "call_groq", fake)
+        generate_quotes(n=1, subject="Weight lifting and bodybuilding", pool_path=pool_file)
+        prompt = captured[0]
+        assert "SUBJECT: Weight lifting and bodybuilding" in prompt
+        assert "[INSERT SUBJECT HERE]" not in prompt
+
+    def test_different_characters_ask_for_different_subjects(self, monkeypatch, pool_file):
+        # Proves the rotation requirement end to end: a different character
+        # means the prompt is about something else entirely.
+        seen = []
+        replies = iter([
+            _reply("Strategy is simply knowing the field before anyone else does."),
+            _reply("Wealth is only weight that happens to sit in a bank."),
+        ])
+
+        def fake(messages, **k):
+            seen.append(messages[0]["content"])
+            return next(replies)
+
+        monkeypatch.setattr(quote_agent.llm, "call_groq", fake)
+        for subject in ("War and military strategy", "Money"):
+            generate_quotes(n=1, subject=subject, pool_path=pool_file)
+        assert "SUBJECT: War and military strategy" in seen[0]
+        assert "SUBJECT: Money" in seen[1]
+        assert seen[0] != seen[1]
+
+    def test_dropped_candidates_are_silent_by_default(self, monkeypatch, pool_file, capsys):
+        monkeypatch.setattr(quote_agent.llm, "call_groq",
+                            lambda *a, **k: _reply("short"))
+        generate_quotes(n=1, pool_path=pool_file) if False else None
+        # "short" is under the floor, so nothing is accepted; a normal run must
+        # not print the reason, or every production render gets debug noise.
+        try:
+            generate_quotes(n=1, pool_path=pool_file)
+        except RuntimeError:
+            pass
+        assert "dropped" not in capsys.readouterr().out
+
+    def test_explain_reports_each_dropped_candidate(self, monkeypatch, pool_file, capsys):
+        monkeypatch.setattr(quote_agent.llm, "call_groq",
+                            lambda *a, **k: _reply("short", "Also far too short to keep."))
+        try:
+            generate_quotes(n=1, pool_path=pool_file, explain=True)
+        except RuntimeError:
+            pass
+        out = capsys.readouterr().out
+        assert "dropped (too short)" in out
+        assert "Also far too short to keep." in out
+
+    def test_explain_is_wired_to_script_only(self, monkeypatch, pool_file, capsys):
+        monkeypatch.setattr(quote_agent.llm, "call_groq",
+                            lambda *a, **k: _reply("short", "Also far too short to keep."))
+        try:
+            generate_quotes(n=1, pool_path=pool_file, explain=False)
+        except RuntimeError:
+            pass
+        assert "dropped" not in capsys.readouterr().out
 
     def test_is_groq_only(self, monkeypatch, pool_file):
         seen = {}
@@ -370,19 +486,25 @@ class TestGenerateQuotes:
         with pytest.raises(RuntimeError, match="usable quotes"):
             generate_quotes(n=1, pool_path=pool_file)
 
-    def test_rejected_text_is_fed_back(self, monkeypatch, pool_file):
-        replies = iter([_reply("Self-check: rejected one, the rest is fine."),
-                        _reply("A good mock quote after the feedback round.")])
+    def test_only_the_prompt_is_sent_when_nothing_has_been_used(self, monkeypatch, pool_file):
         captured = []
+        monkeypatch.setattr(quote_agent.llm, "call_groq",
+                            lambda messages, **k: (captured.append(messages[0]["content"]),
+                                                   _reply("A perfectly valid mock quote here."))[1])
+        generate_quotes(n=1, subject="Money", pool_path=pool_file)
+        # With an empty history the sent message is the prompt, byte for byte.
+        assert captured[0] == prompt_mod.build_prompt("Money", quote_agent.BATCH)
 
-        def fake(messages, **k):
-            captured.append(messages[0]["content"])
-            return next(replies)
-
-        monkeypatch.setattr(quote_agent.llm, "call_groq", fake)
-        generate_quotes(n=1, pool_path=pool_file)
-        assert len(captured) == 2
-        assert "rejected" in captured[1].lower()
+    def test_nothing_is_appended_to_the_prompt(self, monkeypatch, pool_file):
+        captured = []
+        monkeypatch.setattr(quote_agent.llm, "call_groq",
+                            lambda messages, **k: (captured.append(messages[0]["content"]),
+                                                   _reply("A perfectly valid mock quote here."))[1])
+        generate_quotes(n=1, subject="Money", pool_path=pool_file)
+        sent = captured[0]
+        assert sent.startswith(prompt_mod.build_prompt("Money", quote_agent.BATCH))
+        for extra in ("HARD LIMIT", "These were rejected", "JSON array"):
+            assert extra not in sent, f"{extra!r} must not be added to the user's prompt"
 
     def test_sends_history_so_later_rounds_avoid_repeats(self, monkeypatch, pool_file):
         captured = []
@@ -397,14 +519,6 @@ class TestGenerateQuotes:
         generate_quotes(n=1, pool_path=pool_file)
         # The second request must mention the first quote.
         assert "The first entirely unique mock quote here." in captured[1]
-
-    def test_figure_is_recorded_for_rotation(self, monkeypatch, pool_file):
-        raw = json.dumps([{"quote": "Sun Tzu walked into a tavern and ordered nothing.", "format":
-                           "twisted_proverb", "source": "Sun Tzu"}])
-        monkeypatch.setattr(quote_agent.llm, "call_groq", lambda *a, **k: raw)
-        got = generate_quotes(n=1, pool_path=pool_file)
-        assert got[0].figure == "sun tzu"
-        assert json.load(open(pool_file))["figures"] == ["sun tzu"]
 
     def test_nothing_is_persisted_when_generation_fails(self, monkeypatch, pool_file):
         monkeypatch.setattr(quote_agent.llm, "call_groq",

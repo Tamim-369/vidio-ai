@@ -1,9 +1,10 @@
 """Assemble one quote video, end to end:
 
-    voice -> quotes (Groq) -> voiceover -> quote cards -> music -> upload
+    voice -> jokes (Groq) -> voiceover -> quote cards -> music -> upload
 
-Each quote is ONE narration line and ONE still card, sized to the spoken audio,
-so the video is exactly as long as it takes to say the quote(s)."""
+The voice is picked first and decides the subject, so the joke and the narrator
+always agree. Each joke is ONE narration line and ONE still card, sized to the
+spoken audio, so the video is exactly as long as it takes to say it."""
 from __future__ import annotations
 
 import os
@@ -18,13 +19,18 @@ from src.agents.voiceover import generate_audio
 from src.agents.video.artifacts import cleanup_temp, dump_artifact, ensure_dirs
 
 
-def build_script(quotes: list) -> dict:
+def build_script(quotes: list, subject: str = "") -> dict:
     """Turn quotes into the script dict the render steps consume.
 
     One quote = one line = one card, so a quote's full text is spoken as a
     single narration line and typeset as a single wrapped block. Splitting by
     sentence would produce a separate card per sentence, which is not the
     intended "one big quote on screen" look.
+
+    The video's topic is the subject, not the first joke: the subject is what
+    the video is actually about, and it is what names the file and titles the
+    upload. Using a random joke instead produced filenames and YouTube titles
+    that read like the joke itself.
     """
     lines = []
     for quote in quotes:
@@ -36,16 +42,9 @@ def build_script(quotes: list) -> dict:
         raise RuntimeError("quotes produced no narration lines")
 
     return {
-        # The first quote doubles as the video's topic: it is what the video is
-        # about, and what gets titled and uploaded.
-        "topic": lines[0]["text"],
-        "quotes": [
-            {"text": getattr(q, "text", str(q)),
-             "format": getattr(q, "format", ""),
-             "source": getattr(q, "source", ""),
-             "figure": getattr(q, "figure", "")}
-            for q in quotes
-        ],
+        "topic": subject or lines[0]["text"],
+        "subject": subject,
+        "quotes": [{"text": line["text"]} for line in lines],
         "lines": lines,
     }
 
@@ -66,16 +65,22 @@ def create_video(n_quotes: int = 2, publish: bool = True, voice: str = "",
 
     voice_id, voice_cfg = pick_voice(preferred=voice)
     style = get_writing_style(voice_id, voice_cfg)
+    subject = voice_cfg.get("subject", "")
     print(f"\n🗣️  Voice: {voice_cfg['name']} ({voice_id}) — style: {style['name']}")
+    print(f"📌 Subject: {subject}")
 
     ensure_dirs()
 
-    print(f"\n📝 Generating quotes (Groq, {n_quotes} beat)...")
+    print(f"\n📝 Generating {n_quotes} joke(s) (Groq, {subject})...")
     t = time.monotonic()
-    quotes = generate_quotes(n=n_quotes)
-    script = build_script(quotes)
+    # script_only is the "just show me the output" mode, so it is also where a
+    # dropped candidate is worth reporting: otherwise a short result looks like
+    # the model being stingy rather than the agent filtering it.
+    quotes = generate_quotes(n=n_quotes, subject=subject, explain=script_only,
+                             character=voice_id)
+    script = build_script(quotes, subject)
     for quote in quotes:
-        print(f"   [{quote.format}] {quote.text}")
+        print(f"   • {quote.text}")
     print(f"   {len(script['lines'])} card(s) from {len(quotes)} quote(s)")
     timing["quotes"] = time.monotonic() - t
     dump_artifact("quotes", script, script["topic"])

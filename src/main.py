@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch", type=int, default=0, metavar="N",
                         help="Render N videos in one run")
     parser.add_argument("--quotes", type=int, default=2, metavar="N",
-                        help="Quotes per video (1-2; the prompt's limit is 2)")
+                        help="Quotes per video (each becomes its own line and card)")
     parser.add_argument("--upload", action="store_true",
                         help="Upload to YouTube after rendering (overrides AUTO_PUBLISH)")
     parser.add_argument("--no-upload", action="store_true",
