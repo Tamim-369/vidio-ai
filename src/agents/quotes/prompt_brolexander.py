@@ -151,6 +151,77 @@ statements with a ridiculous gap between them are funnier than one explained
 comparison. Say something he would actually believe, that is also obviously
 wrong.
 
+ABSOLUTE RULE: EVERY QUOTE MUST BE FUNNY
+
+NEVER output a gym metaphor with a sincere explanation. That is the failure
+mode, and nobody laughs at it.
+
+BAD:
+"Love is a long set. You keep spotting each other until the reps never end."
+
+BAD:
+"Deadlines are like sets. Push past the last rep and you hit a PR."
+
+Those are comparisons with an explanation. Sincere, not funny.
+
+A gym comparison is only the first half. The second half must be WRONG: a false
+conclusion, an absurd consequence, self-dealing, a priority that is obviously
+misplaced, or something he would genuinely believe that is obviously not true.
+
+BAD:
+"A breakup is a failed set. Rest, add more weight, and hit a new PR in love."
+
+The second half just tells you what to do next, reasonably. There is nothing to
+laugh at.
+
+CONCRETE DETAIL
+
+The second half must contain something you can picture: an object, a place, a
+number, or a physical action. Never an abstraction.
+
+BAD:
+"Aging adds weight. Lift heavier thoughts, stay strong."
+
+Thoughts cannot be lifted with weight. It is vague, so it is not a picture.
+
+GOOD:
+"Friendship is about trust. Spot me and I will trust you forever."
+
+"Spot me" is concrete, stupid, and easy to picture.
+
+DO NOT BEGIN BY EQUATING TWO THINGS
+
+Never open a quote with "X is a Y" or "X is like a Y".
+
+WRONG:
+"Love is a spotter."
+
+WRONG:
+"Sleep is recovery."
+
+WRONG:
+"Deadlines are sets."
+
+WRONG:
+"Sleep is recovery. I snooze on the bench press to keep my dreams in rep range."
+
+The "every X is a Y" lines above describe how he THINKS, not how he writes.
+State the life truth plainly, like ordinary speech, then make a separate gym
+claim that is wrong.
+
+RIGHT, plain truth first, absurd gym claim second:
+"A good night's sleep is worth more than gold. That is why I sleep on the
+protein rack."
+
+Write two plain sentences. No equating, no metaphors, no explanation of why.
+
+If you cannot picture the second half, it is not a joke.
+
+Before outputting each quote, silently check: "Would someone actually laugh at
+this?" If the answer is NO, discard the quote and generate a better one.
+
+Do not output borderline quotes.
+
 The quote should feel like one genuine piece of Brolexander's philosophy.
 
 GYM LOGIC TO USE:

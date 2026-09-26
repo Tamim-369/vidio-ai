@@ -28,13 +28,6 @@ from src.agents.quotes import prompt_shared as shared
 _PROMPTS = {
     "donald-trump": "don_tzu",
     "andrew-tate": "andru_tatte",
-}
-
-# Written, but deliberately not in the pipeline yet. Brolexander's quotes kept
-# coming out as gym-metaphor-plus-explanation rather than jokes, and the user
-# chose to keep him aside until that is sorted. He is listed here rather than
-# deleted so the prompt is not lost and switching him back on is a one-line move.
-_ON_HOLD = {
     "arnold-schwarzenegger": "brolexander",
 }
 
@@ -50,9 +43,8 @@ def get_prompt(character: str = ""):
     """Return the prompt module for a character, or the shared fallback.
 
     Args:
-        character: the voice id, e.g. "donald-trump". Unknown, empty and
-            on-hold ids get the shared prompt so a new character cannot break
-            generation.
+        character: the voice id, e.g. "donald-trump". Unknown and empty ids get
+            the shared prompt so a new character cannot break generation.
     """
     name = _PROMPTS.get(character, "shared")
     return _load(name)
@@ -63,9 +55,4 @@ def characters_with_prompts() -> list:
     return list(_PROMPTS)
 
 
-def characters_on_hold() -> list:
-    """Voice ids whose prompt exists but is not in the pipeline."""
-    return list(_ON_HOLD)
-
-
-__all__ = ["get_prompt", "characters_with_prompts", "characters_on_hold", "shared"]
+__all__ = ["get_prompt", "characters_with_prompts", "shared"]

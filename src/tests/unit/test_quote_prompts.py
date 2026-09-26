@@ -12,8 +12,7 @@ import hashlib
 import pytest
 
 from src.agents.quotes import agent as qa
-from src.agents.quotes.prompt import (characters_on_hold, characters_with_prompts,
-                                      get_prompt, _load)
+from src.agents.quotes.prompt import characters_with_prompts, get_prompt, _load
 from src.agents.quotes import prompt_andru_tatte as andru_tatte
 from src.agents.quotes import prompt_brolexander as brolexander
 from src.agents.quotes import prompt_don_tzu as don_tzu
@@ -56,19 +55,9 @@ class TestRegistry:
             assert get_prompt(vid) is not None
 
     def test_no_piped_character_is_silently_borrowing_the_shared_one(self):
-        # Anyone not in the registry must be an explicit decision, either
-        # on hold or not a character at all, not an oversight.
-        on_hold = set(characters_on_hold())
-        missing = [vid for vid in CHARACTERS
-                   if get_prompt(vid) is shared and vid not in on_hold]
+        # Anyone in rotation must have a prompt of their own, not the fallback.
+        missing = [vid for vid in CHARACTERS if get_prompt(vid) is shared]
         assert missing == [], f"falling back to the shared prompt: {missing}"
-
-    def test_brolexander_is_on_hold_rather_than_removed(self):
-        # He is kept aside on purpose, not forgotten, so the prompt survives and
-        # putting him back is a one-line change.
-        assert characters_on_hold() == ["arnold-schwarzenegger"]
-        assert get_prompt("arnold-schwarzenegger") is shared
-        assert _load("brolexander") is brolexander, "his prompt file is gone"
 
     def test_the_registry_is_keyed_by_voice_id(self):
         for vid in characters_with_prompts():
@@ -300,7 +289,7 @@ class TestAndruTattePrompt:
 
 class TestBrolexanderPrompt:
     # sha256 of brolexander.build_prompt("SUBJECT_TOKEN", 42).
-    FIDELITY_SHA256 = "77fca1eb1ff8d67732e112cc1af25bfcd7012e599b6cad142dd74c61a0cedf64"
+    FIDELITY_SHA256 = "ff2054d886346d874aeb1f21dee7030827c0cb2da8618bf45e25fb5ca573ac6a"
 
     def test_the_prompt_text_is_locked(self):
         digest = hashlib.sha256(
@@ -357,11 +346,26 @@ class TestBrolexanderPrompt:
         built = brolexander.build_prompt("", 4)
         # The two extra BAD examples are the "comparison plus explanation" form
         # the model kept falling into, added because it was never shown as wrong.
-        assert built.count("BAD:") == 5
-        assert built.count("GOOD:") == 5
+        # Counted as lines, not substrings, so a marker quoted mid-sentence in
+        # the prose does not inflate the tally.
+        # Counted as lines, not substrings, so a marker quoted mid-sentence in
+        # the prose does not inflate the tally.
+        lines = built.splitlines()
+        assert lines.count("BAD:") == 9
+        assert lines.count("GOOD:") == 6
+        assert lines.count("WRONG:") == 4
         assert "Never run from your problems. Unless it is cardio day." in built
         assert "Love requires commitment. So does a 12-week bulk." in built
         assert "Love is a long set. You keep spotting each other until the reps never end." in built
+        # His character is defined by "every X is a Y", which is exactly what
+        # made him write "Love is a spotter. I lock my wrist to yours." Banning
+        # the equating opening is what finally unlocked the jokes, so this rule
+        # is load-bearing and must not be trimmed as redundant with the gate.
+        assert "DO NOT BEGIN BY EQUATING TWO THINGS" in built
+        assert "describe how he THINKS, not how he writes" in built
+        assert 'WRONG:\n"Love is a spotter."' in built
+        assert 'WRONG:\n"Sleep is recovery."' in built
+        assert "RIGHT, plain truth first, absurd gym claim second:" in built
 
     def test_the_gym_logic_list_survived(self):
         built = brolexander.build_prompt("", 4)
@@ -388,11 +392,22 @@ class TestBrolexanderPrompt:
         assert "Maximum 100 characters per quote, including spaces and punctuation." in built
         assert "Prefer 40–90 characters." in built
 
-    def test_he_is_not_in_the_piped_characters(self):
-        # Deliberate: the user kept him aside until his quotes are actually
-        # funny. He must not creep back in by accident.
-        assert "arnold-schwarzenegger" not in characters_with_prompts()
-        assert characters_on_hold() == ["arnold-schwarzenegger"]
+    def test_he_is_back_in_the_piped_characters(self):
+        # He was held out while this prompt was reworked, and is back now.
+        assert "arnold-schwarzenegger" in characters_with_prompts()
+        assert get_prompt("arnold-schwarzenegger") is brolexander
+
+    def test_his_funny_gate_survived(self):
+        # The same two rules that fixed Andru Tatte are what stopped Brolexander
+        # writing gym metaphors with sincere explanations.
+        built = brolexander.build_prompt("", 4)
+        assert "ABSOLUTE RULE: EVERY QUOTE MUST BE FUNNY" in built
+        assert "CONCRETE DETAIL" in built
+        assert "If you cannot picture the second half, it is not a joke." in built
+        assert "Would someone actually laugh at" in built
+        assert "Do not output borderline quotes." in built
+        # His own failure mode has to stay shown as wrong, or he drifts back.
+        assert "Love is a long set. You keep spotting each other until the reps never end." in built
 
 
 class TestLengthWindowFollowsTheCharacter:

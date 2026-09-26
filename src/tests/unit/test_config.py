@@ -17,7 +17,7 @@ from src.agents.voice_cast import voices, writing_styles
 REQUIRED_VOICES = ("donald-trump", "arnold-schwarzenegger", "andrew-tate")
 
 # The ones actually in rotation right now.
-ENABLED_VOICES = ("donald-trump", "andrew-tate")
+ENABLED_VOICES = ("donald-trump", "arnold-schwarzenegger", "andrew-tate")
 
 
 class TestVoiceRegistry:
@@ -29,12 +29,11 @@ class TestVoiceRegistry:
     def test_required_voice_is_enabled(self, voice_id):
         assert voices.get_voice(voice_id).get("enabled") is True
 
-    def test_arnold_is_temporarily_out_of_rotation(self):
-        # Disabled on purpose, not deleted. He comes back by flipping this to
-        # True, which is why his registry entry and prompt must stay intact.
-        assert voices.get_voice("arnold-schwarzenegger").get("enabled") is False
-        assert voices.get_voice("arnold-schwarzenegger")["engine"] == "chatterbox"
-        assert "arnold-schwarzenegger" not in [v for v, _ in voices.get_enabled_voices()]
+    def test_every_required_voice_is_enabled(self):
+        # Arnold was briefly disabled while his prompt was reworked; he is back,
+        # so all three registered clones rotate again.
+        for vid in REQUIRED_VOICES:
+            assert voices.get_voice(vid).get("enabled") is True
 
     @pytest.mark.parametrize("voice_id", REQUIRED_VOICES)
     def test_required_voice_uses_chatterbox(self, voice_id):

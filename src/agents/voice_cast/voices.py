@@ -68,11 +68,10 @@ VOICES = {
         "quote_authors": [
             "Brolexander | The Book of Gainz",
         ],
-        # Temporarily out of the pipeline at the user's request: Brolexander's
-        # quotes were coming out as gym-metaphor-plus-explanation rather than
-        # jokes. Nothing is deleted, so flipping this back to True restores him
-        # along with his prompt in src/agents/quotes/prompt_brolexander.py.
-        "enabled": False,
+        # Back in rotation: his prompt gained the same funny-gate and
+        # concrete-detail rules that fixed Andru Tatte, so the quotes are no
+        # longer gym metaphors with sincere explanations.
+        "enabled": True,
     },
 
     "andrew-tate": {
