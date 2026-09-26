@@ -358,7 +358,6 @@ def _clean_text(text: str) -> str:
         r'\bGRU\b': 'G R U',
         r'\bFSB\b': 'F S B',
         r'\bSPETSNAZ\b': 'spetsnaz',
-        r'\bFBI\b': 'F B I',
         r'\be\.g\.\b': 'for example',
         r'\bi\.e\.\b': 'that is',
         r'\bvs\.\b': 'versus',

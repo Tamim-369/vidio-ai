@@ -1,0 +1,154 @@
+{
+  "quotes": [
+    {
+      "text": "Knowing yourself is the beginning of all wisdom. But not knowing where your left shoe went is the beginning of all depression.",
+      "format": "twisted_proverb",
+      "source": "Socrates",
+      "figure": "socrates",
+      "video": ""
+    },
+    {
+      "text": "What are you up to, Karen? I\u2019m expanding my consciousness with a 20-minute nap and half a granola bar.",
+      "format": "fake_attribution",
+      "source": "",
+      "figure": "",
+      "video": ""
+    },
+    {
+      "text": "Victory can be achieved by someone who can estimate the probabilities of victory while others are only capable of such estimation, meaning you are stupid for not predicting the weather before leaving the house.",
+      "format": "twisted_proverb",
+      "source": "Sun Tzu",
+      "figure": "sun tzu",
+      "video": ""
+    },
+    {
+      "text": "Do not judge a man until he has filled your shoes, because if he hasn't, he probably stole them.",
+      "format": "one_liner",
+      "source": "",
+      "figure": "",
+      "video": ""
+    },
+    {
+      "text": "Aristotle: The middle path? Pick a sandwich.",
+      "format": "fake_attribution",
+      "source": "Aristotle",
+      "figure": "aristotle",
+      "video": ""
+    },
+    {
+      "text": "Epictetus: We suffer from opinions, mostly about WiFi.",
+      "format": "twisted_proverb",
+      "source": "Epictetus",
+      "figure": "epictetus",
+      "video": ""
+    },
+    {
+      "text": "Confucius: If you know you're wrong, change your mind.",
+      "format": "twisted_proverb",
+      "source": "Confucius",
+      "figure": "confucius",
+      "video": ""
+    },
+    {
+      "text": "Plato: Don't trust your eyes; they're just lying.",
+      "format": "fake_attribution",
+      "source": "Plato",
+      "figure": "plato",
+      "video": ""
+    },
+    {
+      "text": "Know thyself. Or know your password.",
+      "format": "twisted_proverb",
+      "source": "Socrates",
+      "figure": "socrates",
+      "video": ""
+    },
+    {
+      "text": "War is never won. Lunch is.",
+      "format": "twisted_proverb",
+      "source": "Sun Tzu",
+      "figure": "sun tzu",
+      "video": ""
+    },
+    {
+      "text": "Socrates: I know that I need a nap. Now.",
+      "format": "fake_attribution",
+      "source": "Socrates",
+      "figure": "socrates",
+      "video": ""
+    },
+    {
+      "text": "Stoicism is just crying in a very fancy hat.",
+      "format": "one_liner",
+      "source": "",
+      "figure": "",
+      "video": ""
+    },
+    {
+      "text": "Birds of a feather flock together. Mostly.",
+      "format": "twisted_proverb",
+      "source": "British Proverb",
+      "figure": "",
+      "video": ""
+    },
+    {
+      "text": "Act like a king. Sleep like a dog.",
+      "format": "one_liner",
+      "source": "",
+      "figure": "",
+      "video": ""
+    },
+    {
+      "text": "Heraclitus: Fight your neighbor. He's winning.",
+      "format": "fake_attribution",
+      "source": "Heraclitus",
+      "figure": "heraclitus",
+      "video": ""
+    },
+    {
+      "text": "Zeno: The arrow is stuck in your leg, not the target.",
+      "format": "fake_attribution",
+      "source": "Zeno",
+      "figure": "",
+      "video": ""
+    },
+    {
+      "text": "Diogenes: I seek a human. Also a hat.",
+      "format": "twisted_proverb",
+      "source": "Diogenes",
+      "figure": "diogenes",
+      "video": ""
+    },
+    {
+      "text": "Better late than never. My ego is late.",
+      "format": "one_liner",
+      "source": "",
+      "figure": "",
+      "video": ""
+    },
+    {
+      "text": "Confucius: Obey. Because I said so.",
+      "format": "twisted_proverb",
+      "source": "Confucius",
+      "figure": "confucius",
+      "video": ""
+    },
+    {
+      "text": "Socrates: I know I am hungry. Now.",
+      "format": "twisted_proverb",
+      "source": "Socrates",
+      "figure": "socrates",
+      "video": ""
+    }
+  ],
+  "figures": [
+    "socrates",
+    "sun tzu",
+    "aristotle",
+    "epictetus",
+    "confucius",
+    "plato",
+    "heraclitus",
+    "diogenes"
+  ]
+}

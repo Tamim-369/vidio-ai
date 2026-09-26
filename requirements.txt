@@ -8,7 +8,7 @@
 # 2.13). If pip hits a resolution conflict, install the TTS block separately
 # with --no-deps / --no-build-isolation.
 
-# --- TTS core (src/services/tts.py, tts_dsp.py, src/voice_tests/) ---
+# --- TTS core (src/services/tts.py, tts_dsp.py, tts_text.py) ---
 soundfile
 librosa
 numpy
@@ -16,35 +16,25 @@ scipy
 torch
 torchaudio
 
-# --- Local TTS models (src/voices_to_clone/, src/voice_tests/) ---
+# --- Local TTS models (src/experiments/voices_to_clone/, src/experiments/voice_tests/) ---
 chatterbox-tts       # import chatterbox
 pocket-tts           # import pocket_tts
-# qwen-tts            # optional: only used by voice_tests/test_qwen_0.6b_base.py in its own .venv-qwen
+# qwen-tts            # optional: only used by src/experiments/voice_tests/test_qwen_0.6b_base.py in its own .venv-qwen
 
-# --- HTTP / asset fetching (src/services/asset_fetcher.py) ---
+# --- HTTP (src/services/llm.py) ---
+# urllib3 arrives transitively via requests.
 requests
-urllib3
-ddgs
-wikipedia
 
-# --- Topic agent scraping (src/services/topic_agent/) ---
-beautifulsoup4    # HTML index/scrape parsing
-lxml              # strict XML/RSS/Atom parse via bs4 "xml" parser
-feedparser        # optional: pleasant RSS/Atom parsing; agent uses stdlib+bs4 today
-
-# --- LLM APIs (src/services/llm.py, topic_generator.py) ---
+# --- LLM APIs (src/services/llm.py) ---
 groq
-ollama
 google-genai
-playwright
-pytesseract
 
 # --- YouTube upload (src/services/youtube_upload.py) ---
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
 
-# --- Video assembly (src/services/video_assembler.py) ---
+# --- Quote card rendering (src/services/quote_card.py) ---
 moviepy
 Pillow
 

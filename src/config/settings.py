@@ -19,15 +19,17 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_KEY_SECOND = os.getenv("GROQ_API_KEY_SECOND")
 GROQ_API_KEY_THIRD = os.getenv("GROQ_API_KEY_THIRD")
 GROQ_API_KEY_BACKUP = os.getenv("GROQ_API_KEY_BACKUP")  # Legacy alias
-PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 # TEXT model (script/research): gpt-oss-20b is a fast, standard service model.
 # gpt-oss-120b returns empty completions on this Groq org, so it is avoided
 # (the retry chain now treats empty content as a failure and rotates keys).
 GROQ_MODEL = "openai/gpt-oss-20b"
 
-# Ollama settings
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "minimax-m3:cloud")
+# Quote generation (src/services/quote_agent.py) runs on its own model so it
+# can be changed without touching the script/research model above. Quotes are
+# Groq-only by requirement: the agent passes allow_fallback=False to call_groq
+# so a dead key raises instead of silently producing Gemini output.
+# Override with GROQ_QUOTE_MODEL in .env.
+GROQ_QUOTE_MODEL = os.getenv("GROQ_QUOTE_MODEL", "qwen/qwen3.8-27b")
 
 # Gemini (topic generation + final fallback after the 3 Groq keys).
 # Flash is the free-tier workhorse (~15 RPM, ~1500 RPD) — plenty for a
@@ -43,15 +45,71 @@ if GEMINI_API_KEY and GEMINI_API_KEY not in GEMINI_KEYS:
     GEMINI_KEYS.append(GEMINI_API_KEY)
 
 VIDEO_FORMAT = "9:16"         # "9:16" for Shorts/Reels, "16:9" for YouTube
-VIDEO_STYLE = "attraction"    # educational | motivational | ad | storytelling | attraction
-VOICE = "M3"                # from voices.py
 
 OUTPUT_DIR = "output"
 TEMP_DIR = "temp"
 
-# Pocket-TTS voice (cloned from the Kokoro narrator ref in voice_tests/chatterbox_ref.wav)
+# --- Background music ---
+# Mixed under the narration after assembly (src/services/music.py), so the
+# TTS/assembler behaviour is untouched. MUSIC_ENABLED=0 renders voice-only.
+MUSIC_ENABLED = os.getenv("MUSIC_ENABLED", "1") == "1"
+MUSIC_PATH = os.getenv("MUSIC_PATH", "src/music/oogway.mp3")
+# The dead air at the head of the track was removed from the FILE itself (the
+# first 5s are already cut, see git history), so there is nothing left to skip
+# here. Keep this at 0 unless you swap in a different music file that still has
+# a silent or abrupt opening — it is applied on top of the file's own start.
+MUSIC_SKIP_S = float(os.getenv("MUSIC_SKIP_S", "0"))
+# The bed is loudness-normalised to this LUFS before the trim below, so its
+# level in the mix does not depend on the track's own loudness. Chatterbox
+# narration lands near -18 dB mean, so -24 puts the music roughly 8 dB under
+# the voice: clearly audible on phone and laptop speakers, still behind the
+# punchline. -28 is subtler; -20 is nearly level with the narration.
+MUSIC_TARGET_LUFS = float(os.getenv("MUSIC_TARGET_LUFS", "-24"))
+# Trim applied AFTER normalisation, so it is an absolute, predictable offset
+# rather than one relative to the track's own (wildly varying) loudness.
+# 0 is neutral; negative pulls the bed further under the voice.
+MUSIC_GAIN_DB = float(os.getenv("MUSIC_GAIN_DB", "0"))
+# Fade in/out so the clip does not start or end on a hard music edge.
+# The fade-IN is deliberately tiny: the bed should already be audible on frame
+# one, establishing the mood before the first word, not swelling in from
+# nothing over a second and a half. The fade-OUT stays long so the ending
+# resolves instead of stopping dead.
+MUSIC_FADE_IN_S = float(os.getenv("MUSIC_FADE_IN_S", "0.10"))
+MUSIC_FADE_OUT_S = float(os.getenv("MUSIC_FADE_OUT_S", "1.5"))
+
+# Narration rate. Chatterbox 0.1.7 has no rate knob, so this is an ffmpeg
+# atempo time-stretch applied to each synthesised line (pitch preserved).
+# 1.0 is the model's natural pace; 0.93 is a touch slower, which suits a
+# reflective channel better than a rushed one.
+TTS_RATE = float(os.getenv("TTS_RATE", "0.93"))
+
+# --- Quote card typography ---
+# Playfair Display, from the repo's Fonts/ folder (SIL OFL 1.1, see
+# Fonts/Playfair_Display/OFL.txt). A serif suits the "wisdom" register far
+# better than the UI sans the documentary captions used.
+# NOTE: Fonts/ is not committed to git, so the renderer must fall back to
+# FONT_PATH when these files are absent (fresh clone, CI, another machine).
+FONT_DIR = os.getenv("FONT_DIR", "Fonts/Playfair_Display/static")
+QUOTE_FONT_PATH = os.getenv(
+    "QUOTE_FONT_PATH", f"{FONT_DIR}/PlayfairDisplay-Bold.ttf")
+# The book/work line under the author reads better in the italic cut.
+QUOTE_FONT_ITALIC_PATH = os.getenv(
+    "QUOTE_FONT_ITALIC_PATH", f"{FONT_DIR}/PlayfairDisplay-Italic.ttf")
+
+# --- Quote card pacing ---
+# Cards butt up against each other by default, which makes a two-quote video
+# feel like one long breath. These pad each card's audio with silence so the
+# beat lands. The card stays on screen through its own tail, and the music bed
+# runs underneath the silence, so a gap or the ending hold is music-only rather
+# than a dead cut to black-and-quiet.
+# Gap after every quote except the last.
+QUOTE_GAP_S = float(os.getenv("QUOTE_GAP_S", "2.0"))
+# Hold on the final card after the last word, so the video does not cut on it.
+QUOTE_END_TAIL_S = float(os.getenv("QUOTE_END_TAIL_S", "4.0"))
+
+# Pocket-TTS voice (cloned from the Kokoro narrator ref in src/experiments/voice_tests/chatterbox_ref.wav)
 POCKET_VOICE_STATE = "voices/narrator.safetensors"
-POCKET_VOICE_REF = "voice_tests/chatterbox_ref.wav"
+POCKET_VOICE_REF = "src/experiments/voice_tests/chatterbox_ref.wav"
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
@@ -80,48 +138,11 @@ TTS_MAX_WPS = float(os.getenv("TTS_MAX_WPS", "3.4"))
 # is needed. An audible buffer word would leak "okay".
 TTS_LEAD_BUFFER = os.getenv("TTS_LEAD_BUFFER", "")
 
-# Chatterbox flow-matching integration steps. The S3Gen vocoder defaults to 10;
-# at 10 the mel is undersampled and fine voices (Trump) break pitch — single-frame
-# f0 jumps of 100->150 Hz read as "voice cracks". Higher steps integrate the flow
-# more finely (smoother mel) at linear compute cost. 10 = model default.
-TTS_CFM_STEPS = int(os.getenv("TTS_CFM_STEPS", "10"))
-
-# --- Asset fetching ---
-ASSET_MAX_PARALLEL_WORKERS = int(os.getenv("ASSET_MAX_PARALLEL_WORKERS", "8"))
-ASSET_IMAGES_PER_LINE = int(os.getenv("ASSET_IMAGES_PER_LINE", "3"))
-ASSET_MAX_REFINE_ATTEMPTS = int(os.getenv("ASSET_MAX_REFINE_ATTEMPTS", "4"))
-ASSET_MAX_ASPECT_RATIO = float(os.getenv("ASSET_MAX_ASPECT_RATIO", "1.5"))
-# Topic-first asset strategy: per-line search queries from the query agent, keep
-# at least MIN OCR-clean images, then assign them to lines (multi per line ok).
-ASSET_TARGET_IMAGES = int(os.getenv("ASSET_TARGET_IMAGES", "6"))
-ASSET_MIN_IMAGES = int(os.getenv("ASSET_MIN_IMAGES", "4"))
-# Deterministic text-overlay slop filter (pytesseract OCR, no LLM): reject any
-# image whose readable text covers more than ASSET_MAX_TEXT_AREA fraction of its
-# area (photos with captions/memes/watermark blocks - not tiny credit marks).
-ASSET_REJECT_TEXT_OVERLAY = os.getenv("ASSET_REJECT_TEXT_OVERLAY", "1") == "1"
-ASSET_MAX_TEXT_AREA = float(os.getenv("ASSET_MAX_TEXT_AREA", "0.04"))
-ASSET_TEXT_MIN_CONF = int(os.getenv("ASSET_TEXT_MIN_CONF", "50"))
-
-# --- Captions / subtitles ---
-# Styled word-by-word "karaoke" captions burned into the frames (matches the
-# video vibe via VIDEO_STYLE accent color). Disable to render caption-free.
-CAPTIONS_ENABLED = os.getenv("CAPTIONS_ENABLED", "1") == "1"
-# Optional accent override (hex, e.g. "#FFC94D"). Empty = auto from VIDEO_STYLE.
-CAPTION_ACCENT = os.getenv("CAPTION_ACCENT", "")
-
 # Image resolution based on format
 VIDEO_RESOLUTIONS = {
     "9:16": (1080, 1920),
     "16:9": (1920, 1080),
 }
-
-# --- Reddit OAuth (topic generator) ---
-# Create a "script" app at https://www.reddit.com/prefs/apps and fill these in .env.
-# Permanent auth: no cookie refresh needed, 100 requests/min free.
-REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
-REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
-REDDIT_USERNAME = os.getenv("REDDIT_USERNAME", "")
-REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD", "")
 
 # --- YouTube upload settings ---
 # Set AUTO_PUBLISH=1 in .env to publish videos after rendering.

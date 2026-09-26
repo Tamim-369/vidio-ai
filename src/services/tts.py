@@ -10,7 +10,7 @@ if hf_home:
 
 import numpy as np
 import soundfile as sf
-from src.config.settings import TEMP_DIR, POCKET_VOICE_STATE, POCKET_VOICE_REF, TTS_WORKERS, TTS_LEAD_BUFFER
+from src.config.settings import TEMP_DIR, POCKET_VOICE_STATE, POCKET_VOICE_REF, TTS_WORKERS, TTS_LEAD_BUFFER, TTS_RATE
 
 # Normalization + DSP extracted into focused modules; re-exported here so callers
 # keep working with the old `from src.services.tts import ...` imports.
@@ -150,6 +150,51 @@ def _prep_chat_conds(model, voice: dict) -> None:
     _chat_ref = ref_audio
 
 
+def _apply_rate(samples: np.ndarray, sr: int) -> np.ndarray:
+    """Stretch narration to TTS_RATE without a resampling pitch shift.
+
+    Chatterbox 0.1.7 exposes no rate control, and its sampling knobs
+    (temperature/exaggeration) shift style rather than tempo. ffmpeg's atempo
+    is a phase-vocoder time-stretch, so the voice keeps its pitch and only
+    slows down. Done on the raw array, before the wav is written, so the
+    measured actual_duration already reflects the slowed audio and every
+    downstream card length stays correct.
+    """
+    if TTS_RATE == 1.0:
+        return samples
+    import subprocess
+    import tempfile
+
+    # atempo only accepts 0.5-2.0 per instance; chain factors outside that.
+    factor = TTS_RATE
+    chain = []
+    while factor < 0.5:
+        chain.append("0.5")
+        factor /= 0.5
+    while factor > 2.0:
+        chain.append("2.0")
+        factor /= 2.0
+    chain.append(f"{factor:.6f}")
+    filt = ",".join(f"atempo={c}" for c in chain)
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        sf.write(tmp_path, samples, sr)
+        out = subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-i", tmp_path, "-filter:a", filt,
+             "-ar", str(sr), "-ac", "1", "-f", "wav", "-"],
+            capture_output=True, check=True).stdout
+        import io
+        stretched, _ = sf.read(io.BytesIO(out), dtype="float32")
+        return np.asarray(stretched, dtype=np.float32)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
 def _chat_loop(lines: list, voice: dict, audio_dir: str) -> list:
     """Generate voiceover with Chatterbox real-voice cloning (English)."""
     from chatterbox.tts import ChatterboxTTS  # noqa: F401  (type ref only)
@@ -202,6 +247,7 @@ def _chat_loop(lines: list, voice: dict, audio_dir: str) -> list:
         silence = np.zeros(int(0.06 * sr), dtype=np.float32)
         combined = np.concatenate([combined, silence])
         combined = np.concatenate([np.zeros(int(0.06 * sr), dtype=np.float32), combined])
+        combined = _apply_rate(combined, sr)
         peak = float(np.abs(combined).max())
         if peak > 0.95:
             combined = combined * (0.95 / peak)

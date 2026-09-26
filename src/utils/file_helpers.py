@@ -22,16 +22,6 @@ def cleanup_temp():
         shutil.rmtree(TEMP_DIR)
 
 
-def save_json(data: dict, path: str):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def load_json(path: str) -> dict:
-    with open(path, "r") as f:
-        return json.load(f)
-
-
 def dump_artifact(step: str, data, topic: str = "") -> str:
     """Write one pipeline step's output to debug_output/ for inspection.
 

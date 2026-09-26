@@ -1,10 +1,9 @@
-"""Single seam for LLM calls (Groq + Gemini + Cloudflare + Ollama).
+"""Single seam for LLM calls (Groq + Gemini + Cloudflare).
 
 Owns the provider lifecycle and fallback chain. The primary pathways are:
 
     call_text()    -> Groq (3 rotating keys) -> Gemini -> Cloudflare (last resort).
     call_groq()    -> Groq (3 rotating keys), then Gemini fallback.
-    call_ollama    -> Ollama -> Groq -> local chain for offline systems.
 
 Groq keys rotate across GROQ_API_KEY / GROQ_API_KEY_SECOND / GROQ_API_KEY_THIRD
 on retriable or hard failures, and repeated calls pick up where the last one
@@ -13,18 +12,17 @@ succeeded, so a dead key is never re-hit first; when all three are exhausted
 GEMINI_API_KEY_ONE..FIVE). Cloudflare is demoted to a final safety net since it
 rate-limits (429) constantly and was the main reason research/script generation
 felt like forever. No service builds its own client or retry loop: use
-``call_text`` / ``call_groq`` / ``call_ollama`` and forget the plumbing.
+``call_text`` / ``call_groq`` and forget the plumbing.
 
-Note: there is NO vision seam anymore. Image verification was removed from the
-pipeline — image selection is driven by the per-line query agent, so model
-description/verification calls (and their Groq/Gemini/Ollama vision variants)
-are gone.
+Note: there is NO vision seam anymore. The card renders the speaker's own photo,
+so there is nothing to select or verify; the model description/verification
+calls went with it. The local Ollama chain went with the same cleanup: nothing
+in the quote pipeline calls it, and quote generation is Groq-only by policy.
 """
 import time
 
 import requests
 from groq import Groq
-import ollama
 
 from src.config.settings import (
     CLOUDFLARE_API_TOKEN,
@@ -37,11 +35,7 @@ from src.config.settings import (
     GROQ_MODEL,
     GEMINI_KEYS,
     GEMINI_MODEL,
-    OLLAMA_MODEL,
 )
-
-# Local Ollama models tried only if the configured (possibly cloud) model is down.
-LOCAL_OLLAMA_FALLBACKS = ["qwen3:1.7b", "phi4-mini:latest"]
 
 CF_ENDPOINT = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions"
 
@@ -62,11 +56,6 @@ _clients = _clients or [_primary]
 
 _attempted = set()
 _last_good = 0  # last Groq key that succeeded -> next call starts here
-
-
-def is_using_backup() -> bool:
-    """True once a rotated Groq key (beyond the primary) has been used."""
-    return len(_attempted) > 1
 
 
 def _get_client():
@@ -162,13 +151,20 @@ def call_text(messages: list, temperature: float = 0.7, model: str = None,
 
 
 def call_groq(messages: list, temperature: float = 0.7, model: str = None,
-              max_retries: int = 3, max_tokens: int = None, tag: str = "groq") -> str:
+              max_retries: int = 3, max_tokens: int = None, tag: str = "groq",
+              allow_fallback: bool = True) -> str:
     """Chat completions with 3-key rotation + Gemini final fallback.
 
     Retries only on rate-limit/413/token errors (exponential backoff 1s, 2s,
     4s). On a retriable failure it first rotates to the next Groq key; once all
     keys have been tried and failed it falls back to Gemini (``call_gemini``).
     Non-retriable failures advance keys immediately. Returns the stripped text.
+
+    ``allow_fallback=False`` keeps the call Groq-only: when every key is
+    exhausted it raises instead of calling Gemini. Callers that must guarantee
+    the output came from one specific model (e.g. the quote agent, where
+    Gemini output would violate the "Groq only" requirement) pass False.
+    With the default True this function behaves exactly as before.
     """
     global _rotating, _last_good
     if model is None:
@@ -212,6 +208,10 @@ def call_groq(messages: list, temperature: float = 0.7, model: str = None,
             elif not retriable and pos < len(_clients) - 1:
                 print(f"    [{tag}] rotating to next Groq key...")
         # keep going to next key regardless
+    if not allow_fallback:
+        raise RuntimeError(
+            f"[{tag}] all {len(_clients)} Groq keys failed and fallback is disabled"
+        )
     print(f"    [{tag}] All {len(_clients)} Groq keys failed - falling back to Gemini")
     return call_gemini(messages, temperature=temperature, model=None,
                        max_tokens=max_tokens, tag=tag)
@@ -282,47 +282,3 @@ def _gemini_parts(content):
                     parts.append(types.Part(inline_data=types.Blob(
                         mime_type=mime or "image/jpeg", data=b64)))
     return parts
-
-
-def call_ollama(messages: list, temperature: float = 0.3, model: str = None,
-                max_tokens: int = None) -> str:
-    """Configured Ollama model -> Groq -> local Ollama fallback chain.
-
-    A dead/misconfigured cloud model never blocks: each candidate failing just
-    logs and moves on, and Groq is tried before the slower local models because
-    it produces clean structured JSON.
-    """
-    candidates = [model] if model else []
-    if OLLAMA_MODEL:
-        candidates.append(OLLAMA_MODEL)  # from .env (could be a :cloud model)
-
-    for m in candidates:
-        try:
-            response = ollama.chat(
-                model=m,
-                messages=messages,
-                options={"temperature": temperature},
-            )
-            return response["message"]["content"].strip()
-        except Exception as e:
-            print(f"    [ollama] {m} failed ({str(e)[:120]}) - trying next")
-
-    # Groq before local: it's fast and produces clean structured JSON.
-    try:
-        print("    [ollama] cloud model unavailable - falling back to Groq")
-        return call_groq(messages, temperature=temperature, max_tokens=max_tokens)
-    except Exception:
-        pass
-
-    # Last resort: any local model for offline operation.
-    for m in LOCAL_OLLAMA_FALLBACKS:
-        try:
-            response = ollama.chat(
-                model=m,
-                messages=messages,
-                options={"temperature": temperature},
-            )
-            return response["message"]["content"].strip()
-        except Exception as e:
-            print(f"    [ollama] {m} failed ({str(e)[:120]})")
-    raise RuntimeError("No Ollama model available (configured, cloud, or local)")

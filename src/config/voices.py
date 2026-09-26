@@ -5,9 +5,16 @@ Each voice entry:
 - ref_audio: path to the reference clip used to clone the voice (chatterbox only)
 - params:       engine-specific TTS knobs (exaggeration/cfg_weight/temperature for chatterbox)
 - writing_style: id into src/config/writing_styles.py (how the script is written for this voice)
+- face:         full-bleed background photo for the quote card. The speaker's
+                face already sits in the bottom-right of these images, which is
+                why the quote is typeset in the top 40% and the byline bottom-left.
+- quote_authors: fake author names credited on the card, e.g. "Don Tzu". Picked
+                per video (seeded by the quote) so the byline is not always the
+                same. A name may carry a "|" to separate the quoted form from
+                the book/work form: '"Don Tzu" | "Fart of War"'.
 - enabled:      false keeps the voice registered but out of the shuffle
 
-To add a new voice: drop a clean reference WAV somewhere under src/voices_to_clone/
+To add a new voice: drop a clean reference WAV somewhere under src/experiments/voices_to_clone/
 and add one entry here (copy a commented template below).
 """
 
@@ -16,16 +23,18 @@ VOICES = {
     # "new_voice": {
     #     "name": "New Voice",
     #     "engine": "chatterbox",
-    #     "ref_audio": "src/voices_to_clone/voice_candidates/myvoice_ref.wav",
+    #     "ref_audio": "src/experiments/voices_to_clone/voice_candidates/myvoice_ref.wav",
     #     "params": {"exaggeration": 0.5, "cfg_weight": 0.5, "temperature": 0.8},
     #     "writing_style": "narrator",
+    #     "face": "src/faces/NewVoice.png",
+    #     "quote_authors": ["Anon | Sayings"],
     #     "enabled": False,
     # },
 
     "donald-trump": {
         "name": "Donald Trump",
         "engine": "chatterbox",
-        "ref_audio": "src/voices_to_clone/candidates/donald-trump/donald-trump_ref.wav",
+        "ref_audio": "src/experiments/voices_to_clone/candidates/donald-trump/donald-trump_ref.wav",
         # Lower temp = stable speaker identity/emotion across lines; the script's
         # own "loud" lines still get a deterministic volume emphasis in TTS.
         # Reduced EQ boosts to prevent hiss fog; removed 6.5k boost entirely.
@@ -33,13 +42,17 @@ VOICES = {
                    "eq": ["highpass 100", "equalizer 3000 1 1.5"],
                    "speed": 1.0},
         "writing_style": "trump",
+        "face": "src/faces/Trump.png",
+        "quote_authors": [
+            "Don Tzu | The Fart of War",
+        ],
         "enabled": True,
     },
 
     "arnold-schwarzenegger": {
         "name": "Arnold Schwarzenegger",
         "engine": "chatterbox",
-        "ref_audio": "src/voices_to_clone/candidates/arnold-schwarzenegger/arnold-schwarzenegger_ref.wav",
+        "ref_audio": "src/experiments/voices_to_clone/candidates/arnold-schwarzenegger/arnold-schwarzenegger_ref.wav",
         # Measured sweeps (word-end pitch droop + identity drift on 24k ref):
         # final pick = exag 0.65 / cfg 0.9 / temp 0.55 with a 72s ref of 37 clean
         # vocals-stem segments. cfg 0.85–0.9 anchors identity through line ends;
@@ -48,19 +61,27 @@ VOICES = {
                    "repetition_penalty": 1.2, "min_p": 0.05, "top_p": 1.0,
                    "speed": 1.0},
         "writing_style": "arnold",
+        "face": "src/faces/Arnold.png",
+        "quote_authors": [
+            "Brolexander | The Book of Gainz",
+        ],
         "enabled": True,
     },
 
     "andrew-tate": {
         "name": "Andrew Tate",
         "engine": "chatterbox",
-        "ref_audio": "src/voices_to_clone/candidates/andrew-tate/andrew-tate_ref.wav",
+        "ref_audio": "src/experiments/voices_to_clone/candidates/andrew-tate/andrew-tate_ref.wav",
         # A/B selected: prime 103.5–114.0s (119Hz conversational register).
         # Mod-low temp keeps the aggro-but-composed take. Script style = Arnold's.
         "params": {"exaggeration": 0.65, "cfg_weight": 0.85, "temperature": 0.55, "gain": 1.02,
                    "repetition_penalty": 1.2, "min_p": 0.05, "top_p": 1.0,
                    "speed": 1.0},
         "writing_style": "arnold",
+        "face": "src/faces/Tate.png",
+        "quote_authors": [
+            "Andru Tatte | The Way of Whatever",
+        ],
         "enabled": True,
     },
 
@@ -90,3 +111,25 @@ def get_enabled_voices() -> list:
 def get_voice(voice_id: str) -> dict:
     """Return a voice entry by id, or None if unknown."""
     return VOICES.get(voice_id)
+
+
+def pick_quote_author(voice: dict, seed: str = "") -> tuple:
+    """Return (attribution, source) for a fake quote credit on the card.
+
+    The same voice speaks under many fake authors, so the byline is derived
+    from the quote text (stable for a given quote) instead of being fixed per
+    voice. Entries in VOICES may carry a "|" to distinguish the spoken name
+    from the book/work name; when absent both halves are identical.
+
+    Falls back to ("", "") for voices with no author list (e.g. narrator).
+    """
+    authors = voice.get("quote_authors") or []
+    if not authors:
+        return "", ""
+    key = seed or voice.get("name", "")
+    pick = authors[sum(ord(c) for c in key) % len(authors)]
+    if "|" in pick:
+        name, source = (part.strip() for part in pick.split("|", 1))
+    else:
+        name = source = pick.strip()
+    return name, source
