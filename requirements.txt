@@ -8,7 +8,7 @@
 # 2.13). If pip hits a resolution conflict, install the TTS block separately
 # with --no-deps / --no-build-isolation.
 
-# --- TTS core (src/services/tts.py, tts_dsp.py, tts_text.py) ---
+# --- TTS core (src/agents/voiceover/) ---
 soundfile
 librosa
 numpy
@@ -21,22 +21,22 @@ chatterbox-tts       # import chatterbox
 pocket-tts           # import pocket_tts
 # qwen-tts            # optional: only used by src/experiments/voice_tests/test_qwen_0.6b_base.py in its own .venv-qwen
 
-# --- HTTP (src/services/llm.py) ---
+# --- HTTP (src/agents/completion/llm.py) ---
 # urllib3 arrives transitively via requests.
 requests
 
-# --- LLM APIs (src/services/llm.py) ---
+# --- LLM APIs (src/agents/completion/llm.py) ---
 groq
 google-genai
 
-# --- YouTube upload (src/services/youtube_upload.py) ---
+# --- YouTube upload (src/agents/publish/youtube.py) ---
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
 
-# --- Quote card rendering (src/services/quote_card.py) ---
+# --- Quote card rendering (src/agents/visuals/card.py) ---
 moviepy
 Pillow
 
-# --- Config / env (src/config/settings.py) ---
+# --- Env loading (src/agents/completion/llm.py, src/helpers.py) ---
 python-dotenv

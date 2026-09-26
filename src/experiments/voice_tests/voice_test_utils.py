@@ -35,11 +35,11 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_ROOT))
 
-from src.config.voices import get_voice
-from src.config.writing_styles import get_style
-from src.services.quote_agent import generate_quotes
-from src.services.quote_card import render as render_quote_cards
-from src.services.tts import generate_audio, _clean_text
+from src.agents.voice_cast import get_voice
+from src.agents.voice_cast import get_style
+from src.agents.quotes import generate_quotes
+from src.agents.visuals import render as render_quote_cards
+from src.agents.voiceover import generate_audio, _clean_text
 
 VOICE_TESTS = Path(__file__).resolve().parent
 SCRIPTS_DIR = VOICE_TESTS / "scripts"

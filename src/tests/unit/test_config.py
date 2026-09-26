@@ -1,8 +1,7 @@
-"""Characterization tests for the config layer.
+"""Characterization tests for the voice registry and writing styles.
 
-The voice registry and writing styles drive voice selection and narration tone.
-These tests pin the current registry shape so a restructure cannot silently drop
-a voice, break a ref-audio path, or change the enabled set.
+Pins the registry shape so a restructure cannot silently drop a voice, break a
+ref-audio path, or change the enabled set.
 """
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config import settings, voices, writing_styles
+from src.agents.voice_cast import voices, writing_styles
 
 # The three clone voices this project is built around.
 REQUIRED_VOICES = ("donald-trump", "arnold-schwarzenegger", "andrew-tate")
@@ -64,16 +63,22 @@ class TestWritingStyles:
 
 
 class TestSettings:
+    """Each value is asserted where it now lives, with its consumer."""
+
     def test_tts_pacing_band_is_ordered(self):
-        assert 0 < settings.TTS_MIN_WPS < settings.TTS_MAX_WPS
+        from src.agents.voiceover.dsp import TTS_MAX_WPS, TTS_MIN_WPS
+        assert 0 < TTS_MIN_WPS < TTS_MAX_WPS
 
     def test_video_resolutions_cover_the_configured_format(self):
-        assert settings.VIDEO_FORMAT in settings.VIDEO_RESOLUTIONS
+        from src.agents.visuals.card import VIDEO_FORMAT, VIDEO_RESOLUTIONS
+        assert VIDEO_FORMAT in VIDEO_RESOLUTIONS
 
     def test_output_and_temp_dirs_are_relative(self):
+        from src.agents.video.artifacts import TEMP_DIR
+        from src.agents.visuals.card import OUTPUT_DIR
         # Relative paths keep the project portable across machines.
-        assert not settings.OUTPUT_DIR.startswith("/")
-        assert not settings.TEMP_DIR.startswith("/")
+        assert not OUTPUT_DIR.startswith("/")
+        assert not TEMP_DIR.startswith("/")
 
     def test_music_source_is_present(self):
         # oogway.mp3 is the background bed; losing it breaks every render.

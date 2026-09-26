@@ -139,6 +139,66 @@
       "source": "Socrates",
       "figure": "socrates",
       "video": ""
+    },
+    {
+      "text": "Thou shalt not... forget to mic it.",
+      "format": "twisted_proverb",
+      "source": "Ten Commandments",
+      "figure": ""
+    },
+    {
+      "text": "Mark Twain: I never had a girlfriend.",
+      "format": "fake_attribution",
+      "source": "Mark Twain",
+      "figure": ""
+    },
+    {
+      "text": "Moses: The walls parted. I fell in.",
+      "format": "fake_attribution",
+      "source": "",
+      "figure": ""
+    },
+    {
+      "text": "I am old enough to know better. Wrong.",
+      "format": "one_liner",
+      "source": "",
+      "figure": ""
+    },
+    {
+      "text": "Sun Tzu: Fake left. Nap right.",
+      "format": "twisted_proverb",
+      "source": "Sun Tzu",
+      "figure": "sun tzu"
+    },
+    {
+      "text": "Democritus: Laughing too hard is your fault.",
+      "format": "fake_attribution",
+      "source": "Democritus",
+      "figure": ""
+    },
+    {
+      "text": "The unexamined life is skipped.",
+      "format": "twisted_proverb",
+      "source": "Socrates",
+      "figure": "socrates"
+    },
+    {
+      "text": "Your waistline forgives nothing.",
+      "format": "one_liner",
+      "source": "",
+      "figure": ""
+    },
+    {
+      "text": "Aristotle: The fall of a state is a slow one.",
+      "format": "twisted_proverb",
+      "source": "Aristotle",
+      "figure": "aristotle"
+    },
+    {
+      "text": "Lao Tzu: If you want riches, own a doormat.",
+      "format": "fake_attribution",
+      "source": "Lao Tzu",
+      "figure": "lao tzu"
     }
   ],
   "figures": [
@@ -149,6 +209,7 @@
     "confucius",
     "plato",
     "heraclitus",
-    "diogenes"
+    "diogenes",
+    "lao tzu"
   ]
 }

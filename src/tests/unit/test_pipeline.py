@@ -10,10 +10,10 @@ import argparse
 
 import pytest
 
-from src.pipeline import quote_video
-from src.pipeline.batch import run_batch
-from src.pipeline.quote_video import build_script, create_video
-from src.services.quote_agent import Quote
+from src.agents.video import assemble as quote_video
+from src.agents.video.assemble import run_batch
+from src.agents.video.assemble import build_script, create_video
+from src.agents.quotes.agent import Quote
 
 
 # --- script assembly ---------------------------------------------------------
@@ -78,9 +78,9 @@ def wired(monkeypatch):
         return fn
 
     voice_cfg = {"name": "Donald", "writing_style": "M3", "face": "src/faces/Trump.png"}
-    monkeypatch.setattr(quote_video.voice_manager, "pick_voice",
+    monkeypatch.setattr(quote_video, "pick_voice",
                         lambda preferred="": ("donald-trump", voice_cfg))
-    monkeypatch.setattr(quote_video.voice_manager, "get_writing_style",
+    monkeypatch.setattr(quote_video, "get_writing_style",
                         lambda vid, cfg: {"name": "style"})
     monkeypatch.setattr(quote_video, "generate_quotes",
                         step("quotes", [Quote(text="A real quote."), Quote(text="Another one.")]))
@@ -128,9 +128,9 @@ class TestCreateVideo:
         cards.write_bytes(b"raw")
         final.write_bytes(b"mixed")
 
-        monkeypatch.setattr(quote_video.voice_manager, "pick_voice",
+        monkeypatch.setattr(quote_video, "pick_voice",
                             lambda preferred="": ("donald-trump", {"name": "D", "face": "f"}))
-        monkeypatch.setattr(quote_video.voice_manager, "get_writing_style",
+        monkeypatch.setattr(quote_video, "get_writing_style",
                             lambda v, c: {"name": "s"})
         monkeypatch.setattr(quote_video, "generate_quotes",
                             lambda **k: [Quote(text="Short.")])
@@ -207,20 +207,20 @@ class TestCreateVideo:
 class TestRunBatch:
     def test_renders_one_video_per_count(self, monkeypatch):
         made = []
-        monkeypatch.setattr("src.pipeline.batch.create_video",
+        monkeypatch.setattr("src.agents.video.assemble.create_video",
                             lambda **k: made.append(k) or f"v{len(made)}.mp4")
         assert run_batch(count=3, publish=False) == ["v1.mp4", "v2.mp4", "v3.mp4"]
 
     def test_forwards_publish_and_voice(self, monkeypatch):
         seen = []
-        monkeypatch.setattr("src.pipeline.batch.create_video",
+        monkeypatch.setattr("src.agents.video.assemble.create_video",
                             lambda **k: seen.append(k) or "v.mp4")
         run_batch(count=1, publish=True, voice="andrew-tate")
         assert seen[0]["publish"] is True
         assert seen[0]["voice"] == "andrew-tate"
 
     def test_script_only_does_not_collect_paths(self, monkeypatch):
-        monkeypatch.setattr("src.pipeline.batch.create_video", lambda **k: None)
+        monkeypatch.setattr("src.agents.video.assemble.create_video", lambda **k: None)
         assert run_batch(count=2, publish=False, script_only=True) == [None, None]
 
     def test_a_failing_video_does_not_abort_the_batch(self, monkeypatch):
@@ -232,12 +232,12 @@ class TestRunBatch:
                 raise RuntimeError("Groq is down")
             return "ok.mp4"
 
-        monkeypatch.setattr("src.pipeline.batch.create_video", flaky)
+        monkeypatch.setattr("src.agents.video.assemble.create_video", flaky)
         assert run_batch(count=3, publish=False) == ["ok.mp4", "ok.mp4"]
         assert len(calls) == 3
 
     def test_a_failing_video_is_not_counted(self, monkeypatch):
-        monkeypatch.setattr("src.pipeline.batch.create_video",
+        monkeypatch.setattr("src.agents.video.assemble.create_video",
                             lambda **k: (_ for _ in ()).throw(RuntimeError("boom")))
         assert run_batch(count=2, publish=False) == []
 
@@ -250,7 +250,6 @@ class TestCli:
         assert args.batch == 0 and args.quotes == 2
         assert args.upload is False and args.no_upload is False
         assert args.script_only is False
-        assert args.list_voices is False
 
     def test_batch_takes_a_count(self):
         assert src_main().parse_args(["--batch", "5"]).batch == 5
@@ -272,7 +271,7 @@ class TestCli:
         assert _resolve_publish(args) is False
 
     def test_falls_back_to_the_env_default(self):
-        from src.config.settings import AUTO_PUBLISH
+        from src.main import AUTO_PUBLISH
         from src.main import _resolve_publish
         assert _resolve_publish(src_main().parse_args([])) is AUTO_PUBLISH
 

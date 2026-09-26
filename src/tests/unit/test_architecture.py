@@ -16,7 +16,7 @@ import ast
 import re
 from pathlib import Path
 
-from src.config import voices
+from src.agents.voice_cast import voices
 
 # src/tests/unit/test_architecture.py -> repo root
 ROOT = Path(__file__).resolve().parents[3]
@@ -51,26 +51,30 @@ RETIRED = {
 # deleted: the quote card uses the speaker's own photo, so nothing on the render
 # path needs stock imagery or a local model. See MUST_STAY_REMOVED.
 MUST_SURVIVE = [
-    "src/services/quote_agent.py",
-    "src/services/quote_card.py",
-    "src/services/music.py",
-    "src/services/video_assembler.py",
-    "src/services/captions.py",
-    "src/services/tts.py",
-    "src/services/tts_dsp.py",
-    "src/services/tts_text.py",
-    "src/services/voice_manager.py",
-    "src/services/youtube_upload.py",
-    "src/services/llm.py",
-    "src/config/quote_prompt.py",
-    "src/config/voices.py",
-    "src/config/settings.py",
-    "src/config/prompt.py",
-    "src/config/writing_styles.py",
-    "src/pipeline/quote_video.py",
-    "src/pipeline/batch.py",
-    "src/utils/file_helpers.py",
-    "src/utils/text_helpers.py",
+    "src/agents/quotes/agent.py",
+    "src/agents/quotes/prompt.py",
+    "src/agents/quotes/json_parse.py",
+    "src/agents/visuals/card.py",
+    "src/agents/visuals/mux.py",
+    "src/agents/soundtrack/music.py",
+    "src/agents/voiceover/engine.py",
+    "src/agents/voiceover/dsp.py",
+    "src/agents/voiceover/normalize.py",
+    "src/agents/voiceover/timing.py",
+    "src/agents/voice_cast/agent.py",
+    "src/agents/voice_cast/voices.py",
+    "src/agents/voice_cast/writing_styles.py",
+    "src/agents/publish/youtube.py",
+    "src/agents/publish/prompts.py",
+    "src/agents/completion/llm.py",
+    "src/agents/video/assemble.py",
+    "src/agents/video/artifacts.py",
+    "src/agents/visuals/layout.py",
+    "src/agents/voiceover/pauses.py",
+    "src/agents/voiceover/models.py",
+    "src/agents/voiceover/workers.py",
+    "src/agents/publish/metadata.py",
+    "src/main.py",
     "src/experiments/voice_tests/voice_test_utils.py",
 ]
 
@@ -79,6 +83,11 @@ MUST_SURVIVE = [
 # the image-search stack and the manual voice-clone scripts have no place in
 # this repo and should not creep back in.
 MUST_STAY_REMOVED = [
+    "src/config",
+    "src/services",
+    "src/shared",
+    "src/utils",
+    "src/pipeline",
     "src/services/asset_fetcher.py",
     "src/services/query_agent.py",
     "src/services/asset_agent",
@@ -188,7 +197,7 @@ def test_speaker_faces_exist():
 
 def test_every_enabled_voice_has_a_face_and_authors():
     """A voice without a face or a fake author cannot produce a card."""
-    from src.config.voices import get_enabled_voices
+    from src.agents.voice_cast.voices import get_enabled_voices
 
     for voice_id, voice in get_enabled_voices():
         face = voice.get("face")
@@ -196,6 +205,77 @@ def test_every_enabled_voice_has_a_face_and_authors():
         assert (ROOT / face).is_file(), f"voice {voice_id!r} face not on disk: {face}"
         assert voice.get("quote_authors"), \
             f"enabled voice {voice_id!r} has no fake quote authors to credit"
+
+
+# Directories under src/ that are not part of the code layout. `faces`, `music`
+# and `state` are runtime data; `tests` and `experiments` are separate trees.
+DATA_DIRS = {"faces", "music", "state", "tests", "experiments", "__pycache__"}
+ALLOWED_DIRS = DATA_DIRS | {"agents"}
+
+
+def test_no_directory_pileup_at_the_src_root():
+    """The layout is agents/ + flat modules. Every extra layer has to be earned.
+
+    A config/, services/ or shared/ layer used to exist to hold values and
+    helpers that each had exactly one caller. Colocating them with their caller
+    is why those are gone; this pins the shape so they cannot quietly return.
+    """
+    found = {p.name for p in SRC.iterdir() if p.is_dir()} - DATA_DIRS
+    assert found == {"agents"}, \
+        f"src/ should hold only agents/ plus flat modules, found extra: {sorted(found)}"
+
+    # The agent packages themselves stay flat: task folder + its modules only.
+    for folder in (SRC / "agents").iterdir():
+        if not folder.is_dir() or folder.name == "__pycache__":
+            continue
+        nested = [p.name for p in folder.iterdir() if p.is_dir() and p.name != "__pycache__"]
+        assert not nested, f"agents/{folder.name}/ should be flat, found subdirs: {nested}"
+
+    # No package-per-concern: these are modules, not directories.
+    for name in ("config", "services", "shared", "utils", "pipeline"):
+        assert not (SRC / name).is_dir(), f"src/{name}/ is not a layer any more"
+
+    # And the flat layer at the root is an explicit, small set. A new module
+    # here is a new layer, so it has to be added here on purpose.
+    allowed = {"__init__.py", "main.py"}
+    modules = {p.name for p in SRC.glob("*.py")} - allowed
+    assert not modules, f"unexpected modules at the src root: {sorted(modules)}"
+
+
+def test_every_agent_is_a_documented_self_contained_task():
+    """One folder per task, and the folder is the only public door.
+
+    A folder per task, an __init__ that re-exports the entry point behind a
+    one-line docstring, and nothing importing another agent's internals.
+    """
+    agents = SRC / "agents"
+    folders = sorted(p for p in agents.iterdir() if p.is_dir() and p.name != "__pycache__")
+    assert folders, "src/agents/ has no agent folders"
+
+    for folder in folders:
+        init = folder / "__init__.py"
+        assert init.is_file(), f"{folder.name} has no __init__.py to export its task"
+
+        doc = ast.get_docstring(ast.parse(init.read_text(encoding="utf-8"))) or ""
+        assert doc, f"{folder.name}/__init__.py needs a one-line docstring"
+        assert len(doc.splitlines()) == 1, \
+            f"{folder.name}/__init__.py docstring should be one line, got {len(doc.splitlines())}"
+
+        # The package must actually export its entry point, and every name it
+        # advertises must resolve -- an __all__ naming a missing symbol would
+        # otherwise pass a non-empty check while breaking every caller.
+        module = __import__(f"src.agents.{folder.name}", fromlist=["x"])
+        exported = list(getattr(module, "__all__", []))
+        assert exported, f"{folder.name}/__init__.py re-exports nothing"
+        missing = [n for n in exported if not hasattr(module, n)]
+        assert not missing, \
+            f"{folder.name}/__init__.py advertises names it does not define: {missing}"
+
+    # Naming: the folder is the task, so it should not be named after a
+    # technology. "provider" / "util" / "helper" describe a mechanism, not a task.
+    banned = {"providers", "utils", "helpers", "common", "misc", "lib"}
+    assert not ({f.name for f in folders} & banned), \
+        "agent folders are named after tasks, not mechanisms"
 
 
 def test_stock_image_search_is_off_the_render_path():
@@ -206,16 +286,16 @@ def test_stock_image_search_is_off_the_render_path():
     behind the narration. The card renders the speaker's own photo instead, so
     the fetch step must not creep back into the pipeline.
     """
-    pipeline_src = (SRC / "pipeline" / "quote_video.py").read_text(encoding="utf-8")
+    pipeline_src = (SRC / "agents" / "video" / "assemble.py").read_text(encoding="utf-8")
     for banned in ("fetch_assets", "asset_fetcher", "query_agent", "asset_agent"):
         assert banned not in pipeline_src, \
             f"{banned} is back on the quote render path; cards use the speaker photo"
 
     # And the card renderer itself must not reach for a search either.
-    card_src = (SRC / "services" / "quote_card.py").read_text(encoding="utf-8")
+    card_src = (SRC / "agents" / "visuals" / "card.py").read_text(encoding="utf-8")
     for banned in ("fetch_assets", "asset_fetcher", "query_agent", "requests", "urllib"):
         assert banned not in card_src, \
-            f"quote_card must render from the local face image, not {banned}"
+            f"the card agent must render from the local face image, not {banned}"
 
 
 def test_experiments_are_kept_under_one_directory():
@@ -241,9 +321,13 @@ def test_experiments_are_kept_under_one_directory():
             f"{vid} ref_audio must live under src/experiments/: {cfg['ref_audio']}"
 
     # And nothing on the render path may import from the experiments tree.
-    for path in list((SRC / "services").rglob("*.py")) + list((SRC / "pipeline").rglob("*.py")):
-        assert "experiments" not in path.read_text(encoding="utf-8"), \
-            f"{path.name} must not reach into src/experiments/"
+    # Checked against real imports, not raw text: a docstring may legitimately
+    # mention src/experiments/ when explaining where something came from.
+    for path in sorted(SRC.rglob("*.py")):
+        if "__pycache__" in path.parts or "experiments" in path.parts:
+            continue
+        bad = [n for n in _imported_names(path) if n.split(".")[1:2] == ["experiments"]]
+        assert not bad, f"{path.name} must not reach into src/experiments/: {bad}"
 
 
 def test_retired_subsystems_are_actually_gone():
@@ -270,7 +354,7 @@ def test_surviving_modules_do_not_import_retired_subsystems():
     """The extraction is complete.
 
     The shared helpers live in src/services/local_llm.py,
-    src/utils/text_helpers.py and src/config/asset_prompts.py, so nothing may
+    src/shared/text.py and src/config/asset_prompts.py, so nothing may
     reach into the deleted tree.
     """
     violations: dict[str, set[str]] = {}
@@ -280,8 +364,7 @@ def test_surviving_modules_do_not_import_retired_subsystems():
         for name in _imported_names(path):
             for retired in RETIRED:
                 # Match the retired name anywhere in a dotted path, so both
-                # `from src.services.script_lab.llm import _local` and
-                # `from src.services import script_lab` are caught.
+                # both `from x.y.z import _local` and `from x.y import z` are caught.
                 if retired in name.split("."):
                     violations.setdefault(rel, set()).add(name)
     assert not violations, "retired imports still present: " + repr(violations)
@@ -304,15 +387,15 @@ def test_quote_state_stays_inside_src():
     Root-level state files are not in scope for this project, and a pool at the
     repo root would also be wiped by the temp cleanup.
     """
-    from src.services.quote_agent import STATE_FILE
+    from src.agents.quotes.agent import STATE_FILE
 
     assert STATE_FILE.startswith("src/"), STATE_FILE
 
 
 def test_quote_agent_is_groq_only():
     """The quote path must not be able to fall back to another provider."""
-    from src.services.quote_agent import generate_quotes
-    from src.services import llm
+    from src.agents.quotes.agent import generate_quotes
+    from src.agents.completion import llm
 
     source = _source_of(generate_quotes)
     assert "allow_fallback=False" in source, \

@@ -16,9 +16,9 @@ from pathlib import Path
 # Make project root importable regardless of cwd (this script lives in src/experiments/voices_to_clone/).
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from src.config.voices import get_all_voices, get_voice
-from src.config.writing_styles import get_style
-from src.services.tts import generate_audio
+from src.agents.voice_cast import get_all_voices, get_voice
+from src.agents.voice_cast import get_style
+from src.agents.voiceover import generate_audio
 
 
 def list_voices():

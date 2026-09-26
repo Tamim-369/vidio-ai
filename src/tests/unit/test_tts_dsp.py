@@ -9,7 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.services import tts_dsp
+from src.agents.voiceover import dsp as tts_dsp
+from src.agents.voiceover import dsp, pauses, timing
 
 SR = 24000
 
@@ -33,16 +34,16 @@ class TestPunctuationDetection:
         ("word\u2014", "\u2014"),   # em dash
     ])
     def test_trailing_punctuation_is_found(self, token, expected):
-        assert tts_dsp._trailing_punct(token) == expected
+        assert pauses._trailing_punct(token) == expected
 
     @pytest.mark.parametrize("token", ['"Total."', "'war,'", "\u201dDone!\u201d"])
     def test_trailing_quotes_are_stripped_before_detection(self, token):
-        assert tts_dsp._trailing_punct(token) in (".", ",", "!")
+        assert pauses._trailing_punct(token) in (".", ",", "!")
 
     @pytest.mark.parametrize("token", ["word", "", "12.5", "3,000"])
     def test_no_punctuation_returns_none(self, token):
         # Decimal/range numbers must not be mistaken for sentence punctuation.
-        assert tts_dsp._trailing_punct(token) is None
+        assert pauses._trailing_punct(token) is None
 
 
 class TestSilenceGapDetection:
@@ -112,7 +113,7 @@ class TestTimeStretch:
 
 class TestPacing:
     def test_wps_band_settings_are_sane(self):
-        from src.config.settings import TTS_MAX_WPS, TTS_MIN_WPS
+        from src.agents.voiceover.dsp import TTS_MAX_WPS, TTS_MIN_WPS
         assert 0 < TTS_MIN_WPS < TTS_MAX_WPS
 
     def test_too_fast_line_is_slowed(self):
@@ -160,12 +161,12 @@ class TestApplyRate:
         return (0.5 * np.sin(2 * np.pi * freq * t)).astype(np.float32), sr
 
     def test_default_rate_is_a_slight_slowdown(self):
-        from src.config.settings import TTS_RATE
+        from src.agents.voiceover.engine import TTS_RATE
 
         assert 0.85 < TTS_RATE < 1.0, TTS_RATE
 
     def test_slower_rate_lengthens_the_audio(self, monkeypatch):
-        from src.services import tts as tts_mod
+        from src.agents.voiceover import engine as tts_mod
 
         samples, sr = self._tone(1.0)
         monkeypatch.setattr(tts_mod, "TTS_RATE", 0.5)
@@ -173,7 +174,7 @@ class TestApplyRate:
         assert len(out) == pytest.approx(len(samples) * 2, rel=0.06)
 
     def test_rate_of_one_is_a_passthrough(self, monkeypatch):
-        from src.services import tts as tts_mod
+        from src.agents.voiceover import engine as tts_mod
 
         samples, sr = self._tone(0.2)
         monkeypatch.setattr(tts_mod, "TTS_RATE", 1.0)
@@ -181,7 +182,7 @@ class TestApplyRate:
 
     def test_pitch_is_preserved(self, monkeypatch):
         """atempo is a time-stretch, not a resample, so 220Hz stays 220Hz."""
-        from src.services import tts as tts_mod
+        from src.agents.voiceover import engine as tts_mod
 
         samples, sr = self._tone(1.0, 220.0)
         monkeypatch.setattr(tts_mod, "TTS_RATE", 0.5)
@@ -193,9 +194,54 @@ class TestApplyRate:
 
     def test_extreme_rates_are_chained_not_rejected(self, monkeypatch):
         """atempo only accepts 0.5-2.0, so slower rates chain factors."""
-        from src.services import tts as tts_mod
+        from src.agents.voiceover import engine as tts_mod
 
         samples, sr = self._tone(0.4)
         monkeypatch.setattr(tts_mod, "TTS_RATE", 0.25)
         out = tts_mod._apply_rate(samples, sr)
         assert len(out) == pytest.approx(len(samples) * 4, rel=0.15)
+
+
+class TestPauseAlignment:
+    """_enforce_pauses() must actually use waveform word alignment.
+
+    The aligner is imported inside the function and guarded by
+    `except Exception: times = None`, so a stale import path fails silently and
+    every line quietly falls back to char-proportional timing. That is exactly
+    what a module move once caused, so the path is asserted directly.
+    """
+
+    def test_aligner_is_imported_and_called(self, monkeypatch):
+        from src.agents.voiceover import dsp
+
+        called = []
+
+        def spy(audio, sr, text):
+            called.append(text)
+            return [(0.0, 0.4), (0.4, 0.8)]
+
+        monkeypatch.setattr(timing, "word_times_from_waveform", spy)
+        samples = _tone(0.9)
+        sr = SR
+        dsp._enforce_pauses(samples, sr, "one. two.")
+
+        assert called, ("word alignment was never used; the char-proportional "
+                        "fallback is silently taking over")
+
+    def test_pause_lands_after_the_sentence_not_mid_word(self, monkeypatch):
+        from src.agents.voiceover import dsp
+
+        # Two bursts with a real silence between them: the "." sits on that gap.
+        sr = 16000
+
+        def tone(dur, freq):
+            t = np.linspace(0, dur, int(sr * dur), endpoint=False)
+            return (0.3 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+
+        audio = np.concatenate([
+            tone(0.4, 180), np.zeros(int(sr * 0.25), dtype=np.float32), tone(0.4, 180),
+        ])
+        out = dsp._enforce_pauses(audio, sr, "one. two.")
+        # A 0.20s sentence pause on a 0.25s existing gap: the gap is trimmed
+        # toward target, so the result is shorter than the input, not longer.
+        assert len(out) < len(audio), "existing silence should be trimmed to target"

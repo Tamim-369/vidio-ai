@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.services.tts_text import _clean_text
+from src.agents.voiceover.normalize import _clean_text
 
 
 class TestWhitespace:

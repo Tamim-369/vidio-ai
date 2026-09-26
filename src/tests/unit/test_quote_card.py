@@ -12,10 +12,9 @@ import numpy as np
 import pytest
 from PIL import Image, ImageFont
 
-from src.config.voices import VOICES, get_voice, pick_quote_author
-from src.services import quote_card
-from src.services.quote_card import (
-    BYLINE_AREA_FRACTION,
+from src.agents.voice_cast.voices import VOICES, get_voice, pick_quote_author
+from src.agents.visuals import card as quote_card
+from src.agents.visuals.card import (
     BYLINE_LIFT,
     BYLINE_SQUARE_PAD,
     MARGIN_X,
@@ -23,11 +22,17 @@ from src.services.quote_card import (
     SOURCE_SIZE,
     QUOTE_BOTTOM,
     QUOTE_TOP,
-    _byline_square,
     _credit_labels,
+    _load_background,
+)
+from src.agents.visuals.layout import (
+    BYLINE_AREA_FRACTION,
+    FONT_PATH,
+    QUOTE_FONT_PATH,
+    _byline_square,
     _fit_byline,
     _fit_quote,
-    _load_background,
+    _font,
     _quote_font,
     _wrap,
 )
@@ -42,28 +47,28 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
 
 class TestWrap:
     def test_short_text_is_one_line(self):
-        font = ImageFont.truetype(quote_card.FONT_PATH, 60)
+        font = ImageFont.truetype(FONT_PATH, 60)
         assert _wrap("Short.", font, 800) == ["Short."]
 
     def test_wraps_on_words(self):
-        font = ImageFont.truetype(quote_card.FONT_PATH, 60)
+        font = ImageFont.truetype(FONT_PATH, 60)
         lines = _wrap("one two three four five six seven eight", font, 400)
         assert len(lines) > 1
         assert " ".join(lines).split() == "one two three four five six seven eight".split()
 
     def test_no_line_exceeds_the_box(self):
-        font = ImageFont.truetype(quote_card.FONT_PATH, 60)
+        font = ImageFont.truetype(FONT_PATH, 60)
         for line in _wrap("word " * 60, font, 500):
             assert font.getlength(line) <= 500
 
     def test_a_word_wider_than_the_box_is_hard_split(self):
-        font = ImageFont.truetype(quote_card.FONT_PATH, 90)
+        font = ImageFont.truetype(FONT_PATH, 90)
         lines = _wrap("X" * 400, font, 300)
         assert len(lines) > 1
         assert all(font.getlength(ln) <= 300 for ln in lines)
 
     def test_explicit_newlines_are_kept(self):
-        font = ImageFont.truetype(quote_card.FONT_PATH, 60)
+        font = ImageFont.truetype(FONT_PATH, 60)
         assert _wrap("one\ntwo", font, 800) == ["one", "two"]
 
 
@@ -201,7 +206,7 @@ class TestBackground:
 
 class TestPickQuoteAuthor:
     def test_every_enabled_voice_can_be_credited(self):
-        from src.config.voices import get_enabled_voices
+        from src.agents.voice_cast.voices import get_enabled_voices
 
         for voice_id, voice in get_enabled_voices():
             name, source = pick_quote_author(voice, "a quote")
@@ -447,12 +452,12 @@ class TestRenderCard:
 
     def test_credit_carries_a_dash_a_comma_and_no_quotes(self):
         """Dash and comma frame the author; the quotation marks are not here."""
-        from src.services.quote_card import _credit_labels
+        from src.agents.visuals.card import _credit_labels
 
         assert _credit_labels("Don Tzu", "Fart of War") == ("- Don Tzu,", "Fart of War")
 
     def test_no_real_author_or_title_is_quoted(self):
-        from src.services.quote_card import _credit_labels
+        from src.agents.visuals.card import _credit_labels
 
         for voice in VOICES.values():
             for author in voice.get("quote_authors", []):
@@ -463,18 +468,18 @@ class TestRenderCard:
                 assert '"' not in n and '"' not in b, (n, b)
 
     def test_missing_source_leaves_the_book_line_blank(self):
-        from src.services.quote_card import _credit_labels
+        from src.agents.visuals.card import _credit_labels
 
         assert _credit_labels("Don Tzu", "") == ("- Don Tzu,", "")
 
     def test_quote_is_the_only_quoted_text(self):
-        from src.services.quote_card import _quote_display
+        from src.agents.visuals.card import _quote_display
 
         assert _quote_display("Know thyself.") == '"Know thyself."'
 
     def test_quotes_are_display_only_and_never_reach_the_stored_quote(self):
         """TTS must speak bare text, and the 30-80 budget counts words not marks."""
-        from src.services.quote_card import _quote_display
+        from src.agents.visuals.card import _quote_display
 
         stored = "x" * 80
         assert len(stored) == 80
@@ -547,8 +552,8 @@ def test_all_voice_faces_are_9x16_enough():
 class TestFontSelection:
     def test_uses_the_repo_font_when_present(self):
         """Fonts/ is the intended typeface, and it is what ships on this box."""
-        from src.config.settings import QUOTE_FONT_PATH
-        from src.services.quote_card import _quote_font
+        from src.agents.visuals.layout import QUOTE_FONT_PATH
+        from src.agents.visuals.layout import _quote_font
 
         if not os.path.isfile(os.path.join(ROOT, QUOTE_FONT_PATH)):
             pytest.skip("Fonts/ is not present in this checkout")
@@ -557,15 +562,15 @@ class TestFontSelection:
 
     def test_falls_back_when_the_font_is_missing(self, monkeypatch):
         """Fonts/ is untracked, so a fresh clone must still render."""
-        from src.config.settings import FONT_PATH
-        from src.services.quote_card import _font
+        from src.agents.visuals.layout import FONT_PATH
+        from src.agents.visuals.layout import _font
 
         font = _font("Fonts/does_not_exist/Nope.ttf", 48)
         assert font.path == FONT_PATH
         assert font.size == 48
 
     def test_credit_uses_the_same_face_for_both_lines(self):
-        from src.services.quote_card import _fit_byline
+        from src.agents.visuals.layout import _fit_byline
 
         w = int(_byline_square(SIZE)[2] * (1 - 2 * BYLINE_SQUARE_PAD))
         name = _fit_byline("Book of Gainz", w, 54, SIZE)
@@ -621,7 +626,7 @@ class TestPacing:
         either half regressed, the video would either end in dead quiet or keep
         talking over the outro.
         """
-        from src.services.music import build_filter
+        from src.agents.soundtrack.music import build_filter
 
         speech_s = 1.0
         total = speech_s + quote_card.QUOTE_END_TAIL_S
@@ -754,7 +759,7 @@ class TestPinnedCredits:
         return str(path)
 
     def test_line_attribution_overrides_the_hash(self, tmp_path, monkeypatch):
-        from src.services.quote_card import _byline_square
+        from src.agents.visuals.layout import _byline_square
 
         monkeypatch.setattr(quote_card, "TEMP_DIR", str(tmp_path))
         monkeypatch.setattr(quote_card, "output_path",

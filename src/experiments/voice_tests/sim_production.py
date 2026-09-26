@@ -98,7 +98,7 @@ def _validate(wav: np.ndarray, sr: int) -> dict:
 
 def _reuse_or_render(lines, voice, voice_dir):
     """Respire previously rendered lines (no model re-run) -> (to_render, reused)."""
-    from src.services.tts import _generate_chatterbox
+    from src.agents.voiceover import _generate_chatterbox
     to_render, reused = [], []
     for ln in lines:
         wav_path = voice_dir / f"{ln['id']}.wav"
@@ -132,8 +132,8 @@ def main() -> None:
     # Apply the worker cap BEFORE importing the pipeline so the env var the
     # settings module snapshots at import time matches what the user asked for.
     os.environ["TTS_WORKERS"] = str(args.workers)
-    from src.config.voices import get_voice
-    from src.services.tts import _generate_chatterbox
+    from src.agents.voice_cast import get_voice
+    from src.agents.voiceover import _generate_chatterbox
 
     SIM_DIR.mkdir(parents=True, exist_ok=True)
 

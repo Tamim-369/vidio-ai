@@ -10,8 +10,8 @@ import json
 
 import pytest
 
-from src.services import quote_agent
-from src.services.quote_agent import Quote, _Pool, generate_quotes
+from src.agents.quotes import agent as quote_agent
+from src.agents.quotes.agent import Quote, _Pool, generate_quotes
 
 
 @pytest.fixture
@@ -130,7 +130,7 @@ class TestRejectReason:
     def test_the_prompt_states_both_bounds(self):
         # Without the numbers in the prompt the model keeps writing 150-char
         # jokes (or 12-char one-liners) that get thrown away, starving the batch.
-        from src.services.quote_agent import _build_messages
+        from src.agents.quotes.agent import _build_messages
 
         content = _build_messages([], _Pool(), 2)[0]["content"]
         assert "between 30 and 80 characters" in content

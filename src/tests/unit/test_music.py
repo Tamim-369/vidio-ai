@@ -13,8 +13,8 @@ import subprocess
 
 import pytest
 
-from src.services import music
-from src.config.settings import MUSIC_PATH, MUSIC_SKIP_S
+from src.agents.soundtrack import music
+from src.agents.soundtrack.music import MUSIC_PATH, MUSIC_SKIP_S
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -110,7 +110,7 @@ class TestBuildFilter:
     def test_the_bed_target_is_audible_under_the_voice(self):
         # Chatterbox narration sits near -18 dB mean. The bed must land in the
         # clearly-audible-but-under range, or it vanishes in the mix.
-        from src.config.settings import MUSIC_GAIN_DB, MUSIC_TARGET_LUFS
+        from src.agents.soundtrack.music import MUSIC_GAIN_DB, MUSIC_TARGET_LUFS
 
         assert -27 <= MUSIC_TARGET_LUFS <= -20, \
             f"bed target {MUSIC_TARGET_LUFS} LUFS is not audible-under-voice"

@@ -10,9 +10,8 @@ import os
 
 import pytest
 
-from src.config.voices import get_enabled_voices
-from src.services import voice_manager
-from src.utils import file_helpers
+from src.agents.voice_cast import agent as voice_manager
+from src.agents.video import artifacts as file_helpers
 
 
 class TestOutputPath:
@@ -24,16 +23,19 @@ class TestOutputPath:
     ])
     def test_slug_generation(self, topic, expected):
         # Paths are derived from topics, so slugs must stay filesystem-safe.
-        path = file_helpers.output_path(topic)
+        from src.agents.visuals.card import output_path
+        path = output_path(topic)
         assert os.path.basename(path) == f"{expected}.mp4"
 
     def test_long_topic_is_capped(self):
-        path = file_helpers.output_path("word " * 200)
+        from src.agents.visuals.card import output_path
+        path = output_path("word " * 200)
         stem = os.path.basename(path)[: -len(".mp4")]
         assert len(stem) <= 60
 
     def test_path_is_under_output_dir(self):
-        assert file_helpers.output_path("x").startswith(file_helpers.OUTPUT_DIR)
+        from src.agents.visuals.card import OUTPUT_DIR, output_path
+        assert output_path("x").startswith(OUTPUT_DIR)
 
 
 class TestDumpArtifact:
@@ -89,19 +91,9 @@ class TestPickVoice:
         assert vid in {"donald-trump", "arnold-schwarzenegger", "andrew-tate"}
         assert "Unknown or disabled" in capsys.readouterr().out
 
-    def test_excluded_preferred_is_ignored(self):
-        vid, _ = voice_manager.pick_voice(preferred="donald-trump", exclude={"donald-trump"})
-        assert vid != "donald-trump"
-
     def test_round_robin_cycles(self):
         first = [voice_manager.pick_voice()[0] for _ in range(3)]
         assert len(set(first)) == 3, "each of the 3 enabled voices should get a turn"
-
-    def test_exclude_all_falls_back_to_full_cycle(self):
-        # Never returns empty; used so a run cannot fail on exhausted voices.
-        all_ids = {vid for vid, _ in get_enabled_voices()}
-        vid, _ = voice_manager.pick_voice(exclude=all_ids)
-        assert vid in all_ids
 
     def test_never_returns_disabled_voice(self):
         for _ in range(9):

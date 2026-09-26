@@ -1,4 +1,4 @@
-"""Characterization tests for the word-timing model in src/services/captions.py.
+"""Characterization tests for the word-timing model in src/agents/voiceover/timing.py.
 
 The quote card shows a whole line at once, so there are no subtitles any more.
 Word timing survives because tts_dsp._enforce_pauses() uses it to place pauses
@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.services import captions
+from src.agents.voiceover import timing as captions
 
 SR = 24000
 
