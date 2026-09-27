@@ -7,8 +7,10 @@ conditionals are cached next to the reference audio by content hash.
 
 import os
 
+# The Pocket-TTS narrator's exported voice state, generated once from a seed
+# clip and reused. Not tracked in git; only the disabled "narrator" voice needs
+# it. See _get_voice_state for what happens when it is absent.
 POCKET_VOICE_STATE = "voices/narrator.safetensors"
-POCKET_VOICE_REF = "src/experiments/voice_tests/chatterbox_ref.wav"
 
 # Chatterbox engine state (lazy, cached across lines)
 _chat_model = None
@@ -48,14 +50,14 @@ def _get_pocket_model():
 def _get_voice_state():
     global _voice_state
     if _voice_state is None:
-        from pocket_tts import export_model_state
+        if not os.path.exists(POCKET_VOICE_STATE):
+            raise FileNotFoundError(
+                f"{POCKET_VOICE_STATE} is missing. The legacy Pocket-TTS "
+                "narrator needs its voice state exported once from a seed clip "
+                "with pocket_tts, then reused. The three default voices all use "
+                "the chatterbox engine and never reach this.")
         model = _get_pocket_model()
-        if os.path.exists(POCKET_VOICE_STATE):
-            _voice_state = model.get_state_for_audio_prompt(POCKET_VOICE_STATE)
-        else:
-            _voice_state = model.get_state_for_audio_prompt(POCKET_VOICE_REF)
-            os.makedirs(os.path.dirname(POCKET_VOICE_STATE), exist_ok=True)
-            export_model_state(_voice_state, POCKET_VOICE_STATE)
+        _voice_state = model.get_state_for_audio_prompt(POCKET_VOICE_STATE)
     return _voice_state
 
 def _get_chatterbox_model():

@@ -16,10 +16,9 @@ scipy
 torch
 torchaudio
 
-# --- Local TTS models (src/experiments/voices_to_clone/, src/experiments/voice_tests/) ---
+# --- Local TTS models ---
 chatterbox-tts       # import chatterbox
 pocket-tts           # import pocket_tts
-# qwen-tts            # optional: only used by src/experiments/voice_tests/test_qwen_0.6b_base.py in its own .venv-qwen
 
 # --- HTTP (src/agents/completion/llm.py) ---
 # urllib3 arrives transitively via requests.

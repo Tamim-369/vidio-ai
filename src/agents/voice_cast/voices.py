@@ -13,8 +13,8 @@ Per entry:
                 book/work form: '"Don Tzu" | "Fart of War"'.
 - enabled       false keeps the voice registered but out of the shuffle
 
-To add one: drop a clean reference WAV under
-src/experiments/voices_to_clone/ and copy the template below.
+To add one: drop a clean reference WAV in src/assets/voice_refs/ and copy
+the template below.
 """
 
 VOICES = {
@@ -24,7 +24,7 @@ VOICES = {
     #     "short_name": "NewVoice",   # one token; fallback when pseudonym is unset
     #     "short_subject": "discipline",
     #     "engine": "chatterbox",
-    #     "ref_audio": "src/experiments/voices_to_clone/voice_candidates/myvoice_ref.wav",
+    #     "ref_audio": "src/assets/voice_refs/myvoice_ref.wav",
     #     "params": {"exaggeration": 0.5, "cfg_weight": 0.5, "temperature": 0.8},
     #     "writing_style": "narrator",
     #     "face": "src/faces/NewVoice.png",
@@ -38,7 +38,7 @@ VOICES = {
         "short_name": "Trump",
         "short_subject": "war",
         "engine": "chatterbox",
-        "ref_audio": "src/experiments/voices_to_clone/candidates/donald-trump/donald-trump_ref.wav",
+        "ref_audio": "src/assets/voice_refs/donald-trump_ref.wav",
         # Lower temp = stable speaker identity/emotion across lines; the script's
         # own "loud" lines still get a deterministic volume emphasis in TTS.
         # Reduced EQ boosts to prevent hiss fog; removed 6.5k boost entirely.
@@ -62,7 +62,7 @@ VOICES = {
         "short_name": "Arnold",
         "short_subject": "gains",
         "engine": "chatterbox",
-        "ref_audio": "src/experiments/voices_to_clone/candidates/arnold-schwarzenegger/arnold-schwarzenegger_ref.wav",
+        "ref_audio": "src/assets/voice_refs/arnold-schwarzenegger_ref.wav",
         # Measured sweeps (word-end pitch droop + identity drift on 24k ref):
         # final pick = exag 0.65 / cfg 0.9 / temp 0.55 with a 72s ref of 37 clean
         # vocals-stem segments. cfg 0.85–0.9 anchors identity through line ends;
@@ -88,7 +88,7 @@ VOICES = {
         "short_name": "Tate",
         "short_subject": "discipline",
         "engine": "chatterbox",
-        "ref_audio": "src/experiments/voices_to_clone/candidates/andrew-tate/andrew-tate_ref.wav",
+        "ref_audio": "src/assets/voice_refs/andrew-tate_ref.wav",
         # A/B selected: prime 103.5–114.0s (119Hz conversational register).
         # Mod-low temp keeps the aggro-but-composed take.
         "params": {"exaggeration": 0.65, "cfg_weight": 0.85, "temperature": 0.55, "gain": 1.02,

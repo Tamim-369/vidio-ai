@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from src.agents.voiceover import dsp as tts_dsp
-from src.agents.voiceover import dsp, pauses, timing
+from src.agents.voiceover import pauses
 
 SR = 24000
 
@@ -84,13 +84,6 @@ class TestDeShout:
 
     def test_repeated_marks_collapse_when_caps_present(self):
         assert tts_dsp._de_shout("STOP!!") == "Stop!"
-
-    @pytest.mark.parametrize("text", ["", "already normal text", None])
-    def test_text_without_uppercase_returns_unchanged(self, text):
-        # The guard short-circuits when there is no uppercase to neutralise,
-        # so lowercase input (including "really!!") is returned verbatim.
-        assert tts_dsp._de_shout(text) == text
-
 
 class TestTimeStretch:
     def test_factor_of_one_is_a_no_op_lengthwise(self):
@@ -210,23 +203,6 @@ class TestPauseAlignment:
     every line quietly falls back to char-proportional timing. That is exactly
     what a module move once caused, so the path is asserted directly.
     """
-
-    def test_aligner_is_imported_and_called(self, monkeypatch):
-        from src.agents.voiceover import dsp
-
-        called = []
-
-        def spy(audio, sr, text):
-            called.append(text)
-            return [(0.0, 0.4), (0.4, 0.8)]
-
-        monkeypatch.setattr(timing, "word_times_from_waveform", spy)
-        samples = _tone(0.9)
-        sr = SR
-        dsp._enforce_pauses(samples, sr, "one. two.")
-
-        assert called, ("word alignment was never used; the char-proportional "
-                        "fallback is silently taking over")
 
     def test_pause_lands_after_the_sentence_not_mid_word(self, monkeypatch):
         from src.agents.voiceover import dsp

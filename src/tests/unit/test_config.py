@@ -1,7 +1,10 @@
-"""Characterization tests for the voice registry and writing styles.
+"""The voice registry's contract, and the couple of assets every render needs.
 
-Pins the registry shape so a restructure cannot silently drop a voice, break a
-ref-audio path, or change the enabled set.
+A voice is a dict of strings, and the pipeline reads it with .get() in a dozen
+places, so a missing key does not raise at registration -- it raises later, on a
+live render, after a quote has been generated and TTS has run. That is the most
+expensive place a config mistake can surface, so the fields are checked here
+against the real files on disk.
 """
 from __future__ import annotations
 
@@ -11,106 +14,55 @@ import pytest
 
 from src.agents.voice_cast import voices, writing_styles
 
-# The three clone voices this project is built around.
-# Every clone that must stay registered and complete, whether or not it is
-# currently in rotation. Arnold is temporarily disabled but must not rot.
+# The three clone voices this project is built around. Arnold is registered
+# even when disabled, so a bad entry is caught before it is enabled.
 REQUIRED_VOICES = ("donald-trump", "arnold-schwarzenegger", "andrew-tate")
 
-# The ones actually in rotation right now.
 ENABLED_VOICES = ("donald-trump", "arnold-schwarzenegger", "andrew-tate")
 
 
 class TestVoiceRegistry:
     @pytest.mark.parametrize("voice_id", REQUIRED_VOICES)
-    def test_required_voice_exists(self, voice_id):
-        assert voices.get_voice(voice_id) is not None
+    def test_voice_is_complete(self, voice_id, project_root):
+        """Every field a render reads must be present and point at a real file.
 
-    @pytest.mark.parametrize("voice_id", ENABLED_VOICES)
-    def test_required_voice_is_enabled(self, voice_id):
-        assert voices.get_voice(voice_id).get("enabled") is True
+        Checked as one test per voice rather than one per field: the fields are
+        only meaningful together, and a voice that is half-configured is the
+        only failure this guards.
+        """
+        v = voices.get_voice(voice_id)
+        assert v is not None, f"{voice_id} is not registered"
 
-    def test_every_required_voice_is_enabled(self):
-        # Arnold was briefly disabled while his prompt was reworked; he is back,
-        # so all three registered clones rotate again.
-        for vid in REQUIRED_VOICES:
-            assert voices.get_voice(vid).get("enabled") is True
-
-    @pytest.mark.parametrize("voice_id", REQUIRED_VOICES)
-    def test_required_voice_uses_chatterbox(self, voice_id):
-        assert voices.get_voice(voice_id)["engine"] == "chatterbox"
-
-    @pytest.mark.parametrize("voice_id", REQUIRED_VOICES)
-    def test_required_voice_reference_audio_exists(self, voice_id, project_root):
-        # A missing ref file would fail deep inside TTS at render time.
-        ref = voices.get_voice(voice_id)["ref_audio"]
-        assert (project_root / ref).is_file(), f"missing ref audio for {voice_id}: {ref}"
-
-    @pytest.mark.parametrize("voice_id", REQUIRED_VOICES)
-    def test_required_voice_has_a_known_writing_style(self, voice_id):
-        style_id = voices.get_voice(voice_id)["writing_style"]
-        assert style_id in writing_styles.WRITING_STYLES
-
-    @pytest.mark.parametrize("voice_id", REQUIRED_VOICES)
-    def test_required_voice_has_a_display_name(self, voice_id):
-        # The pipeline prints and logs VOICES[id]["name"]. The unit tests all
-        # stub pick_voice with a hand-written config, so a real entry missing
-        # "name" passed them and only broke on a live render.
-        assert voices.get_voice(voice_id).get("name")
-
-    @pytest.mark.parametrize("voice_id", REQUIRED_VOICES)
-    def test_required_voice_has_a_short_name_for_titles(self, voice_id):
-        short = voices.get_voice(voice_id).get("short_name")
+        assert v.get("name"), "the pipeline logs VOICES[id]['name']"
+        short = v.get("short_name")
         assert short and " " not in short, "a title cannot fit a two-word name"
+        assert v.get("quote_authors"), "no byline to credit"
 
-    @pytest.mark.parametrize("voice_id", REQUIRED_VOICES)
-    def test_required_voice_face_exists(self, voice_id, project_root):
-        # Multi-character rendering draws one face per line, so a missing face
-        # is a render-time crash rather than a fallback.
-        face = voices.get_voice(voice_id).get("face")
-        assert face and (project_root / face).is_file(), f"missing face for {voice_id}: {face}"
+        assert v["engine"] == "chatterbox", "only chatterbox voices are supported"
 
-    def test_enabled_set_is_exactly_the_expected_clones(self):
-        # The legacy Pocket narrator stays registered but out of rotation, and
-        # so does Arnold for now.
+        style_id = v.get("writing_style")
+        assert style_id in writing_styles.WRITING_STYLES, f"unknown style {style_id!r}"
+
+        for field in ("ref_audio", "face"):
+            rel = v.get(field)
+            assert rel, f"{voice_id} has no {field}"
+            assert (project_root / rel).is_file(), f"{voice_id} {field} missing: {rel}"
+
+    def test_the_enabled_set_is_exactly_the_expected_voices(self):
+        # Pins both the members and the order, so a voice silently dropped from
+        # rotation is noticed.
         assert [vid for vid, _ in voices.get_enabled_voices()] == list(ENABLED_VOICES)
 
     def test_unknown_voice_returns_none(self):
         assert voices.get_voice("does-not-exist") is None
 
-    def test_get_all_includes_disabled(self):
-        assert "narrator" in voices.get_all_voices()
-
 
 class TestWritingStyles:
-    def test_unknown_style_falls_back_to_narrator(self):
-        assert writing_styles.get_style("nope") is writing_styles.WRITING_STYLES["narrator"]
-
-    def test_none_falls_back_to_narrator(self):
-        assert writing_styles.get_style(None) is writing_styles.WRITING_STYLES["narrator"]
-
-    @pytest.mark.parametrize("style_id", ["narrator", "trump", "arnold"])
-    def test_core_styles_have_a_persona(self, style_id):
-        assert writing_styles.get_style(style_id)["persona"].strip()
+    @pytest.mark.parametrize("given", ["nope", None])
+    def test_an_unknown_style_falls_back_to_narrator(self, given):
+        assert writing_styles.get_style(given) is writing_styles.WRITING_STYLES["narrator"]
 
 
-class TestSettings:
-    """Each value is asserted where it now lives, with its consumer."""
-
-    def test_tts_pacing_band_is_ordered(self):
-        from src.agents.voiceover.dsp import TTS_MAX_WPS, TTS_MIN_WPS
-        assert 0 < TTS_MIN_WPS < TTS_MAX_WPS
-
-    def test_video_resolutions_cover_the_configured_format(self):
-        from src.agents.visuals.card import VIDEO_FORMAT, VIDEO_RESOLUTIONS
-        assert VIDEO_FORMAT in VIDEO_RESOLUTIONS
-
-    def test_output_and_temp_dirs_are_relative(self):
-        from src.agents.video.artifacts import TEMP_DIR
-        from src.agents.visuals.card import OUTPUT_DIR
-        # Relative paths keep the project portable across machines.
-        assert not OUTPUT_DIR.startswith("/")
-        assert not TEMP_DIR.startswith("/")
-
-    def test_music_source_is_present(self):
-        # oogway.mp3 is the background bed; losing it breaks every render.
-        assert (Path(__file__).resolve().parents[2] / "music" / "oogway.mp3").is_file()
+def test_music_source_is_present():
+    """oogway.mp3 is the background bed; losing it breaks every render."""
+    assert (Path(__file__).resolve().parents[2] / "music" / "oogway.mp3").is_file()

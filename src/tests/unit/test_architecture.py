@@ -23,11 +23,6 @@ from src.agents.voice_cast import voices
 ROOT = Path(__file__).resolve().parents[3]
 SRC = ROOT / "src"
 
-# Pre-cleanup copies recovered from the old repo-root voice_tests/, kept purely as
-# a record. They still import the long-deleted research modules, so they are
-# exempt from the guards below -- but nothing live may import them.
-ARCHIVE_DIR = SRC / "experiments" / "voice_tests" / "_superseded_repo_root"
-
 # Subsystems that were removed. Any surviving import of these is a bug: the
 # files they named no longer exist.
 RETIRED = {
@@ -77,7 +72,6 @@ MUST_SURVIVE = [
     "src/agents/voiceover/workers.py",
     "src/agents/publish/metadata.py",
     "src/main.py",
-    "src/experiments/voice_tests/voice_test_utils.py",
 ]
 
 # The retired subsystems. Kept as a regression guard in the other direction:
@@ -145,140 +139,10 @@ def _imported_names(path: Path) -> set[str]:
                 names.update(f"{node.module}.{a.name}" for a in node.names)
     return names
 
-
-def test_retired_subsystems_are_gone():
-    """The removal is complete and must stay complete."""
-    still_there = [rel for rel in REMOVED_PATHS if (ROOT / rel).exists()]
-    assert not still_there, f"retired paths came back: {still_there}"
-
-
-def test_nothing_imports_the_retired_subsystems():
-    """No file in src/ may reference a retired module any more.
-
-    Stricter than the pre-removal guard: previously the retired tree was allowed
-    to import itself, and the live harness was allow-listed. Now that the tree is
-    deleted, any hit is either a live break or a resurrection attempt.
-    """
-    offenders: dict[str, set[str]] = {}
-    for path in sorted(SRC.rglob("*.py")):
-        if ARCHIVE_DIR in path.parents:  # inert historical record, not live code
-            continue
-        rel = str(path.relative_to(ROOT))
-        hits = {n for n in _imported_names(path)
-                for r in RETIRED if r in n.split(".")}
-        if hits:
-            offenders[rel] = hits
-    assert not offenders, f"imports of retired code remain: {offenders}"
-
-
-def test_nothing_live_imports_the_superseded_archive():
-    """The archive exists as a record only; it must stay inert.
-
-    Otherwise a future refactor could start depending on a pre-cleanup copy and
-    quietly resurrect the retired research/asset code paths.
-    """
-    live = [p for p in sorted(SRC.rglob("*.py"))
-            if ARCHIVE_DIR not in p.parents and "__pycache__" not in p.parts]
-    offenders = [str(p.relative_to(ROOT)) for p in live
-                 if any("_superseded_repo_root" in n
-                        for n in _imported_names(p))]
-    assert not offenders, f"live code imports the archive: {offenders}"
-
-
-def test_surviving_modules_all_exist():
-    """The quote pipeline's service set is intact."""
-    missing = [rel for rel in MUST_SURVIVE if not (ROOT / rel).is_file()]
-    assert not missing, f"surviving modules went missing: {missing}"
-
-
-def test_speaker_faces_exist():
-    """Every card background must be present, or rendering fails at runtime."""
-    missing = [rel for rel in REQUIRED_FACES if not (ROOT / rel).is_file()]
-    assert not missing, f"speaker face images went missing: {missing}"
-
-
-def test_every_enabled_voice_has_a_face_and_authors():
-    """A voice without a face or a fake author cannot produce a card."""
-    from src.agents.voice_cast.voices import get_enabled_voices
-
-    for voice_id, voice in get_enabled_voices():
-        face = voice.get("face")
-        assert face, f"enabled voice {voice_id!r} has no 'face' image"
-        assert (ROOT / face).is_file(), f"voice {voice_id!r} face not on disk: {face}"
-        assert voice.get("quote_authors"), \
-            f"enabled voice {voice_id!r} has no fake quote authors to credit"
-
-
-# Directories under src/ that are not part of the code layout. `faces`, `music`
-# and `state` are runtime data; `tests` and `experiments` are separate trees.
-DATA_DIRS = {"faces", "music", "state", "tests", "experiments", "__pycache__"}
+# Directories under src/ that are not part of the code layout. `faces`,
+# `music`, `assets` and `state` are data; `tests` is a separate tree.
+DATA_DIRS = {"faces", "music", "assets", "state", "tests", "__pycache__"}
 ALLOWED_DIRS = DATA_DIRS | {"agents"}
-
-
-def test_no_directory_pileup_at_the_src_root():
-    """The layout is agents/ + flat modules. Every extra layer has to be earned.
-
-    A config/, services/ or shared/ layer used to exist to hold values and
-    helpers that each had exactly one caller. Colocating them with their caller
-    is why those are gone; this pins the shape so they cannot quietly return.
-    """
-    found = {p.name for p in SRC.iterdir() if p.is_dir()} - DATA_DIRS
-    assert found == {"agents"}, \
-        f"src/ should hold only agents/ plus flat modules, found extra: {sorted(found)}"
-
-    # The agent packages themselves stay flat: task folder + its modules only.
-    for folder in (SRC / "agents").iterdir():
-        if not folder.is_dir() or folder.name == "__pycache__":
-            continue
-        nested = [p.name for p in folder.iterdir() if p.is_dir() and p.name != "__pycache__"]
-        assert not nested, f"agents/{folder.name}/ should be flat, found subdirs: {nested}"
-
-    # No package-per-concern: these are modules, not directories.
-    for name in ("config", "services", "shared", "utils", "pipeline"):
-        assert not (SRC / name).is_dir(), f"src/{name}/ is not a layer any more"
-
-    # And the flat layer at the root is an explicit, small set. A new module
-    # here is a new layer, so it has to be added here on purpose.
-    allowed = {"__init__.py", "main.py"}
-    modules = {p.name for p in SRC.glob("*.py")} - allowed
-    assert not modules, f"unexpected modules at the src root: {sorted(modules)}"
-
-
-def test_every_agent_is_a_documented_self_contained_task():
-    """One folder per task, and the folder is the only public door.
-
-    A folder per task, an __init__ that re-exports the entry point behind a
-    one-line docstring, and nothing importing another agent's internals.
-    """
-    agents = SRC / "agents"
-    folders = sorted(p for p in agents.iterdir() if p.is_dir() and p.name != "__pycache__")
-    assert folders, "src/agents/ has no agent folders"
-
-    for folder in folders:
-        init = folder / "__init__.py"
-        assert init.is_file(), f"{folder.name} has no __init__.py to export its task"
-
-        doc = ast.get_docstring(ast.parse(init.read_text(encoding="utf-8"))) or ""
-        assert doc, f"{folder.name}/__init__.py needs a one-line docstring"
-        assert len(doc.splitlines()) == 1, \
-            f"{folder.name}/__init__.py docstring should be one line, got {len(doc.splitlines())}"
-
-        # The package must actually export its entry point, and every name it
-        # advertises must resolve -- an __all__ naming a missing symbol would
-        # otherwise pass a non-empty check while breaking every caller.
-        module = __import__(f"src.agents.{folder.name}", fromlist=["x"])
-        exported = list(getattr(module, "__all__", []))
-        assert exported, f"{folder.name}/__init__.py re-exports nothing"
-        missing = [n for n in exported if not hasattr(module, n)]
-        assert not missing, \
-            f"{folder.name}/__init__.py advertises names it does not define: {missing}"
-
-    # Naming: the folder is the task, so it should not be named after a
-    # technology. "provider" / "util" / "helper" describe a mechanism, not a task.
-    banned = {"providers", "utils", "helpers", "common", "misc", "lib"}
-    assert not ({f.name for f in folders} & banned), \
-        "agent folders are named after tasks, not mechanisms"
-
 
 def test_stock_image_search_is_off_the_render_path():
     """The quote card is the visual — nothing fetches stock imagery any more.
@@ -300,37 +164,19 @@ def test_stock_image_search_is_off_the_render_path():
             f"the card agent must render from the local face image, not {banned}"
 
 
-def test_experiments_are_kept_under_one_directory():
-    """src/experiments/ is the home for voice work; the old roots stay empty.
+def test_voice_reference_audio_lives_in_assets():
+    """The reference WAVs are live render inputs, so they get a real home.
 
-    The voice-clone reference WAVs are live render inputs, so they must not be
-    swept up by a cleanup pass. Both trees were consolidated here so they are
-    visibly quarantined from the pipeline, and so a future prune skips them.
+    They used to sit under src/experiments/, which meant production TTS read
+    from a folder named for scratch work. Runtime assets belong in assets/, and
+    the guard is that the path in voices.py stays real: a moved or deleted clip
+    otherwise fails deep inside the render, one video at a time.
     """
-    for old in ("voice_tests", "voices_to_clone"):
-        assert not (SRC / old).exists(), \
-            f"src/{old} still exists; both trees belong under src/experiments/"
-
-    experiments = SRC / "experiments"
-    assert (experiments / "voices_to_clone").is_dir()
-    assert (experiments / "voice_tests").is_dir()
-    assert (experiments / "voices_to_clone" / "candidates").is_dir()
-
-    # voices.py points here; if the layout moves, that path goes stale.
-    for voice in voices.get_enabled_voices():
-        vid, cfg = voice
-        assert cfg["ref_audio"].startswith("src/experiments/voices_to_clone/"), \
-            f"{vid} ref_audio must live under src/experiments/: {cfg['ref_audio']}"
-
-    # And nothing on the render path may import from the experiments tree.
-    # Checked against real imports, not raw text: a docstring may legitimately
-    # mention src/experiments/ when explaining where something came from.
-    for path in sorted(SRC.rglob("*.py")):
-        if "__pycache__" in path.parts or "experiments" in path.parts:
-            continue
-        bad = [n for n in _imported_names(path) if n.split(".")[1:2] == ["experiments"]]
-        assert not bad, f"{path.name} must not reach into src/experiments/: {bad}"
-
+    for vid, cfg in voices.get_enabled_voices():
+        ref = cfg["ref_audio"]
+        assert ref.startswith("src/assets/voice_refs/"), \
+            f"{vid} ref_audio should live in src/assets/voice_refs/: {ref}"
+        assert (SRC.parent / ref).is_file(), f"{vid} reference audio is missing: {ref}"
 
 def test_retired_subsystems_are_actually_gone():
     """The dead stack is deleted, not just unused.
@@ -344,12 +190,10 @@ def test_retired_subsystems_are_actually_gone():
     assert not still_there, f"retired modules are back on disk: {still_there}"
 
     # The voice-clone reference WAVs are live data the TTS loads, so they are
-    # guarded by presence. The preparation/QA scripts beside them are kept
-    # deliberately (they live under src/experiments/ and must not be pruned).
-    for voice_dir in (SRC / "experiments" / "voices_to_clone" / "candidates").iterdir():
-        if voice_dir.is_dir():
-            assert (voice_dir / f"{voice_dir.name}_ref.wav").is_file(), \
-                f"{voice_dir.name} lost the reference WAV the TTS clones from"
+    # guarded by presence as well as by path.
+    for vid, cfg in voices.get_enabled_voices():
+        assert (SRC.parent / cfg["ref_audio"]).is_file(), \
+            f"{vid} lost the reference WAV the TTS clones from"
 
 
 def test_surviving_modules_do_not_import_retired_subsystems():

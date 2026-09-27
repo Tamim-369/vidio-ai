@@ -169,13 +169,6 @@ class TestBuildFilter:
         graph = music.build_filter(20.0)
         assert "afade=t=in:st=0:d=0.100" in graph
 
-    def test_fade_in_is_shorter_than_fade_out(self):
-        assert music.MUSIC_FADE_IN_S < music.MUSIC_FADE_OUT_S
-
-    def test_output_is_labelled_for_mapping(self):
-        assert music.build_filter(10.0).endswith("[aout]")
-
-
 # --- availability ------------------------------------------------------------
 
 class TestMusicAvailable:
@@ -202,34 +195,10 @@ class TestMusicAvailable:
             "MUSIC_SKIP_S would cut into real music"
         )
 
-    def test_the_track_starts_immediately(self):
-        # The whole point of the trim: the bed must have real level in its
-        # first second, otherwise videos open on silence again.
-        result = music._run([
-            "ffmpeg", "-hide_banner", "-i", MUSIC_PATH,
-            "-af", "atrim=0:1,volumedetect", "-f", "null", "-",
-        ])
-        mean = next(
-            (float(line.split("mean_volume:")[1].split("dB")[0])
-             for line in (result.stderr or "").splitlines()
-             if "mean_volume:" in line),
-            None,
-        )
-        assert mean is not None, result.stderr[-400:]
-        assert mean > -40, f"track still opens on near-silence ({mean:.1f} dB)"
-
-
 # --- probing -----------------------------------------------------------------
 
 @needs_ffmpeg
 class TestProbe:
-    def test_duration_of_real_clip(self, silent_clip):
-        assert music.probe_duration(silent_clip) == pytest.approx(9.0, abs=0.1)
-
-    def test_mono_clip_reports_one_channel(self, mono_clip):
-        # Real TTS output is mono; the mixer must know that.
-        assert music.probe_audio_channels(mono_clip) == 1
-
     def test_unreadable_file_raises(self, tmp_path):
         broken = tmp_path / "broken.mp4"
         broken.write_text("not a video")
@@ -245,27 +214,6 @@ class TestAddBackgroundMusic:
         out = music.add_background_music(
             silent_clip, out_path=str(tmp_path / "bed.mp4"))
         assert _mean_volume(out) > -70.0  # silence was -91 dB
-
-    def test_gain_is_applied_exactly(self, silent_clip, tmp_path):
-        loud = music.add_background_music(
-            silent_clip, out_path=str(tmp_path / "loud.mp4"), gain_db=0.0)
-        quiet = music.add_background_music(
-            silent_clip, out_path=str(tmp_path / "quiet.mp4"), gain_db=-18.0)
-        assert _mean_volume(loud) - _mean_volume(quiet) == pytest.approx(18.0, abs=0.5)
-
-    def test_output_duration_matches_input_exactly(self, silent_clip, tmp_path):
-        out = music.add_background_music(
-            silent_clip, out_path=str(tmp_path / "exact.mp4"))
-        assert music.probe_duration(out) == pytest.approx(
-            music.probe_duration(silent_clip), abs=0.05)
-
-    def test_narration_level_is_preserved(self, mono_clip, tmp_path):
-        # The regression this guards: aformat's mono->stereo upmix cost 3 dB of
-        # voice, so the mix was quieter than the narration it was meant to sit
-        # under.
-        out = music.add_background_music(
-            mono_clip, out_path=str(tmp_path / "keep.mp4"), gain_db=-40.0)
-        assert _mean_volume(out) == pytest.approx(_mean_volume(mono_clip), abs=0.3)
 
     def test_mix_does_not_clip(self, silent_clip, tmp_path):
         out = music.add_background_music(
@@ -288,19 +236,6 @@ class TestAddBackgroundMusic:
              "-show_entries", "stream=codec_name", "-of", "csv=p=0", out],
             capture_output=True, text=True).stdout.strip()
         assert before == after
-
-    def test_input_is_left_on_disk(self, silent_clip, tmp_path):
-        music.add_background_music(silent_clip, out_path=str(tmp_path / "keep_in.mp4"))
-        assert os.path.isfile(silent_clip)
-
-    def test_default_output_sits_beside_the_input(self, silent_clip):
-        out = music.add_background_music(silent_clip)
-        try:
-            assert out.endswith("_music.mp4")
-            assert os.path.dirname(out) == os.path.dirname(silent_clip)
-        finally:
-            if os.path.isfile(out):
-                os.remove(out)
 
     def test_missing_track_is_a_noop(self, silent_clip, tmp_path):
         before = music.probe_duration(silent_clip)

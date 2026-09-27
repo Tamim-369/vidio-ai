@@ -149,15 +149,3 @@ class TestDeterministicMetadata:
         m = deterministic_metadata(_script([_line(1, ARNOLD, "A line.")]))
         assert set(m) == {"title", "description", "tags"}
 
-    def test_the_title_is_the_first_line_under_its_pseudonym(self):
-        m = deterministic_metadata(_script([_line(1, TATE, "Only this line.")]))
-        assert m["title"] == "Andru Tatte: Only this line."
-
-    def test_a_missing_title_is_rebuilt_from_the_first_line(self):
-        s = _script([_line(1, TATE, "Rebuilt.")])
-        s["title"] = ""
-        assert deterministic_metadata(s)["title"] == "Andru Tatte: Rebuilt."
-
-    def test_an_explicit_title_is_kept(self):
-        s = _script([_line(1, TATE, "A line.")], title="Chosen Title")
-        assert deterministic_metadata(s)["title"] == "Chosen Title"

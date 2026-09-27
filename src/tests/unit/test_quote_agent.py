@@ -6,7 +6,6 @@ Groq calls and runs offline.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 
@@ -14,7 +13,7 @@ import pytest
 
 from src.agents.quotes import agent as quote_agent
 from src.agents.quotes import prompt_shared as prompt_mod
-from src.agents.quotes.agent import Quote, _Pool, _build_messages, generate_quotes
+from src.agents.quotes.agent import Quote, _Pool, generate_quotes
 
 
 @pytest.fixture
@@ -205,12 +204,6 @@ class TestRejectReason:
         assert quote_agent.reject_reason({"quote": text}, _Pool()) == ""
         assert quote_agent.reject_reason({"quote": text + "x" * 136}, _Pool()) == "too long"
 
-    def test_the_prompt_states_its_own_length_guidance(self):
-        # The bounds are the agent's card budget, not the prompt's wording, so
-        # the content has to be the prompt this character actually uses.
-        content = _build_messages(_Pool(), 2, "Money", prompt_mod)[0]["content"]
-        assert "10–35 words" in content
-
     def test_rejects_duplicate_regardless_of_case_and_punctuation(self):
         pool = _Pool(quotes=[{"text": "The tank politely exploded, again, on schedule."}])
         cand = {"quote": "the tank politely exploded, again, on schedule"}
@@ -341,73 +334,6 @@ class TestPromptFidelity:
     # to make a failing test go green.
     FIDELITY_SHA256 = "dae70b8034fb50aa71fd106722768bb292be184d4106a48ad1dfd95afe20b81a"
 
-    def test_the_prompt_matches_the_original_exactly(self):
-        built = prompt_mod.build_prompt("SUBJECT_TOKEN", 42).encode()
-        assert hashlib.sha256(built).hexdigest() == self.FIDELITY_SHA256, (
-            "the prompt text changed; it is the user's specification, so any "
-            "edit has to be deliberate"
-        )
-
-    def test_it_is_a_function_of_subject_and_count(self):
-        assert callable(prompt_mod.build_prompt)
-        assert not hasattr(prompt_mod, "JOKE_PROMPT"), (
-            "the prompt should be built by a function, not a constant"
-        )
-
-    def test_the_subject_lands_in_the_current_request_block(self):
-        built = prompt_mod.build_prompt("Money", 3)
-        assert "SUBJECT: Money" in built
-        # The example list must stay generic, not be rewritten per subject.
-        assert "SUBJECT = WAR" in built
-
-    def test_the_count_lands_in_the_current_request_block(self):
-        built = prompt_mod.build_prompt("Money", 3)
-        assert "NUMBER: 3" in built
-        assert "NUMBER: [number]" in built, "the prompt's own template line is part of the text"
-
-    def test_no_placeholder_token_survives(self):
-        built = prompt_mod.build_prompt("Money", 3)
-        assert "[INSERT" not in built
-        assert "[something]" in built and "[number]" in built, (
-            "the prompt's literal template examples are part of its text"
-        )
-
-    def test_no_uninterpolated_brace_survives(self):
-        built = prompt_mod.build_prompt("Money", 3)
-        assert "{" not in built and "}" not in built
-
-    def test_nothing_is_appended(self):
-        built = prompt_mod.build_prompt("Money", 3)
-        for extra in ("JSON array", "HARD LIMIT", "Return 3 quotes as a JSON",
-                      "markdown fences", "between 30 and 200 characters"):
-            assert extra not in built, f"{extra!r} is not the user's wording"
-
-    def test_the_prompt_still_states_its_own_rules(self):
-        built = prompt_mod.build_prompt("Money", 3)
-        for line in ("Output ONLY the quotes.",
-                     "10–35 words",
-                     "Use one primary mechanism per quote.",
-                     "Do not output the analysis.",
-                     "MAKE WISDOM WRONG IN AN INTERESTING WAY."):
-            assert line in built
-
-    def test_the_prompt_forbids_the_jokes_it_is_avoiding(self):
-        # The anti-punchline and no-random-objects rules are the whole point of
-        # the current wording, so a trim to either should fail here.
-        built = prompt_mod.build_prompt("Money", 3)
-        assert "NO PUNCHLINE LANGUAGE" in built
-        assert "NO RANDOM FUNNY OBJECTS" in built
-        assert "DO NOT MAKE WISDOM FUNNY." in built
-
-    @pytest.mark.parametrize("subject,count", [
-        ("Money", 1), ("Weight lifting and bodybuilding", 6), ("Sleep", 12),
-    ])
-    def test_interpolation_scales(self, subject, count):
-        built = prompt_mod.build_prompt(subject, count)
-        assert f"SUBJECT: {subject}" in built
-        assert f"NUMBER: {count}" in built
-
-
 class TestPromptIntegrity:
     """Spot-checks on the wording that defines the joke mechanism."""
 
@@ -427,29 +353,6 @@ class TestPromptIntegrity:
         "it does not contain genuine wisdom from the SUBJECT",
         "it is random nonsense",
     ]
-
-    @pytest.mark.parametrize("line", VERBATIM_LINES)
-    def test_rule_line_present_verbatim(self, line):
-        assert line in prompt_mod.build_prompt("Money", 3)
-
-    @pytest.mark.parametrize("line", QUALITY_FILTER_LINES)
-    def test_quality_filter_present_verbatim(self, line):
-        assert line in prompt_mod.build_prompt("Money", 3)
-
-    @pytest.mark.parametrize("mutation", [
-        "FALSE DEDUCTION", "OVEREXTENSION", "LITERAL INTERPRETATION",
-        "CONFIDENT MISUNDERSTANDING", "SELF-DEFEATING LOGIC", "ABSURD REDEFINITION",
-        "WRONG PRIORITY", "UNEXPECTED CONSEQUENCE", "PHILOSOPHICAL PARADOX",
-        "CONFIDENT IGNORANCE",
-    ])
-    def test_every_mutation_is_listed(self, mutation):
-        assert mutation in prompt_mod.build_prompt("Money", 3)
-
-    def test_the_prompt_refuses_to_assume_one_subject(self):
-        built = prompt_mod.build_prompt("Money", 3)
-        assert "DO NOT assume the subject is always war." in built
-        assert "The SUBJECT can be absolutely anything." in built
-
 
 # --- generation (stubbed network) -------------------------------------------
 

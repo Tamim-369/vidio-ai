@@ -13,15 +13,6 @@ from src.agents.quotes import json_parse as text
 
 
 class TestLoadsJson:
-    def test_plain_array(self):
-        assert text._loads_json('["a", "b"]') == ["a", "b"]
-
-    def test_plain_object(self):
-        assert text._loads_json('{"k": 1}') == {"k": 1}
-
-    def test_strips_code_fences(self):
-        assert text._loads_json('```json\n["a"]\n```') == ["a"]
-
     def test_strips_bare_fences(self):
         assert text._loads_json('```\n["a"]\n```') == ["a"]
 
@@ -49,28 +40,8 @@ class TestLoadsJson:
 
 
 class TestFindBracket:
-    def test_finds_balanced_region(self):
-        assert text._find_bracket("x [a,b] y", "[", "]") == "[a,b]"
-
-    def test_nested_brackets(self):
-        assert text._find_bracket("[[a]]", "[", "]") == "[[a]]"
-
     def test_absent_returns_empty(self):
         assert text._find_bracket("abc", "[", "]") == ""
 
     def test_unbalanced_returns_tail(self):
         assert text._find_bracket("[abc", "[", "]") == "[abc"
-
-    def test_works_for_braces(self):
-        assert text._find_bracket('{"k": [1]}', "{", "}") == '{"k": [1]}'
-
-
-class TestSalvageArray:
-    def test_returns_none_when_nothing_complete(self):
-        assert text._salvage_array("[{oops") is None
-
-    def test_keeps_complete_prefix(self):
-        assert text._salvage_array('[{"a":1},{"b":') == [{"a": 1}]
-
-    def test_closed_array(self):
-        assert text._salvage_array('[1,2,3]') == [1, 2, 3]

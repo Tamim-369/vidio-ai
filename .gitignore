@@ -32,23 +32,17 @@ temp/
 *.mp4
 cookie
 /topics
-raw_*.txt
 debug_output/
-voice_tests/test_output/*
-voice_tests/*.wav
-voice_tests/scripts/*
-voice_tests/assets/*
-voice_tests/audio/*
-voice_tests/output/*
 /voices
 /channel_cache
 .venv*/
 
 # Node
 node_modules/
-experiments/remotion_test/node_modules/
-experiments/remotion_test/dist/
-experiments/remotion_test/output.mp4
 
 .pytest_cache/
 .ruff_cache/
+
+# Chatterbox writes a voice-state cache next to each reference clip. It is
+# derived from the WAV, so it is rebuilt on demand and never committed.
+*.pts

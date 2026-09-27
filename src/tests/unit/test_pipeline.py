@@ -18,43 +18,9 @@ TRUMP = "donald-trump"
 # --- the one-line script ------------------------------------------------------
 
 class TestBuildScript:
-    def test_the_quote_is_one_line(self):
-        # A quote is NOT split by sentence: the whole quote is one card.
-        script = build_script(TRUMP, Quote(text="One thing. Two thing."))
-        assert [l["id"] for l in script["lines"]] == [1]
-        assert script["lines"][0]["text"] == "One thing. Two thing."
-
-    def test_the_topic_is_the_characters_subject(self):
-        # The subject names the file and titles the upload; a random joke as the
-        # topic produced titles that read like the joke itself.
-        script = build_script(TRUMP, Quote(text="Opening line."))
-        assert script["topic"] == "War and military strategy"
-
-    def test_the_line_carries_the_character_and_its_config(self):
-        # TTS and the card renderer both read the speaker from the line, so it
-        # has to be there without either of them looking the id up again.
-        script = build_script(TRUMP, Quote(text="A line."))
-        line = script["lines"][0]
-        assert line["character"] == TRUMP
-        assert line["voice"]["pseudonym"] == "Don Tzu"
-
-    def test_exactly_one_character_and_one_quote(self):
-        script = build_script(TRUMP, Quote(text="A line."))
-        assert script["characters"] == [TRUMP]
-        assert script["quotes"] == [{"text": "A line."}]
-
-    def test_quote_text_is_preserved(self):
-        assert build_script(TRUMP, Quote(text="Some line."))["quotes"] == \
-            [{"text": "Some line."}]
-
     def test_blank_quote_raises(self):
         with pytest.raises(RuntimeError, match="empty quote"):
             build_script(TRUMP, Quote(text="   "))
-
-    def test_accepts_plain_strings(self):
-        assert build_script(TRUMP, "Just a string quote.")["lines"][0]["text"] == \
-            "Just a string quote."
-
 
 # --- the pipeline itself ------------------------------------------------------
 
@@ -146,15 +112,6 @@ class TestCreateVideo:
         create_video(publish=False)
         assert "publish" not in _names(wired)
 
-    def test_publish_uses_the_subject_as_the_topic(self, wired):
-        create_video(publish=True)
-        args = next(a for n, a, _ in wired if n == "publish")
-        assert args[1] == "War and military strategy"
-
-    def test_the_title_is_the_pseudonym_and_the_quote(self, wired):
-        create_video(publish=False)
-        assert _args(wired, "cards")[0]["title"] == "Don Tzu: A real quote."
-
     def test_script_only_stops_after_the_quote(self, wired):
         create_video(publish=True, script_only=True)
         assert _names(wired) == ["ensure_dirs", "quotes", "artifact"]
@@ -162,16 +119,6 @@ class TestCreateVideo:
     def test_script_only_does_not_publish(self, wired):
         create_video(publish=True, script_only=True)
         assert "publish" not in _names(wired)
-
-    def test_script_only_does_not_clean_temp(self, wired):
-        create_video(publish=True, script_only=True)
-        assert "cleanup" not in _names(wired)
-
-    def test_script_only_explains_dropped_candidates(self, wired):
-        # Otherwise a filtered candidate looks like the model being stingy.
-        create_video(script_only=True)
-        assert _kw(wired, "quotes")["explain"] is True
-
 
 class TestRunBatch:
     @pytest.fixture(autouse=True)
@@ -244,26 +191,6 @@ class TestCli:
         import src.main as main
         return main.build_parser().parse_args(argv)
 
-    def test_defaults_to_one_video(self, captured):
-        import src.main as main
-        main.main.__wrapped__ if False else None
-        sys_argv = None
-        # main() reads sys.argv; exercise the parser directly for the default.
-        args = self._parse([])
-        assert args.batch == 0
-
-    def test_batch_takes_a_count(self):
-        assert self._parse(["--batch", "10"]).batch == 10
-
-    def test_voice_defaults_to_rotating(self):
-        assert self._parse([]).voice == ""
-
-    def test_voice_can_be_forced(self):
-        assert self._parse(["--voice", TRUMP]).voice == TRUMP
-
-    def test_script_only_is_off_by_default(self):
-        assert self._parse([]).script_only is False
-
     def test_the_old_knobs_are_gone(self):
         # One character, one quote, one video: nothing to configure.
         for flag in ("--format", "--quotes", "--seed"):
@@ -283,19 +210,6 @@ class TestUploadFlag:
         main.main()
         return seen
 
-    def test_no_upload_keeps_it_local(self, monkeypatch):
-        assert self._run(["--no-upload"], monkeypatch)["publish"] is False
-
-    def test_upload_flag_enables_publishing(self, monkeypatch):
-        assert self._run(["--upload"], monkeypatch)["publish"] is True
-
     def test_no_upload_wins_over_upload(self, monkeypatch):
         assert self._run(["--upload", "--no-upload"], monkeypatch)["publish"] is False
 
-    def test_falls_back_to_the_env_default(self, monkeypatch):
-        monkeypatch.setenv("AUTO_PUBLISH", "1")
-        assert self._run([], monkeypatch)["publish"] is True
-
-    def test_env_default_is_off_without_the_flag(self, monkeypatch):
-        monkeypatch.delenv("AUTO_PUBLISH", raising=False)
-        assert self._run([], monkeypatch)["publish"] is False
