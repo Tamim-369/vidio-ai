@@ -32,9 +32,9 @@ class TestWorkerSplit:
         chunks = _split_chunks_by_voice(lines, 2)
         assert sorted(l["id"] for c in chunks for l in c) == [1, 2, 3, 4, 5]
 
-    def test_a_monologue_falls_back_to_an_even_split(self):
-        # One character throughout is the normal case, so this must not end up
-        # as one chunk of 3 beside an empty one.
+    def test_one_character_falls_back_to_an_even_split(self):
+        # One character throughout is the only case, so this must not end up as
+        # one chunk of 3 beside an empty one.
         lines = [_line(i, DON) for i in range(1, 4)]
         assert [len(c) for c in _split_chunks_by_voice(lines, 2)] == [2, 1]
 

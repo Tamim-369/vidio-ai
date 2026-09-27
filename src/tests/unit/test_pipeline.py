@@ -149,23 +149,69 @@ class TestRunBatch:
         run_batch(count=2, publish=False, voice=TRUMP)
         assert all(c["character"] == TRUMP for c in no_side_effects)
 
-    def test_a_failing_video_does_not_abort_the_batch(self, monkeypatch,
-                                                     no_side_effects):
+    def test_a_video_that_fails_once_is_retried_and_made(self, monkeypatch):
+        """One flaky TTS call must not cost the slot.
+
+        A video is one quote, so a failure anywhere in the build used to end it.
+        The retry re-runs the build, which also draws a fresh quote.
+        """
+        calls = []
+
         def boom(**k):
-            if len(no_side_effects) == 1:
-                no_side_effects.append(k)
+            calls.append(k)
+            if len(calls) == 1:
                 raise RuntimeError("tts exploded")
-            no_side_effects.append(k)
             return "out/ok.mp4"
 
         monkeypatch.setattr(video, "create_video", boom)
+        monkeypatch.setattr(video, "cleanup_temp", lambda: None)
+        assert run_batch(count=1, publish=False) == ["out/ok.mp4"]
+        assert len(calls) == 2, "the failed attempt should have been retried"
+
+    def test_a_failing_video_does_not_abort_the_batch(self, monkeypatch,
+                                                     no_side_effects):
+        def boom(**k):
+            no_side_effects.append(k)
+            # video 1 exhausts both attempts; 2 and 3 are fine
+            if len(no_side_effects) <= 2:
+                raise RuntimeError("tts exploded")
+            return "out/ok.mp4"
+
+        monkeypatch.setattr(video, "create_video", boom)
+        monkeypatch.setattr(video, "cleanup_temp", lambda: None)
         out = run_batch(count=3, publish=False)
         assert len(out) == 2, "one failure must not cost the other videos"
 
     def test_a_failing_video_is_not_counted(self, monkeypatch):
+        calls = []
+
+        def boom(**k):
+            calls.append(k)
+            raise RuntimeError("tts exploded")
+
+        monkeypatch.setattr(video, "create_video", boom)
+        monkeypatch.setattr(video, "cleanup_temp", lambda: None)
+        assert run_batch(count=2, publish=False) == []
+        assert len(calls) == 4, "two videos, two attempts each"
+
+    def test_a_failed_attempt_clears_the_previous_partial_render(self, monkeypatch):
+        # A failed build can leave a half-written wav behind, and the retry would
+        # otherwise render on top of it.
+        cleaned = []
         monkeypatch.setattr(video, "create_video",
                             lambda **k: (_ for _ in ()).throw(RuntimeError("x")))
-        assert run_batch(count=2, publish=False) == []
+        monkeypatch.setattr(video, "cleanup_temp", lambda: cleaned.append(1))
+        run_batch(count=1, publish=False)
+        assert len(cleaned) == 2, "temp should be cleared before each retry"
+
+    def test_attempts_of_one_disables_the_retry(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(video, "create_video",
+                            lambda **k: calls.append(k) or (_ for _ in ()).throw(
+                                RuntimeError("x")))
+        monkeypatch.setattr(video, "cleanup_temp", lambda: None)
+        assert run_batch(count=1, publish=False, attempts=1) == []
+        assert len(calls) == 1
 
     def test_an_unknown_voice_is_refused(self):
         with pytest.raises(ValueError, match="unknown or disabled voice"):

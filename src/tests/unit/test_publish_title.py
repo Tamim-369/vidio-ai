@@ -1,6 +1,6 @@
 """Publishing: what metadata reaches YouTube.
 
-A planned video builds its own title, description and tags from the quotes it
+A script with a title builds its own description and tags from the quote it
 already contains. That path is the one every batch takes, and the thing worth
 testing is that it is unique per video and makes no model call.
 """
@@ -44,7 +44,7 @@ class TestPlannedVideoSkipsTheModel:
         # The old path cost a generate plus up to two verifier rounds per
         # video, and could write the same description twice in a batch.
         def boom(*a, **k):
-            raise AssertionError("a planned video must not call the LLM")
+            raise AssertionError("a script with a title must not call the LLM")
         monkeypatch.setattr(yt, "generate_metadata", boom)
         script = _script([_line(1, ARNOLD, "A line about the barbell.")])
         yt.publish_video("v.mp4", "money", script)

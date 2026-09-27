@@ -103,9 +103,9 @@ already reflects it and card lengths stay correct."""
 def _line_voice(line: dict, default_voice: dict) -> dict:
     """The voice a line is spoken in.
 
-    A multi-character video carries its own voice on every line; the
-    ``default_voice`` argument is the single-narrator case and the fallback
-    when a line has no voice of its own.
+    The line's own voice if it carries one, otherwise ``default_voice``. The
+    pipeline puts the character on the line, so this is normally the same entry
+    twice; the fallback is what lets a hand-written script omit it.
     """
     return line.get("voice") or default_voice
 
@@ -154,7 +154,6 @@ def _chat_loop(lines: list, audio_dir: str, default_voice: dict = None) -> list:
         repetition_penalty = params.get("repetition_penalty", 1.2)
         min_p = params.get("min_p", 0.05)
         top_p = params.get("top_p", 1.0)
-        pitch_shift = params.get("pitch_shift", 0.0)
 
         _prep_chat_conds(model, voice)  # no-op if this process already prepared
 
@@ -263,10 +262,8 @@ def _generate_chatterbox(lines: list, audio_dir: str, voice: dict = None) -> lis
 def generate_audio(lines: list, voice: dict = None) -> list:
     """Generate voiceover for each line, written to temp/audio/<id>.wav.
 
-    voice: fallback registry entry for lines that do not carry their own. A
-    multi-character video puts a "voice" on every line instead, and each is
-    spoken by that character. If None (or engine "pocket") the legacy Pocket-TTS
-    narrator is used for every line.
+    voice: fallback registry entry for lines that do not carry their own. If
+    None (or engine "pocket") the legacy Pocket-TTS narrator is used instead.
     """
     audio_dir = os.path.join(TEMP_DIR, "audio")
     os.makedirs(audio_dir, exist_ok=True)

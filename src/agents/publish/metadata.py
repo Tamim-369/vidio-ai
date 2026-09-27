@@ -96,11 +96,11 @@ def build_tags(script: dict) -> list:
 
 
 def deterministic_metadata(script: dict) -> dict:
-    """Title, description and tags for a planned video, with no model call.
+    """Title, description and tags for a script, with no model call.
 
     The title is passed through shorten_title() even when the script already
-    carries one. A planned batch's title is built here already-safe, but a
-    title inherited from an older script is not, and YouTube rejects the whole
+    carries one. A title built by build_title() is already safe, but a title
+    inherited from an older script is not, and YouTube rejects the whole
     upload over a 101st character -- so the cap is enforced at the single point
     where a title becomes an API argument rather than trusted upstream.
     """

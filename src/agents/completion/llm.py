@@ -234,7 +234,6 @@ def call_gemini(messages: list, temperature: float = 0.7, model: str = None,
     and multimodal (inline image) messages. Raises a RuntimeError when
     every Gemini key fails so the caller's own fallback chain still runs.
     """
-    global _rotating
     if model is None:
         model = GEMINI_MODEL
     if not GEMINI_KEYS:

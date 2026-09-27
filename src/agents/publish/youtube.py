@@ -148,22 +148,6 @@ def set_thumbnail(youtube, video_id: str, thumbnail_path: str) -> None:
     ).execute()
     print(f"    [youtube] Thumbnail set for {video_id}")
 
-
-def update_video(youtube, video_id: str, title: str, description: str, tags: list) -> None:
-    """Edit metadata of an already-uploaded video."""
-    body = {
-        "id": video_id,
-        "snippet": {
-            "title": title,
-            "description": description,
-            "tags": tags,
-            "categoryId": YOUTUBE_CATEGORY_ID,
-        },
-    }
-    youtube.videos().update(part="snippet", body=body).execute()
-    print(f"    [youtube] Metadata updated for {video_id}")
-
-
 def publish_video(video_path: str, topic: str, script: dict, thumbnail_path: str = None) -> str:
     """Generate metadata, upload the video, and report its status.
 
@@ -171,12 +155,12 @@ def publish_video(video_path: str, topic: str, script: dict, thumbnail_path: str
     """
     print(f"\n📺 Publishing to YouTube: {topic}")
 
-    # A planned video carries its own title and can build its own description
-    # and tags from the quotes it already contains. That path is unique by
+    # A script that carries its own title can build its own description and
+    # tags from the quote it already contains. That path is unique by
     # construction -- the quote pool is deduplicated -- and it makes no model
     # call, where the LLM path costs a generate plus up to two verifier rounds
     # per video and will happily write the same description twice in a batch.
-    # The LLM stays as the fallback for a script that did not come from a plan.
+    # The LLM stays as the fallback for a script with no title of its own.
     if (script or {}).get("title"):
         meta = deterministic_metadata(script)
     else:

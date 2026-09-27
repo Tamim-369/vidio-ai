@@ -67,9 +67,9 @@ def _split_chunks_by_voice(lines: list, workers: int,
     both workers land on the same character and serialise on one conditionals
     load.
 
-    When there are fewer distinct characters than workers (a 3-line monologue),
-    there is nothing to keep apart, so this falls back to a plain even split
-    and the workers duplicate the conditionals load, as they always have.
+    When there are fewer distinct characters than workers -- which is every
+    video, since one video is one character -- there is nothing to keep apart,
+    so this falls back to a plain even split.
     """
     groups: dict = {}
     for line in lines:

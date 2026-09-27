@@ -5,8 +5,12 @@
 #
 # NOTE: chatterbox-tts declares strict transitive pins (librosa==0.11.0,
 # torch==2.6.0) that this repo intentionally overrides (librosa 1.0, torch
-# 2.13). If pip hits a resolution conflict, install the TTS block separately
+# 2.12). If pip hits a resolution conflict, install the TTS block separately
 # with --no-deps / --no-build-isolation.
+#
+# scipy is not listed: librosa already requires it. torchaudio is listed because
+# it is a chatterbox-tts requirement whose version is locked to torch's, and
+# resolving the two independently is how you end up with a mismatched pair.
 
 # --- TTS core (src/agents/voiceover/) ---
 soundfile

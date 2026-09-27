@@ -263,10 +263,9 @@ def render_card(quote: str, image_path: str, audio_path: str, out_path: str,
 def _line_face(line: dict, default_voice: dict):
     """The face shown while a line is spoken.
 
-    Taken from the line's own voice so a multi-character video shows whoever is
-    talking. Two cloned voices over one face is the giveaway that a "conversation"
-    is really one person, which is the whole thing a multi-character video is
-    supposed to avoid.
+    Read from the line's own voice entry, falling back to the video's. One
+    video is one character, so both are the same entry today; the fallback is
+    what lets a hand-written script leave the per-line voice off.
     """
     voice = line.get("voice") or default_voice or {}
     return voice.get("face"), voice.get("name")
@@ -275,14 +274,12 @@ def _line_face(line: dict, default_voice: dict):
 def render(script: dict, voice: dict = None) -> str:
     """Render every line of a quote script as a card, then concatenate.
 
-    Mirrors video_assembler.assemble(script) so the pipeline can swap one call
-    for the other: one still card per line. Each card is its spoken audio plus
+    One still card per line. Each card is its spoken audio plus
     a tail of silence — QUOTE_GAP_S after every quote but the last, and the
     longer QUOTE_END_TAIL_S on the final one, so the video never cuts off on the
     last word.
 
-    ``voice`` is the fallback for lines that do not carry their own; a
-    multi-character video sets a voice per line instead.
+    ``voice`` is the fallback for lines that do not carry their own.
     """
     os.makedirs(TEMP_DIR, exist_ok=True)
 

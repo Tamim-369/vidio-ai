@@ -114,6 +114,14 @@ client falls back Groq → Gemini → Cloudflare, rotates through three Groq key
 first, and only gives up once all three tiers are exhausted. Everything after
 the first tier is optional insurance, so the required setup stays at one key.
 
+**A video is retried before it is given up on.** Neural TTS is the expensive step
+and a single call can fail on its own — an unlucky quote, a transient model
+error, memory pressure. Because a video *is* one quote, that used to cost the
+whole slot. A batch now retries each video twice, re-running the whole build,
+which also draws a fresh quote; quote generation deduplicates against everything
+already used, so a retry cannot repeat the one that failed. Only a video that
+fails every attempt is reported and skipped.
+
 **Metadata is computed, not generated.** An LLM asked for ten descriptions
 writes ten near-identical paragraphs, and the only cure is watching for
 collisions and regenerating. Building the description from the video's own
@@ -135,7 +143,7 @@ behaviour for this content, so it stays off.
 uv run pytest src/tests/
 ```
 
-323 tests, 18 files, about 25 seconds. The bar for keeping one was a single
+326 tests, 18 files, about 25 seconds. The bar for keeping one was a single
 question: *does this guard a failure that is silent, expensive, or both?*
 
 The ones that earned their place:
@@ -148,8 +156,9 @@ The ones that earned their place:
   repeating on the channel.
 - `test_quote_card.py` — that text shrinks to fit its box instead of running off
   the frame, and that card duration tracks the audio it was cut to.
-- `test_pipeline.py` — each step's output reaches the next, and a video that
-  fails does not abort the batch around it.
+- `test_pipeline.py` — each step's output reaches the next, a video that fails
+  is retried rather than lost, and one that keeps failing does not abort the
+  batch around it.
 - `test_single_video.py` — the face is validated before the first card renders,
   and a silent line is an error rather than a blank video.
 - `test_extracted_helpers.py` — the JSON salvage that digs the candidate array

@@ -130,18 +130,29 @@ def create_video(character: str = "", publish: bool = True,
 
 
 def run_batch(count: int = 5, publish: bool = True, voice: str = "",
-              script_only: bool = False) -> list:
+              script_only: bool = False, attempts: int = 2) -> list:
     """Make ``count`` videos and return the ones that finished.
 
     Characters rotate, so a batch spreads across every enabled voice instead of
-    hammering whichever one happens to be first. A video that fails is reported
-    and skipped: one bad render should cost one video, not the batch.
+    hammering whichever one happens to be first.
+
+    A video is retried up to ``attempts`` times before it is given up on, because
+    the expensive step is neural TTS and a single call can fail on its own --
+    an unlucky quote, a transient model error, memory pressure. Since a video is
+    one quote, that used to cost the whole slot: the exception propagated out of
+    generate_audio and the batch moved on one video short. The retry re-runs the
+    whole build, so it also draws a fresh quote, and quote generation deduplicates
+    against everything already used, so a retry cannot repeat the one that failed.
+
+    A video that fails every attempt is reported and skipped: one bad render
+    should cost one video, not the batch.
     """
     enabled = [vid for vid, _ in get_enabled_voices()]
     if voice and voice not in enabled:
         raise ValueError(
             f"unknown or disabled voice {voice!r}; pick one of {enabled}")
 
+    attempts = max(1, attempts)
     t0 = time.monotonic()
     print(f"\n🎬 Batch: {count} video(s){' — script only' if script_only else ''}")
 
@@ -149,14 +160,30 @@ def run_batch(count: int = 5, publish: bool = True, voice: str = "",
     for i in range(1, count + 1):
         print(f"\n{'=' * 62}\n  Video {i}/{count}\n{'=' * 62}")
         video_t0 = time.monotonic()
-        try:
-            made.append(create_video(character=voice, publish=publish,
-                                     script_only=script_only))
-        except Exception as e:
-            print(f"\n❌ Video {i}/{count} failed: {type(e).__name__}: {e}")
-            failed.append(i)
-            continue
-        print(f"⏱️  Video {i} took {time.monotonic() - video_t0:.0f}s")
+        ok = False
+        for attempt in range(1, attempts + 1):
+            try:
+                made.append(create_video(character=voice, publish=publish,
+                                         script_only=script_only))
+                ok = True
+                break
+            except Exception as e:
+                # A failed build can leave a half-written wav or card behind, and
+                # the next attempt would otherwise render on top of it.
+                try:
+                    cleanup_temp()
+                except Exception:
+                    pass
+                detail = f"{type(e).__name__}: {e}"
+                if attempt < attempts:
+                    print(f"\n⚠️  Attempt {attempt}/{attempts} failed ({detail})"
+                          f"\n   Retrying with a fresh quote...")
+                else:
+                    print(f"\n❌ Video {i}/{count} failed after {attempts} "
+                          f"attempt(s): {detail}")
+                    failed.append(i)
+        if ok:
+            print(f"⏱️  Video {i} took {time.monotonic() - video_t0:.0f}s")
 
     total = time.monotonic() - t0
     print(f"\n{'=' * 62}")
