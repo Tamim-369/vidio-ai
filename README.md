@@ -143,7 +143,7 @@ behaviour for this content, so it stays off.
 uv run pytest src/tests/
 ```
 
-326 tests, 18 files, about 25 seconds. The bar for keeping one was a single
+330 tests, 18 files, about 25 seconds. The bar for keeping one was a single
 question: *does this guard a failure that is silent, expensive, or both?*
 
 The ones that earned their place:

@@ -259,3 +259,38 @@ class TestUploadFlag:
     def test_no_upload_wins_over_upload(self, monkeypatch):
         assert self._run(["--upload", "--no-upload"], monkeypatch)["publish"] is False
 
+
+
+class TestPermanentUploadRejection:
+    """A 4xx from YouTube is a bad request, not a flake.
+
+    Retrying re-runs the quote, the voiceover and the render, then gets the
+    identical rejection -- so run_batch must stop on the first one.
+    """
+
+    def test_rejected_upload_is_not_retried(self, monkeypatch):
+        from src.agents.publish import UploadRejected
+
+        calls = {"n": 0}
+
+        def boom(**kwargs):
+            calls["n"] += 1
+            raise UploadRejected("[youtube] HTTP 400 reason=uploadLimitExceeded", 400,
+                                 "uploadLimitExceeded")
+
+        monkeypatch.setattr(video, "create_video", boom)
+        assert run_batch(count=3, publish=False) == []
+        assert calls["n"] == 3, "one attempt per video, no retries"
+
+    def test_transient_failure_still_retries(self, monkeypatch):
+        calls = {"n": 0}
+
+        def flaky(**kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("network blip")
+            return "output/x.mp4"
+
+        monkeypatch.setattr(video, "create_video", flaky)
+        assert run_batch(count=1, attempts=3, publish=False) == ["output/x.mp4"]
+        assert calls["n"] == 3

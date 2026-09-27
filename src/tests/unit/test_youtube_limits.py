@@ -5,6 +5,11 @@ this repo, so a violation is invisible until a batch is already half-published.
 The title one is not hypothetical: real quotes from this channel run 58-98
 characters, so a pseudonym prefix pushes a quarter of them over the limit.
 """
+import json
+import socket
+
+import pytest
+
 from src.agents.publish.metadata import _fallback_metadata, deterministic_metadata
 from src.agents.video.title import TITLE_MAX_CHARS, build_title
 from src.agents.voice_cast.voices import VOICES
@@ -124,3 +129,76 @@ class TestTagsLimit:
     def test_the_fallback_tags_fit(self):
         m = _fallback_metadata("x", "1. a")
         assert len(",".join(m["tags"])) <= YOUTUBE_TAGS_MAX_CHARS
+
+
+class TestOAuthUrlIsCopyable:
+    """The consent URL is ~450 chars, so a terminal wraps it over several lines.
+
+    Copying a wrapped URL carries newlines into the query string and Google
+    answers with a bare 400 that names no reason, which reads as a broken
+    integration rather than a broken copy. Mirroring it to a file keeps one
+    unbroken line available.
+    """
+
+    def test_url_is_written_to_a_file_as_one_line(self, tmp_path):
+        from src.agents.publish.youtube import _ConsentPrompt
+
+        target = tmp_path / "oauth_url.txt"
+        url = "https://accounts.google.com/o/oauth2/auth?response_type=code&" + "x" * 400
+        # run_local_server() renders this with .format(url=...)
+        message = _ConsentPrompt(str(target)).format(url=url)
+
+        written = target.read_text()
+        assert written == url + "\n"
+        assert len(written.splitlines()) == 1, "no embedded newline in the URL"
+        assert url in message, "the prompt still shows the URL"
+
+
+class TestOAuthTimeoutIsActionable:
+    """The consent wait must fail with instructions, not a raw traceback.
+
+    This drives the real get_credentials() path because the exception class
+    lives in google_auth_oauthlib.flow and is not importable from wsgiref --
+    an import that was written but never executed shipped an ImportError that
+    only appeared at upload time.
+    """
+
+    def test_no_consent_gives_a_readable_error(self, tmp_path, monkeypatch):
+        import webbrowser
+
+        from src.agents.publish import youtube
+
+        # A throwaway client on its own port. Binding the real 8099 here would
+        # steal the port out from under a live consent flow, which shows up as
+        # ERR_CONNECTION_REFUSED after Google has already issued the code.
+        port = _free_port()
+        secrets = tmp_path / "secrets.json"
+        secrets.write_text(json.dumps({"web": {
+            "client_id": "test.apps.googleusercontent.com",
+            "client_secret": "test",
+            "redirect_uris": [f"http://localhost:{port}"],
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }}))
+
+        monkeypatch.setattr(youtube, "YOUTUBE_TOKEN_FILE", str(tmp_path / "token.json"))
+        monkeypatch.setattr(youtube, "OAUTH_TIMEOUT_SECONDS", 1)
+        monkeypatch.setattr(youtube, "OAUTH_URL_FILE", str(tmp_path / "oauth_url.txt"))
+        monkeypatch.setattr(youtube, "YOUTUBE_CLIENT_SECRETS", str(secrets))
+        monkeypatch.setattr(webbrowser, "open", lambda *a, **k: True)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            youtube.get_credentials()
+
+        message = str(excinfo.value)
+        assert "No authorization received" in message
+        assert "oauth_url.txt" in message, "names the file holding the unbroken URL"
+        # and the file was written despite the timeout
+        assert (tmp_path / "oauth_url.txt").exists()
+
+
+def _free_port() -> int:
+    """An unused loopback port, so tests never bind the live OAuth port."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]

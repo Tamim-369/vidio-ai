@@ -66,12 +66,17 @@ class TestTitleUniqueness:
     def test_the_quote_pool_makes_titles_unique_without_a_template(self, quote_pool):
         # The property the template version could not give: a format-derived
         # title repeats, a quote-derived one cannot, because the pool is
-        # deduplicated before a video is ever planned. The fixture is the real
-        # pool where it exists and a frozen sample of the same shape otherwise,
-        # because used_quotes.json is gitignored and absent on a fresh clone.
-        assert len(quote_pool) >= 2, "need real quotes for this to mean anything"
+        # deduplicated before a video is ever planned. The fixture prefers the
+        # real used_quotes.json, but that file is gitignored and grows one
+        # entry per video this machine makes, so a pool too small to show
+        # uniqueness falls back to the frozen sample rather than failing on
+        # however many videos happen to have been rendered locally.
+        import conftest as unit_conftest
+
+        pool = quote_pool if len(quote_pool) >= 2 else unit_conftest.SAMPLE_QUOTES
+        assert len(pool) >= 2, "need at least two quotes for this to mean anything"
         seen = set()
-        for text in quote_pool[:80]:
+        for text in pool[:80]:
             t = build_title(text, "donald-trump")
             assert t not in seen
             seen.add(t)

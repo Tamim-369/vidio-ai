@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import time
 
-from src.agents.publish import publish_video
+from src.agents.publish import UploadRejected, publish_video
 from src.agents.quotes import generate_quotes
 from src.agents.soundtrack import add_background_music
 from src.agents.visuals import render as render_quote_cards
@@ -175,6 +175,14 @@ def run_batch(count: int = 5, publish: bool = True, voice: str = "",
                 except Exception:
                     pass
                 detail = f"{type(e).__name__}: {e}"
+                if isinstance(e, UploadRejected):
+                    # The API rejected the request itself. A fresh quote would be
+                    # rejected the same way, so stop instead of burning attempts.
+                    print(f"\n❌ Video {i}/{count} rejected by YouTube "
+                          f"(HTTP {e.status}, reason={e.reason or 'unknown'})")
+                    print("   Not retrying -- fix the request, then re-run.")
+                    failed.append(i)
+                    break
                 if attempt < attempts:
                     print(f"\n⚠️  Attempt {attempt}/{attempts} failed ({detail})"
                           f"\n   Retrying with a fresh quote...")

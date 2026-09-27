@@ -46,3 +46,4 @@ node_modules/
 # Chatterbox writes a voice-state cache next to each reference clip. It is
 # derived from the WAV, so it is rebuilt on demand and never committed.
 *.pts
+oauth_url.txt
