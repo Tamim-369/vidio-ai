@@ -28,6 +28,10 @@ GROQ_API_KEY_THIRD = os.getenv("GROQ_API_KEY_THIRD")
 GROQ_API_KEY_BACKUP = os.getenv("GROQ_API_KEY_BACKUP")  # legacy alias
 # gpt-oss-120b returns empty completions on this Groq org, so it is avoided.
 GROQ_MODEL = "openai/gpt-oss-20b"
+# Ceiling for the per-attempt growth in call_groq. Well past what a quote or a
+# script needs; it exists so a pathological retry loop cannot ask for an
+# arbitrary number and get rejected at request time.
+GROQ_MAX_TOKENS = 16384
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 GEMINI_KEYS = []
@@ -177,16 +181,22 @@ would break its "quotes come from Groq" guarantee."""
             for attempt in range(max_retries):
                 kwargs = dict(model=model, messages=messages, temperature=temperature)
                 if max_tokens:
-                    # The on-demand qwen model caps OUTPUT tokens at 1000/min, so a
-                    # caller asking for e.g. max_tokens=8192 (script JSON) would be
-                    # rejected at request time. Clamp to the limit ONLY for that
-                    # model; standard models (llama-3.3-70b-versatile) accept
-                    # larger outputs, and callers downsample gracefully on partial
-                    # JSON anyway.
+                    # The caller's figure is a floor, not a fixed budget. A
+                    # reasoning model spends its allowance before it answers, so
+                    # a budget sized only for the reply comes back truncated
+                    # with an empty body -- and rotating keys does not help,
+                    # because every key is asked the same wrong size. Growing it
+                    # per attempt fixes the request on the key that reported it.
+                    budget = min(max_tokens * (2 ** attempt), GROQ_MAX_TOKENS)
+                    # The on-demand qwen model caps OUTPUT tokens at 1000/min, so
+                    # a caller asking for e.g. max_tokens=8192 (script JSON)
+                    # would be rejected at request time. Clamp to the limit ONLY
+                    # for that model; standard models accept larger outputs, and
+                    # callers downsample gracefully on partial JSON anyway.
                     if "qwen3.8-27b" in model:
-                        kwargs["max_tokens"] = min(max_tokens, 1000)
+                        kwargs["max_tokens"] = min(budget, 1000)
                     else:
-                        kwargs["max_tokens"] = min(max_tokens, 16384)
+                        kwargs["max_tokens"] = budget
                 response = _get_client().chat.completions.create(**kwargs)
                 choice = response.choices[0]
                 content = (choice.message.content or "").strip()
@@ -194,12 +204,18 @@ would break its "quotes come from Groq" guarantee."""
                     _last_good = key_idx
                     return content
                 # An empty body is usually truncation, not an outage: a budget
-                # too small for the request comes back as finish_reason="length"
-                # with nothing in it. Saying "empty content" and rotating keys
-                # sends every key to fail the same way, which reads as the
-                # provider being down when it is the caller's budget.
+                # too small for the request comes back with finish_reason="length"
+                # and nothing in it. Rotating keys would send every key to fail
+                # the same way, which reads as the provider being down when it is
+                # the caller's budget -- so the budget grows and the same key is
+                # retried.
                 finish = getattr(choice, "finish_reason", "?")
                 if finish == "length":
+                    if attempt < max_retries - 1:
+                        print(f"    [{tag}] Key {key_idx + 1}/{len(_clients)} truncated "
+                              f"at max_tokens={kwargs.get('max_tokens')} - raising the "
+                              f"budget and retrying the same key", flush=True)
+                        continue
                     raise RuntimeError(
                         f"response truncated at max_tokens={kwargs.get('max_tokens')}"
                         f" with an empty body; raise the budget for this request")

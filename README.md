@@ -1,7 +1,8 @@
-# videoai — parody quote shorts
+# videoai_quote — parody quote shorts
 
-A batch pipeline that turns one AI-written joke into a finished, uploaded
-YouTube Short. One character, one quote, one video.
+A batch pipeline that turns AI-written jokes into finished, uploaded YouTube
+Shorts. Each video is one of three layouts, and a batch cycles through all of
+them.
 
 ```bash
 uv run src/main.py --batch=10 --no-upload
@@ -18,25 +19,57 @@ language model.
 character → quote (Groq) → voiceover (Chatterbox) → quote card → music → upload
 ```
 
-1. **Pick a character.** Rotates through the enabled voices so a batch spreads
-   across all of them.
-2. **Write one quote.** The character decides the subject — Don Tzu writes
+1. **Plan the video.** A batch decides every slot's layout and cast up front, so
+   the schedule is known before a single token is spent. Both come from the
+   video's number: the lead is the voice at `(N - 1) % len(enabled)` and the
+   layout is the nth entry of the layout cycle, so the two run out of phase. The
+   number is the only state — a batch that resumes picks up exactly where the
+   last one stopped, with no separate cursor to fall out of step.
+2. **Write the quotes.** Each character decides its own subject — Don Tzu writes
    military strategy, Brolexander writes gym discipline — so the joke and the
-   narrator always agree.
-3. **Speak it.** Chatterbox clones the voice from a short reference clip, so
-   each personality is audibly itself.
-4. **Render one card.** The quote over the character's photo, cut to the length
-   of the audio it was spoken in.
-5. **Mix, title, publish.** Background music, a title, a description, and an
-   upload — or keep it local with `--no-upload`.
+   narrator always agree. One call per *character*, however many quotes it says.
+3. **Speak them.** Chatterbox clones the voice from a short reference clip, so
+   each personality is audibly itself. Lines are grouped by character, so each
+   voice's conditionals load once no matter how many lines that character has.
+4. **Render a card per quote.** Each quote over that character's photo, cut to
+   the length of the audio it was spoken in, then concatenated.
+5. **Mix, title, publish.** Background music, a numbered title and description,
+   and an upload — or keep it local with `--no-upload`.
 
-## Why one quote per video
+## The three layouts
 
-The quote card is a still frame. A second line adds narration and a second card
-and nothing else, and stacking several characters into one video made the
-output look like a debate rather than a punchline. One strong line per
-character, rotating, is what the cards were designed for. The batch loop asks
-one question — which character next — and nothing else.
+| type | who speaks | quotes | shape |
+| ---- | ---------- | ------ | ----- |
+| 1 | 1 character | 3 | a monologue |
+| 2 | 3 characters | 1 each | a round table |
+| 3 | 2 characters | 1 each | a quick two-hander |
+
+Types 2 and 3 are the same rule at different widths. Only a monologue repeats
+one character, because it is the only layout that needs to.
+
+Over ten videos the layouts run `1,2,3,1,3,2,1,2,3,1` while the lead runs
+`Trump → Tate → Arnold` and repeats — 4 monologues, 3 round tables, 3
+two-handers, and 27 quotes from 19 model calls. The two cycles are deliberately
+out of phase: in phase they would repeat every three videos and the schedule
+would be predictable from the first two.
+
+## Numbering
+
+Titles and descriptions carry `| Wordz Of Wizdom #N`, so the channel reads as a
+numbered library. The counter is persisted in `video_number.json` and **advances
+when a video completes, not when it is published** — so a `--no-upload` preview
+consumes numbers. A gap is invisible to a viewer; two videos sharing a number is
+not. The number is also the plan's phase, which is why two runs in a row do not
+replay the same opening layouts, and why a video that failed keeps its slot.
+
+## Why the layouts vary
+
+A batch used to ship one character saying one quote, on the argument that a
+second line only adds narration and a second still card. That was true of the
+*card* and false of the *video*, which is a sequence of them. Ten identical
+monologues are not variety, and changing the narrator while the shape stays
+fixed is the least interesting way to vary a feed. So the shape is planned per
+video, and a monologue is the minority layout rather than all of them.
 
 ## Setup
 
@@ -44,6 +77,10 @@ one question — which character next — and nothing else.
 uv sync
 cp .env.example .env      # then fill in the keys
 ```
+
+Dependencies are declared in `pyproject.toml` and pinned to the exact versions
+the voices were tuned against. There is no `requirements.txt`; `uv sync` from
+the lock is the only supported install.
 
 | Variable | Required | Why |
 | --- | --- | --- |
@@ -67,7 +104,7 @@ you paste it back, and the resulting `token.json` is reused. Both that and
 uv run src/main.py                              # one video
 uv run src/main.py --batch=10 --no-upload       # ten, kept local
 uv run src/main.py --batch=5 --script-only      # just the quotes, no render
-uv run src/main.py --voice=donald-trump         # force one character
+uv run src/main.py --voice=donald-trump         # force the lead of every video
 uv run src/main.py --batch=3 --upload           # publish to YouTube
 ```
 
@@ -86,11 +123,10 @@ src/
     visuals/                 the quote card renderer
     soundtrack/              background music
     publish/                 YouTube upload + deterministic metadata
-    video/                   the pipeline loop and title rules
+    video/                   the batch planner, pipeline loop and title rules
     completion/              the LLM client, with key rotation
   assets/voice_refs/         reference clips the voices are cloned from
   faces/                     the portrait on each card
-  tests/unit/                the tests worth keeping (see below)
 ```
 
 Each agent owns one job and is callable on its own. `agents/video/pipeline.py`
@@ -108,7 +144,7 @@ failure, so the filter is deliberately strict.
 `used_quotes.json` and checked against on the way in. The file is local mutable
 state, deliberately untracked.
 
-**The text client has somewhere else to go.** A batch of ten is ten calls
+**The text client has somewhere else to go.** A batch of ten is nineteen calls
 against a rate limit, and a hard 429 mid-batch means a half-finished run. The
 client falls back Groq → Gemini → Cloudflare, rotates through three Groq keys
 first, and only gives up once all three tiers are exhausted. Everything after
@@ -116,20 +152,31 @@ the first tier is optional insurance, so the required setup stays at one key.
 
 **A video is retried before it is given up on.** Neural TTS is the expensive step
 and a single call can fail on its own — an unlucky quote, a transient model
-error, memory pressure. Because a video *is* one quote, that used to cost the
-whole slot. A batch now retries each video twice, re-running the whole build,
-which also draws a fresh quote; quote generation deduplicates against everything
-already used, so a retry cannot repeat the one that failed. Only a video that
-fails every attempt is reported and skipped.
+error, memory pressure. A video is several quotes now, so a failure partway
+through would otherwise cost the whole slot. A batch retries each video twice,
+re-running the whole build, which also draws a fresh set of quotes; generation
+deduplicates against everything already used, so a retry cannot repeat the ones
+that failed. Only a video that fails every attempt is reported and skipped.
 
 **Metadata is computed, not generated.** An LLM asked for ten descriptions
 writes ten near-identical paragraphs, and the only cure is watching for
 collisions and regenerating. Building the description from the video's own
-quote makes a duplicate structurally impossible and takes a step off the batch.
+quotes makes a duplicate structurally impossible and takes a step off the batch.
 
-**Titles are built from the quote.** `Don Tzu: <the quote>`, capped at 100
-characters on a word boundary because YouTube rejects longer titles outright.
-Since quotes are deduplicated, titles are unique for free.
+**Titles are built from the quote.** `<the quote> | Wordz Of Wizdom #N`, capped
+at 100 characters on a word boundary because YouTube rejects longer titles
+outright. The quote is fitted to the room the suffix leaves *before* the suffix
+is added, so the number — the part a viewer uses to find the video — is never
+what gets cut. The pseudonym is deliberately absent: a real quote runs 58–98
+characters, and prefixing a name would clip the hook to about 63. The speaker is
+named in the description instead, where there is room. Since quotes are
+deduplicated, titles are unique for free.
+
+**The description is quote-led.** The first quote leads unnumbered, because it
+is also the title and numbering it `1.` would imply a list it is not the first
+item of. The rest are numbered and attributed to the pseudonym that spoke them,
+which is what lets a viewer tell a round table apart at a glance. Then the
+parody disclaimer, the number, and a hashtag per speaker.
 
 **Parody, and labelled as such.** These are fabricated jokes written in the
 style of public figures, credited to invented names. Every description carries
@@ -137,59 +184,24 @@ a disclaimer, and Chatterbox's audio watermark is explicitly stripped — the
 model ships one that marks output as machine-generated, and that is the correct
 behaviour for this content, so it stays off.
 
-## Tests
+## Verifying a change
+
+There is no test suite. Changes are checked by running the thing:
 
 ```bash
-uv run pytest src/tests/
+uv run --with pyflakes python -m pyflakes src/   # unused/undefined names
+uv run src/main.py --batch=10 --script-only      # the plan, titles, numbering
+uv run src/main.py --batch=1 --no-upload         # one full render, kept local
 ```
 
-330 tests, 18 files, about 25 seconds. The bar for keeping one was a single
-question: *does this guard a failure that is silent, expensive, or both?*
+`--script-only` is the cheap one and the one to reach for: it exercises
+planning, quote generation, validation, dedupe, the title and description
+builders and the number counter, and stops before the 45-second render.
 
-The ones that earned their place:
+Two things it will not catch, and which cost real time when they slip:
 
-- `test_youtube_limits.py` — title, description and tag caps. These fail at
-  upload time, after a full render, which is the most expensive place a bug can
-  surface.
-- `test_quote_agent.py` — validation rules and the dedupe pool, including a
-  missing or corrupt state file. A bug here is invisible until quotes start
-  repeating on the channel.
-- `test_quote_card.py` — that text shrinks to fit its box instead of running off
-  the frame, and that card duration tracks the audio it was cut to.
-- `test_pipeline.py` — each step's output reaches the next, a video that fails
-  is retried rather than lost, and one that keeps failing does not abort the
-  batch around it.
-- `test_single_video.py` — the face is validated before the first card renders,
-  and a silent line is an error rather than a blank video.
-- `test_extracted_helpers.py` — the JSON salvage that digs the candidate array
-  out of a prose-wrapped model response.
-- `test_voice_models.py` — the watermark stays off. The watermark is inaudible,
-  so nothing else would ever catch it.
-- `test_architecture.py` — the quote pool lives outside `temp/`, which
-  `cleanup_temp()` rmtree's on every run.
-
-This started at 545 tests in 20 files. The 222 that went were not all
-decorative:
-
-- **Prompt wording.** 60-odd tests asserted that a prompt still contained the
-  words I had written — `test_the_style_examples_survived`,
-  `test_the_prompt_text_is_locked`, `test_the_bad_and_good_pairs_survived`.
-  They broke on every prompt edit and caught no bugs. Prompt *wiring* is still
-  tested: that a character resolves to its own prompt, and that an unknown one
-  falls back instead of raising.
-- **Pixel pinning.** `test_square_centres_on_360_1560_at_1080x1920` asserted an
-  exact coordinate. The geometry contract it was standing in for — text fits
-  the box, the byline clears the face — is tested; the coordinate is not.
-- **Duplication.** The voice registry checked eight fields across three voices
-  as 24 separate tests, two of which asserted the same thing because the
-  "required" and "enabled" lists had quietly become the same tuple. It is now
-  one test per voice, checked as a whole, because a half-configured voice is the
-  only failure that matters.
-- **Deleted design.** `test_multichar_video.py` covered per-line faces and
-  multi-character voice clashes. One quote per video makes all of that
-  unreachable.
-
-What was deliberately left untested is anything whose failure is loud: an
-exception on a missing argument, a library raising on unreadable input, or the
-existence of a file that any code path touching it would already fail to open.
-
+- **A title over 100 characters.** YouTube rejects the whole upload at the API,
+  after a full render. `build_numbered_title` fits the quote to whatever the
+  suffix leaves, and a number reaching five digits makes the suffix longer.
+- **A quote that repeats.** The dedupe pool is what stops it, and it lives in
+  `used_quotes.json` next to this file.

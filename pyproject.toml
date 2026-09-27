@@ -1,0 +1,64 @@
+[project]
+name = "videoai_quote"
+version = "0.1.0"
+description = "Batch pipeline that turns AI-written parody quotes into uploaded YouTube Shorts."
+readme = "README.md"
+# The TTS stack is what sets the floor: chatterbox-tts and pocket-tts both need
+# 3.11+, and the pinned torch builds are only published for 3.13 here.
+requires-python = ">=3.13"
+dependencies = [
+    # --- TTS core (src/agents/voiceover/) ---
+    "soundfile==0.14.0",
+    "librosa==1.0.0",
+    "numpy==2.4.6",
+    "scipy==1.18.1",
+    "torch==2.12.1",
+    "torchaudio==2.11.0",
+
+    # --- Local TTS models ---
+    "chatterbox-tts==0.1.7",
+    "pocket-tts==3.3.0",
+
+    # --- HTTP + LLM APIs (src/agents/completion/llm.py) ---
+    # urllib3 arrives transitively via requests.
+    "requests==2.34.2",
+    "groq==1.4.0",
+    "google-genai==2.25.0",
+
+    # --- YouTube upload (src/agents/publish/youtube.py) ---
+    "google-api-python-client==2.200.0",
+    "google-auth-httplib2==0.4.2",
+    "google-auth-oauthlib==1.4.1",
+
+    # --- Quote card rendering (src/agents/visuals/card.py) ---
+    "moviepy==2.2.1",
+    "pillow==11.3.0",
+
+    # --- Env loading (src/agents/completion/llm.py, src/helpers.py) ---
+    "python-dotenv==1.2.2",
+]
+
+[dependency-groups]
+dev = [
+    # There is no test suite, so pytest is deliberately absent. pyflakes stays
+    # because it is the only thing standing between a typo and a runtime
+    # AttributeError in a pipeline whose expensive step is a 45-second render.
+    "pyflakes==3.4.0",
+]
+
+[tool.uv]
+# An application, not a library: uv should not try to build and install this
+# directory as a package.
+package = false
+# chatterbox-tts pins librosa==0.11.0, torch==2.6.0 and torchaudio==2.6.0 as hard
+# transitive requirements. Left alone, resolution either fails outright or
+# silently installs an older stack than the one the voices were tuned against --
+# and a mismatched torch/torchaudio pair fails at import with a CUDA/CPU ABI
+# error that reads like a broken GPU rather than a resolver decision. These
+# overrides are the known-good pair the reference clips were cloned with.
+override-dependencies = [
+    "librosa==1.0.0",
+    "torch==2.12.1",
+    "torchaudio==2.11.0",
+    "numpy==2.4.6",
+]

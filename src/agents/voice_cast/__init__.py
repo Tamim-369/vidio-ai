@@ -1,5 +1,5 @@
-"""Picks which registered voice narrates this run."""
-from src.agents.voice_cast.agent import get_writing_style, pick_voice
+"""The voice registry: which characters exist, and how each one writes."""
+from src.agents.voice_cast.agent import get_writing_style
 from src.agents.voice_cast.voices import (
     VOICES,
     get_all_voices,
@@ -18,5 +18,4 @@ __all__ = [
     "get_voice",
     "get_writing_style",
     "pick_quote_author",
-    "pick_voice",
 ]

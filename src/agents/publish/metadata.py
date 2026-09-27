@@ -15,7 +15,12 @@ from src.agents.publish.prompts import (
     get_metadata_prompt,
     get_metadata_verifier_prompt,
 )
-from src.agents.video.title import TITLE_MAX_CHARS, build_title, shorten_title
+from src.agents.video.title import (
+    BRAND,
+    TITLE_MAX_CHARS,
+    build_title,
+    shorten_title,
+)
 from src.agents.voice_cast.voices import VOICES
 
 # Stated plainly in every description. These are fabricated quotes in the voices
@@ -44,25 +49,35 @@ def _short_subject(line: dict) -> str:
     return _voice_cfg(line).get("short_subject", "")
 
 
-def build_description(script: dict) -> str:
-    """Description assembled from the video's own quote.
+def build_description(script: dict, number: int = 0) -> str:
+    """Description assembled from the video's own quotes.
 
-    The quote is quoted under the pseudonym that spoke it, so the description
-    cannot duplicate another video's: the line comes from a pool already
-    deduplicated against used_quotes.json. That is the whole point -- an LLM
+    The first quote leads unnumbered because it is also the title, so numbering
+    it "1." would imply a list it is not the first item of. The rest are numbered
+    and attributed to the pseudonym that spoke them, which is what lets a viewer
+    tell a three-character video apart at a glance.
+
+    The quote lines come from a pool already deduplicated against
+    used_quotes.json, so the description cannot duplicate another video's: an LLM
     asked for N descriptions writes N near-identical paragraphs, and the only
-    cure is watching for collisions and regenerating.
+    cure is watching for collisions and regenerating. It also means no model
+    call, which drops a whole step off a batch.
 
-    It also means no model call, which drops a whole step off a batch.
+    The disclaimer is not decoration. These are fabricated quotes in the voices
+    of living public figures, and it has to be visible without expanding
+    anything.
     """
     lines = [l for l in (script.get("lines") or []) if l.get("text")]
     if not lines:
         return _DISCLAIMER
+    # Fall back to the script's own number, so a planned video gets its footer
+    # from any caller rather than only from the one that happens to pass it.
+    number = number or script.get("number") or 0
 
-    who = _pseudonym(lines[0])
-    topic = _short_subject(lines[0])
-    opener = f"{who} on {topic}." if who and topic else (who or "")
-    body = "\n".join(f"{_pseudonym(l)}: “{l['text'].strip()}”" for l in lines)
+    parts = [lines[0]["text"].strip()]
+    for i, l in enumerate(lines[1:], start=1):
+        parts.append(f"{i}. {l['text'].strip()}\n   — {_pseudonym(l)}")
+    body = "\n\n".join(parts)
 
     hashtags = "#quotes #shorts"
     for l in lines:
@@ -70,7 +85,10 @@ def build_description(script: dict) -> str:
         if tag not in hashtags:
             hashtags += " " + tag
 
-    return f"{opener}\n\n{body}\n\n{_DISCLAIMER}\n\n{hashtags}".strip()
+    footer = []
+    if number:
+        footer.append(f"{BRAND} #{number}")
+    return "\n\n".join([body, _DISCLAIMER] + footer + [hashtags]).strip()
 
 
 def build_tags(script: dict) -> list:
@@ -95,8 +113,13 @@ def build_tags(script: dict) -> list:
     return out[:15]
 
 
-def deterministic_metadata(script: dict) -> dict:
+def deterministic_metadata(script: dict, number: int = 0) -> dict:
     """Title, description and tags for a script, with no model call.
+
+    The number is read off the script when not passed, so it reaches the
+    description without every caller in the publish path having to grow a
+    parameter: a script that was planned carries it, and a hand-written one
+    simply has no number and gets no footer.
 
     The title is passed through shorten_title() even when the script already
     carries one. A title built by build_title() is already safe, but a title
@@ -105,6 +128,7 @@ def deterministic_metadata(script: dict) -> dict:
     where a title becomes an API argument rather than trusted upstream.
     """
     lines = [l for l in (script.get("lines") or []) if l.get("text")]
+    number = number or script.get("number") or 0
     title = (script.get("title") or "").strip()
     if not title and lines:
         first = lines[0]
@@ -112,7 +136,7 @@ def deterministic_metadata(script: dict) -> dict:
         title = build_title(first["text"].strip(), voice_id, _pseudonym(first))
     return {
         "title": shorten_title(title),
-        "description": build_description(script),
+        "description": build_description(script, number),
         "tags": build_tags(script),
     }
 

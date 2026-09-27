@@ -2,7 +2,14 @@
 
     uv run src/main.py --batch=10 --no-upload
 
-One character, one quote, one video. The only question the CLI asks is how many.
+A video is one of three shapes: one character saying three quotes, or two or
+three characters saying one quote each. A batch plans its shapes and casts up
+front and rotates through the enabled voices, so the run looks varied instead of
+shipping the same video ten times.
+
+    uv run src/main.py --batch=10 --no-upload
+
+The only question the CLI asks is how many.
 """
 import argparse
 import os
@@ -11,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.agents.video import create_video, run_batch
+from src.agents.video import build_one, run_batch
 
 # AUTO_PUBLISH=1 in .env publishes after rendering; --upload/--no-upload win.
 AUTO_PUBLISH = os.getenv("AUTO_PUBLISH", "0") == "1"
@@ -19,8 +26,8 @@ AUTO_PUBLISH = os.getenv("AUTO_PUBLISH", "0") == "1"
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Anti-wisdom quote videos: one character, one quote, "
-                    "one video.")
+        description="Anti-wisdom quote videos: rotating characters and "
+                    "quote layouts across a batch.")
     parser.add_argument("--batch", type=int, default=0, metavar="N",
                         help="Make N videos in one run (default 1)")
     parser.add_argument("--voice", default="",
@@ -46,8 +53,8 @@ def main() -> None:
         run_batch(count=args.batch, publish=publish, voice=args.voice,
                   script_only=args.script_only)
     else:
-        create_video(character=args.voice, publish=publish,
-                     script_only=args.script_only)
+        build_one(publish=publish, voice=args.voice,
+                  script_only=args.script_only)
 
 
 if __name__ == "__main__":

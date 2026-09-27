@@ -60,3 +60,50 @@ def shorten_title(title: str) -> str:
 
 def _short_name(vid: str) -> str:
     return (VOICES.get(vid, {}) or {}).get("short_name") or vid
+
+
+# The channel's name as it appears in metadata. The registered channel is
+# "Wordz Of Wizdom"; the real name of the person behind it is nobody's business
+# in a title.
+BRAND = "Wordz Of Wizdom"
+
+
+def numbered_suffix(number: int) -> str:
+    return f" | {BRAND} #{number}"
+
+
+def build_numbered_title(quote: str, number: int) -> str:
+    """Title for a published video: the quote, then the channel and its number.
+
+    The pseudonym is deliberately absent. The suffix costs 25 characters of a
+    100-character budget, and a real quote runs 58-98 characters, so a
+    ``Don Tzu: `` prefix would leave the quote clipped to roughly 63. The quote
+    is the hook and gets the room; the speaker is named in the description,
+    where there is space for it.
+
+    The quote is fitted to what is left *before* the suffix is added, rather than
+    building the whole string and letting shorten_title() cut it. Cutting the
+    finished title would land the word boundary inside the number, which is the
+    one part of the string a viewer uses to find the video.
+    """
+    suffix = numbered_suffix(number)
+    budget = TITLE_MAX_CHARS - len(suffix)
+    return f"{_fit(quote, budget)}{suffix}"
+
+
+def _fit(text: str, budget: int) -> str:
+    """Trim to ``budget`` characters on a word boundary.
+
+    An ellipsis is only worth the character when something was actually cut: a
+    quote that happens to fit is returned untouched, so short quotes do not all
+    end in a dangling dot.
+    """
+    text = (text or "").strip()
+    if len(text) <= budget:
+        return text
+    room = budget - 1                      # leave room for the ellipsis
+    head = text[:room]
+    cut = head.rfind(" ")
+    if cut > len(head) * 0.5:              # only bother if a boundary is near
+        head = head[:cut]
+    return head.rstrip(" ,.;:-") + "…"

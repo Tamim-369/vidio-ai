@@ -1,10 +1,15 @@
-"""One finished quote video: character -> quote -> voice -> card -> upload."""
+"""One finished quote video: characters -> quotes -> voice -> cards -> upload."""
 from typing import TYPE_CHECKING
 
-__all__ = ["build_script", "create_video", "run_batch"]
+__all__ = ["build_one", "build_script", "create_video", "run_batch"]
 
 if TYPE_CHECKING:  # for type checkers and IDEs; never executed at runtime
-    from src.agents.video.pipeline import build_script, create_video, run_batch
+    from src.agents.video.pipeline import (
+        build_one,
+        build_script,
+        create_video,
+        run_batch,
+    )
 
 
 def __getattr__(name: str):
