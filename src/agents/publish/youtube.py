@@ -20,7 +20,7 @@ YOUTUBE_SCOPES = [
 ]
 
 
-from src.agents.publish.metadata import generate_metadata
+from src.agents.publish.metadata import deterministic_metadata, generate_metadata
 
 
 def get_credentials():
@@ -171,11 +171,20 @@ def publish_video(video_path: str, topic: str, script: dict, thumbnail_path: str
     """
     print(f"\n📺 Publishing to YouTube: {topic}")
 
-    print("    [youtube] Generating title & description...")
-    meta = generate_metadata(topic, script)
-    title = meta["title"]
+    # A planned video carries its own title and can build its own description
+    # and tags from the quotes it already contains. That path is unique by
+    # construction -- the quote pool is deduplicated -- and it makes no model
+    # call, where the LLM path costs a generate plus up to two verifier rounds
+    # per video and will happily write the same description twice in a batch.
+    # The LLM stays as the fallback for a script that did not come from a plan.
+    if (script or {}).get("title"):
+        meta = deterministic_metadata(script)
+    else:
+        print("    [youtube] Generating title & description...")
+        meta = generate_metadata(topic, script)
+    title = (script or {}).get("title") or meta["title"]
     description = meta["description"]
-    tags =  meta["tags"]
+    tags = meta["tags"]
 
     print(f"    [youtube] Title: {title}")
 

@@ -51,20 +51,57 @@ def _setup_worker_rng(seed: int, threads: int) -> None:
     _torch.manual_seed(seed)
     _np.random.seed(seed)
 
-def _parallel_lines(workers, worker_fn, lines, voice, audio_dir) -> list:
+def _line_voice_key(line: dict, default_voice: dict) -> str:
+    """Identity of the character speaking a line, for grouping."""
+    voice = line.get("voice") or default_voice or {}
+    return voice.get("ref_audio") or voice.get("name") or "default"
+
+
+def _split_chunks_by_voice(lines: list, workers: int,
+                           default_voice: dict = None) -> list:
+    """Split lines across workers, keeping each character's lines together.
+
+    A 2-character video has 2 lines and 2 workers, so this hands one character
+    to each worker: both synthesise a line in parallel and neither has to load
+    the other's voice conditionals. Splitting by line count instead would let
+    both workers land on the same character and serialise on one conditionals
+    load.
+
+    When there are fewer distinct characters than workers (a 3-line monologue),
+    there is nothing to keep apart, so this falls back to a plain even split
+    and the workers duplicate the conditionals load, as they always have.
+    """
+    groups: dict = {}
+    for line in lines:
+        groups.setdefault(_line_voice_key(line, default_voice), []).append(line)
+
+    if len(groups) < workers:
+        return _split_chunks(lines, workers)
+
+    bins: list = [[] for _ in range(workers)]
+    loads = [0] * workers
+    # Largest group first, so the big character's lines land in the emptiest bin.
+    for key in sorted(groups, key=lambda k: -len(groups[k])):
+        target = loads.index(min(loads))
+        bins[target].extend(groups[key])
+        loads[target] += len(groups[key])
+    return [b for b in bins if b]
+
+
+def _parallel_lines(workers, worker_fn, lines, audio_dir, default_voice=None) -> list:
     """Render `workers` disjoint chunks of lines in parallel subprocesses.
 
-Uses spawn: each worker is a fresh interpreter holding its own model. Torch is
-not fork-safe once its thread pools exist (forking the parent's loaded model
-caused hangs), and two copies still fit comfortably in RAM."""
+    Uses spawn: each worker is a fresh interpreter holding its own model. Torch is
+    not fork-safe once its thread pools exist (forking the parent's loaded model
+    caused hangs), and two copies still fit comfortably in RAM."""
     ctx = mp.get_context("spawn")
     queue = ctx.SimpleQueue()
     procs = []
     threads = max(1, (os.cpu_count() or 4) // workers)
-    for idx, chunk in enumerate(_split_chunks(lines, workers)):
+    for idx, chunk in enumerate(_split_chunks_by_voice(lines, workers, default_voice)):
         seed = ((os.getpid() << 16) ^ ((idx + 1) * 7919)) & 0xFFFFFFFF
         p = ctx.Process(target=worker_fn,
-                        args=(idx, chunk, voice, audio_dir, seed, threads, queue))
+                        args=(idx, chunk, audio_dir, default_voice, seed, threads, queue))
         p.start()
         procs.append(p)
     for p in procs:
@@ -83,7 +120,12 @@ caused hangs), and two copies still fit comfortably in RAM."""
         out_lines.extend(results[idx])
     # Workers return deep copies (pickled across processes); fold the new
     # audio_path/actual_duration back into the original dict objects so callers
-    # that rely on in-place mutation keep working.
-    for orig, upd in zip(lines, out_lines):
-        orig.update(upd)
+    # that rely on in-place mutation keep working. Matched by line id, not
+    # position: grouping by character means a chunk's lines are not contiguous,
+    # so a positional zip would write one line's audio onto another's.
+    by_id = {ln["id"]: ln for ln in lines}
+    for upd in out_lines:
+        orig = by_id.get(upd["id"])
+        if orig is not None:
+            orig.update(upd)
     return lines

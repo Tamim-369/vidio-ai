@@ -13,6 +13,7 @@ drops a surviving service fails here rather than at render time.
 from __future__ import annotations
 
 import ast
+import os
 import re
 from pathlib import Path
 
@@ -67,7 +68,8 @@ MUST_SURVIVE = [
     "src/agents/publish/youtube.py",
     "src/agents/publish/prompts.py",
     "src/agents/completion/llm.py",
-    "src/agents/video/assemble.py",
+    "src/agents/video/pipeline.py",
+    "src/agents/video/title.py",
     "src/agents/video/artifacts.py",
     "src/agents/visuals/layout.py",
     "src/agents/voiceover/pauses.py",
@@ -286,7 +288,7 @@ def test_stock_image_search_is_off_the_render_path():
     behind the narration. The card renders the speaker's own photo instead, so
     the fetch step must not creep back into the pipeline.
     """
-    pipeline_src = (SRC / "agents" / "video" / "assemble.py").read_text(encoding="utf-8")
+    pipeline_src = (SRC / "agents" / "video" / "pipeline.py").read_text(encoding="utf-8")
     for banned in ("fetch_assets", "asset_fetcher", "query_agent", "asset_agent"):
         assert banned not in pipeline_src, \
             f"{banned} is back on the quote render path; cards use the speaker photo"
@@ -381,15 +383,27 @@ def test_no_new_sys_path_inserts_outside_harnesses():
     assert all("voice_tests" in o for o in offenders), offenders
 
 
-def test_quote_state_stays_inside_src():
-    """The quote pool must not be written outside src/.
+def test_quote_state_survives_temp_cleanup():
+    """The quote pool must live at the repo root, outside temp/.
 
-    Root-level state files are not in scope for this project, and a pool at the
-    repo root would also be wiped by the temp cleanup.
+    It is a durable local history, not source and not a run artifact, so it does
+    not belong under src/ any more than it belongs under temp/. The hazard is
+    one-directional and worth stating precisely: cleanup_temp() rmtree's TEMP_DIR,
+    so anything under temp/ is destroyed on the next run. A path that only looks
+    adjacent to it is fine, and an absolute one is required, because a relative
+    path resolves against the CWD and a run from any other directory would
+    silently open a fresh empty pool and restart dedup from zero.
     """
     from src.agents.quotes.agent import STATE_FILE
+    from src.agents.video.artifacts import TEMP_DIR
 
-    assert STATE_FILE.startswith("src/"), STATE_FILE
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))))
+    assert os.path.isabs(STATE_FILE), STATE_FILE
+    assert os.path.dirname(STATE_FILE) == root, STATE_FILE
+    assert os.path.basename(STATE_FILE) == "used_quotes.json"
+    # Not under the directory cleanup_temp() deletes.
+    assert TEMP_DIR not in os.path.abspath(STATE_FILE).split(os.sep)
 
 
 def test_quote_agent_is_groq_only():

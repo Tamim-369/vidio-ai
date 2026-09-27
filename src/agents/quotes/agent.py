@@ -21,6 +21,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field, asdict
+from pathlib import Path
 
 from src.agents.completion import llm
 from src.agents.quotes.json_parse import _loads_json
@@ -30,14 +31,25 @@ from src.agents.quotes.prompt import get_prompt
 # script/research model. Groq-only by policy: generate_quotes passes
 # allow_fallback=False so a dead key raises instead of silently returning
 # another provider's output.
-GROQ_QUOTE_MODEL = os.getenv("GROQ_QUOTE_MODEL", "openai/gpt-oss-120b")
+GROQ_QUOTE_MODEL = os.getenv("GROQ_QUOTE_MODEL", "openai/gpt-oss-20b")
 
-# Inside src/ so cleanup_temp() cannot wipe it. Override with QUOTE_STATE_FILE.
-STATE_FILE = os.getenv("QUOTE_STATE_FILE", "src/state/used_quotes.json")
+# Accepted-quote history, at the repo root so it sits with the other run data.
+# Absolute on purpose: a bare "used_quotes.json" resolves against the CWD, so
+# running the pipeline from anywhere but the repo root would quietly open an
+# empty pool and restart the dedup from zero. Override with QUOTE_STATE_FILE.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+STATE_FILE = os.getenv("QUOTE_STATE_FILE", str(_REPO_ROOT / "used_quotes.json"))
 
 # How many candidates to request per round. More than we need so rotation works
 # and rejects are cheap.
 BATCH = 6
+
+# Per-candidate output budget, plus a fixed allowance for the model's reasoning.
+# gpt-oss emits reasoning tokens before the answer, so a quote costs well more
+# than its own text; a budget that only fits the answers truncates the response
+# and comes back empty.
+_MAX_TOKENS_PER_QUOTE = 160
+_MAX_TOKENS_OVERHEAD = 1024
 MAX_ROUNDS = 3
 
 # The prompt asks for "preferably 10-35 words", which is roughly 55-200
@@ -276,12 +288,20 @@ def generate_quotes(n: int = 1, subject: str = "", pool_path: str = None,
         need = n - len(accepted)
         if need <= 0:
             break
-        messages = _build_messages(pool, max(BATCH, need * 2), subject, prompt_mod)
+        want = max(BATCH, need * 2)
+        messages = _build_messages(pool, want, subject, prompt_mod)
+        # max_tokens has to scale with the request. A fixed budget looks fine
+        # for a 1-2 quote call and silently breaks a 6 quote one: gpt-oss spends
+        # tokens reasoning first, so asking for 12 candidates inside 2048 tokens
+        # runs out mid-answer, returns finish_reason="length" with an empty
+        # message, and every key then fails identically. Reserve room for the
+        # answers plus the model's reasoning overhead.
+        max_tokens = _MAX_TOKENS_OVERHEAD + want * _MAX_TOKENS_PER_QUOTE
         raw = llm.call_groq(
             messages,
             temperature=0.95,          # variety matters more than consistency
             model=GROQ_QUOTE_MODEL,
-            max_tokens=2048,
+            max_tokens=max_tokens,
             tag=f"quotes r{round_no}",
             allow_fallback=False,      # Groq only, never Gemini
         )

@@ -24,18 +24,36 @@ class TestOutputPath:
     def test_slug_generation(self, topic, expected):
         # Paths are derived from topics, so slugs must stay filesystem-safe.
         from src.agents.visuals.card import output_path
-        path = output_path(topic)
-        assert os.path.basename(path) == f"{expected}.mp4"
+        stem = os.path.basename(output_path(topic))
+        assert stem.endswith(f"_{expected}.mp4"), stem
 
     def test_long_topic_is_capped(self):
         from src.agents.visuals.card import output_path
-        path = output_path("word " * 200)
-        stem = os.path.basename(path)[: -len(".mp4")]
+        stem = os.path.basename(output_path("word " * 200))[: -len(".mp4")]
         assert len(stem) <= 60
 
     def test_path_is_under_output_dir(self):
         from src.agents.visuals.card import OUTPUT_DIR, output_path
         assert output_path("x").startswith(OUTPUT_DIR)
+
+    def test_two_videos_on_one_topic_get_different_files(self, tmp_path,
+                                                         monkeypatch):
+        # The reason the name carries a timestamp. A video is one character
+        # saying one quote, so a batch has only as many topics as there are
+        # characters -- naming on the topic alone made every video from the same
+        # character overwrite the last one.
+        import src.agents.visuals.card as card
+        monkeypatch.setattr(card, "OUTPUT_DIR", str(tmp_path))
+        first = card.output_path("War and military strategy")
+        (tmp_path / os.path.basename(first)).write_bytes(b"x")
+        second = card.output_path("War and military strategy")
+        assert first != second
+
+    def test_names_sort_chronologically(self, tmp_path, monkeypatch):
+        import src.agents.visuals.card as card
+        monkeypatch.setattr(card, "OUTPUT_DIR", str(tmp_path))
+        stem = os.path.basename(card.output_path("War"))
+        assert stem[:8].isdigit() and stem[8] == "_"
 
 
 class TestDumpArtifact:
@@ -81,7 +99,7 @@ class TestPickVoice:
     Rotation, persistence and subject pairing are covered properly in
     test_voice_rotation.py. These stay here as a check that the voice manager is
     wired and exportable, and every one of them passes an explicit tmp path so
-    the suite can never advance the real src/state/voice_rotation.json cursor.
+    the suite can never advance the real voice_rotation.json cursor.
     """
 
     def test_honours_preferred(self, tmp_path):

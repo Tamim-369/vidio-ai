@@ -1,18 +1,120 @@
 """Title/description/tag generation for a rendered video.
 
-Asks the LLM for metadata, verifies it, and repairs it once if it fails the
-checks, falling back to a deterministic title so a publish never dies on a bad
-model response. Pure text work -- no YouTube client, no network.
+Two paths. The deterministic one builds metadata from the video's own quotes, so
+it is unique by construction and costs nothing. The LLM path asks a model, then
+verifies, then repairs once, and is kept as the fallback for scripts that do not
+carry the fields the deterministic builder needs. Pure text work -- no YouTube
+client, no network.
 """
 
 import json
 
 from src.agents.completion.llm import call_text
 from src.agents.publish.prompts import (
+    get_metadata_fix_prompt,
     get_metadata_prompt,
     get_metadata_verifier_prompt,
-    get_metadata_fix_prompt,
 )
+from src.agents.video.title import TITLE_MAX_CHARS, build_title, shorten_title
+from src.agents.voice_cast.voices import VOICES
+
+# Stated plainly in every description. These are fabricated quotes in the voices
+# of living public figures, and a viewer who finds one on a channel that looks
+# like the real person's should be able to tell within a second that it is not.
+_DISCLAIMER = "Parody quotes written in the style of public figures. Not real quotes."
+
+
+def _voice_cfg(line: dict) -> dict:
+    """The registry entry for whoever speaks ``line``.
+
+    A line carries the voice config inline, and a config has no ``id`` key, so
+    resolution falls back to the line's ``character`` field.
+    """
+    cfg = line.get("voice") or {}
+    if cfg.get("pseudonym") or cfg.get("short_subject"):
+        return cfg
+    return VOICES.get(cfg.get("id") or line.get("character", ""), {})
+
+
+def _pseudonym(line: dict) -> str:
+    return _voice_cfg(line).get("pseudonym", "")
+
+
+def _short_subject(line: dict) -> str:
+    return _voice_cfg(line).get("short_subject", "")
+
+
+def build_description(script: dict) -> str:
+    """Description assembled from the video's own quote.
+
+    The quote is quoted under the pseudonym that spoke it, so the description
+    cannot duplicate another video's: the line comes from a pool already
+    deduplicated against used_quotes.json. That is the whole point -- an LLM
+    asked for N descriptions writes N near-identical paragraphs, and the only
+    cure is watching for collisions and regenerating.
+
+    It also means no model call, which drops a whole step off a batch.
+    """
+    lines = [l for l in (script.get("lines") or []) if l.get("text")]
+    if not lines:
+        return _DISCLAIMER
+
+    who = _pseudonym(lines[0])
+    topic = _short_subject(lines[0])
+    opener = f"{who} on {topic}." if who and topic else (who or "")
+    body = "\n".join(f"{_pseudonym(l)}: “{l['text'].strip()}”" for l in lines)
+
+    hashtags = "#quotes #shorts"
+    for l in lines:
+        tag = "#" + _pseudonym(l).replace(" ", "")
+        if tag not in hashtags:
+            hashtags += " " + tag
+
+    return f"{opener}\n\n{body}\n\n{_DISCLAIMER}\n\n{hashtags}".strip()
+
+
+def build_tags(script: dict) -> list:
+    """Tags drawn from who is speaking and what about.
+
+    The pseudonym leads: it is what a viewer of this channel searches for, and
+    leading with the real name would advertise a channel that is not this one.
+    The speaker's own topic follows, which is what the video actually contains.
+    """
+    tags: list = []
+    for line in script.get("lines") or []:
+        for name in (_pseudonym(line), line.get("character"),
+                     _short_subject(line)):
+            if name and name.lower() not in [t.lower() for t in tags]:
+                tags.append(name.lower())
+    tags += ["parody quotes", "motivation", "gym motivation", "shorts"]
+    seen, out = set(), []
+    for t in tags:
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out[:15]
+
+
+def deterministic_metadata(script: dict) -> dict:
+    """Title, description and tags for a planned video, with no model call.
+
+    The title is passed through shorten_title() even when the script already
+    carries one. A planned batch's title is built here already-safe, but a
+    title inherited from an older script is not, and YouTube rejects the whole
+    upload over a 101st character -- so the cap is enforced at the single point
+    where a title becomes an API argument rather than trusted upstream.
+    """
+    lines = [l for l in (script.get("lines") or []) if l.get("text")]
+    title = (script.get("title") or "").strip()
+    if not title and lines:
+        first = lines[0]
+        voice_id = (first.get("voice") or {}).get("id") or first.get("character", "")
+        title = build_title(first["text"].strip(), voice_id, _pseudonym(first))
+    return {
+        "title": shorten_title(title),
+        "description": build_description(script),
+        "tags": build_tags(script),
+    }
 
 
 def _format_script(script: dict) -> str:
@@ -24,30 +126,30 @@ def _format_script(script: dict) -> str:
 
 
 def _fallback_metadata(topic: str, script_text: str) -> dict:
-    """Deterministic metadata used when the LLM call fails."""
-    title_words = topic.split()
-    keyword = " ".join(title_words[:4]).rstrip(".")
-    title = f"{keyword}: the dark truth (True Story)"
-    title = title[:65] if len(title) > 65 else title
+    """Metadata used when the LLM call fails.
 
-    hook = f"Inside the shocking story of {topic}. What really happened is worse than you think."
+    This is the path a video takes precisely when something has already gone
+    wrong, so it must not be allowed to invent a second one: the copy below
+    describes a parody-quote channel, because a channel that posts fabricated
+    quotes under living public figures' names must never describe itself as a
+    true-crime documentary, however convenient that framing would be.
+    """
+    keyword = " ".join(topic.split()[:5]).strip(" .") or "parody quotes"
+    title = f"{keyword} | parody quotes"
+    if len(title) > TITLE_MAX_CHARS:
+        title = title[:TITLE_MAX_CHARS - 1].rstrip() + "…"
+
     covered = "\n".join(
         f"- {l.strip()}" for l in script_text.splitlines() if l.strip()
     )
     description = (
-        f"{hook}\n\n"
-        f"In this video we break down {topic} from start to finish.\n\n"
+        f"{_DISCLAIMER}\n\n"
         f"{covered}\n\n"
-        "Subscribe for more dark histories and untold stories."
+        f"Parody quotes on {keyword.lower()}.\n\n"
+        "#parodyquotes #shorts"
     )
-    tags = [
-        topic.lower().rstrip("."),
-        "history",
-        "documentary",
-        "dark history",
-        "shorts",
-        "untold story",
-    ]
+    tags = ["parody quotes", keyword.lower(), "motivation", "gym motivation",
+            "shorts"]
     return {"title": title, "description": description, "tags": tags}
 
 

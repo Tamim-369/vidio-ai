@@ -188,10 +188,21 @@ would break its "quotes come from Groq" guarantee."""
                     else:
                         kwargs["max_tokens"] = min(max_tokens, 16384)
                 response = _get_client().chat.completions.create(**kwargs)
-                content = (response.choices[0].message.content or "").strip()
+                choice = response.choices[0]
+                content = (choice.message.content or "").strip()
                 if content:
                     _last_good = key_idx
                     return content
+                # An empty body is usually truncation, not an outage: a budget
+                # too small for the request comes back as finish_reason="length"
+                # with nothing in it. Saying "empty content" and rotating keys
+                # sends every key to fail the same way, which reads as the
+                # provider being down when it is the caller's budget.
+                finish = getattr(choice, "finish_reason", "?")
+                if finish == "length":
+                    raise RuntimeError(
+                        f"response truncated at max_tokens={kwargs.get('max_tokens')}"
+                        f" with an empty body; raise the budget for this request")
                 print(f"    [{tag}] Key {key_idx + 1}/{len(_clients)} returned empty content - next key")
                 raise RuntimeError("empty content from groq")
         except Exception as e:

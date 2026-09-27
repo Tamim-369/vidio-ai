@@ -50,6 +50,25 @@ class TestVoiceRegistry:
         style_id = voices.get_voice(voice_id)["writing_style"]
         assert style_id in writing_styles.WRITING_STYLES
 
+    @pytest.mark.parametrize("voice_id", REQUIRED_VOICES)
+    def test_required_voice_has_a_display_name(self, voice_id):
+        # The pipeline prints and logs VOICES[id]["name"]. The unit tests all
+        # stub pick_voice with a hand-written config, so a real entry missing
+        # "name" passed them and only broke on a live render.
+        assert voices.get_voice(voice_id).get("name")
+
+    @pytest.mark.parametrize("voice_id", REQUIRED_VOICES)
+    def test_required_voice_has_a_short_name_for_titles(self, voice_id):
+        short = voices.get_voice(voice_id).get("short_name")
+        assert short and " " not in short, "a title cannot fit a two-word name"
+
+    @pytest.mark.parametrize("voice_id", REQUIRED_VOICES)
+    def test_required_voice_face_exists(self, voice_id, project_root):
+        # Multi-character rendering draws one face per line, so a missing face
+        # is a render-time crash rather than a fallback.
+        face = voices.get_voice(voice_id).get("face")
+        assert face and (project_root / face).is_file(), f"missing face for {voice_id}: {face}"
+
     def test_enabled_set_is_exactly_the_expected_clones(self):
         # The legacy Pocket narrator stays registered but out of rotation, and
         # so does Arnold for now.

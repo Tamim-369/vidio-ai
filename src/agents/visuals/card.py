@@ -7,7 +7,7 @@ credited bottom-left. Card length follows the spoken audio exactly.
 
 import os
 import re
-from functools import lru_cache
+from datetime import datetime
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -70,15 +70,25 @@ TOP_SCRIM = 0.72
 BOTTOM_SCRIM = 0.66
 
 
-
-@lru_cache(maxsize=64)
-
-
-
 def output_path(topic: str) -> str:
-    """Name the rendered video after its topic."""
-    slug = re.sub(r"[^a-z0-9]+", "_", topic.lower()).strip("_")[:60]
-    return os.path.join(OUTPUT_DIR, f"{slug}.mp4")
+    """Name the rendered video after its topic and the moment it was made.
+
+    The timestamp is load-bearing, not decoration. A video is one character
+    saying one quote, so a batch has only as many distinct topics as there are
+    characters -- naming on the topic alone made every video from the same
+    character overwrite the last one, and a 10-video batch quietly produced
+    three files.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "_", topic.lower()).strip("_")[:40]
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(OUTPUT_DIR, f"{stamp}_{slug}.mp4")
+    # Two videos can start inside the same second in a fast test, so make the
+    # name unique rather than trusting the clock.
+    n = 2
+    while os.path.exists(path):
+        path = os.path.join(OUTPUT_DIR, f"{stamp}_{slug}_{n}.mp4")
+        n += 1
+    return path
 
 
 def _load_background(image_path: str, size: tuple) -> np.ndarray:
@@ -250,7 +260,19 @@ def render_card(quote: str, image_path: str, audio_path: str, out_path: str,
     return out_path
 
 
-def render(script: dict, voice: dict) -> str:
+def _line_face(line: dict, default_voice: dict):
+    """The face shown while a line is spoken.
+
+    Taken from the line's own voice so a multi-character video shows whoever is
+    talking. Two cloned voices over one face is the giveaway that a "conversation"
+    is really one person, which is the whole thing a multi-character video is
+    supposed to avoid.
+    """
+    voice = line.get("voice") or default_voice or {}
+    return voice.get("face"), voice.get("name")
+
+
+def render(script: dict, voice: dict = None) -> str:
     """Render every line of a quote script as a card, then concatenate.
 
     Mirrors video_assembler.assemble(script) so the pipeline can swap one call
@@ -258,16 +280,26 @@ def render(script: dict, voice: dict) -> str:
     a tail of silence — QUOTE_GAP_S after every quote but the last, and the
     longer QUOTE_END_TAIL_S on the final one, so the video never cuts off on the
     last word.
+
+    ``voice`` is the fallback for lines that do not carry their own; a
+    multi-character video sets a voice per line instead.
     """
     os.makedirs(TEMP_DIR, exist_ok=True)
-    image_path = voice.get("face")
-    if not image_path or not os.path.exists(image_path):
-        raise RuntimeError(
-            f"Voice {voice.get('name')!r} has no usable face image "
-            f"(got {image_path!r}); add a 'face' entry in src/config/voices.py"
-        )
 
     renderable = [ln for ln in script["lines"] if ln.get("audio_path")]
+    # Validate every face up front: a missing face is a config error, and
+    # finding out on line 3 of 3 after two cards already rendered is worse.
+    faces: dict = {}
+    for line in renderable:
+        image_path, who = _line_face(line, voice)
+        if not image_path or not os.path.exists(image_path):
+            raise RuntimeError(
+                f"Voice {who!r} has no usable face image "
+                f"(got {image_path!r}); add a 'face' entry in "
+                f"src/agents/voice_cast/voices.py"
+            )
+        faces[line["id"]] = image_path
+
     last_index = len(renderable) - 1
 
     segment_paths = []
@@ -275,11 +307,12 @@ def render(script: dict, voice: dict) -> str:
         audio_path = line["audio_path"]
         tail_s = QUOTE_END_TAIL_S if position == last_index else QUOTE_GAP_S
 
-        # A line may pin its own credit; otherwise the voice's author list picks
-        # one deterministically from the quote text. Pinning matters when the
-        # quote and the byline are chosen together (a hand-written script), where
-        # a hash of the text could easily land on a different name.
-        attribution, source = pick_quote_author(voice, seed=line["text"])
+        # A line may pin its own credit; otherwise the speaking character's author
+        # list picks one deterministically from the quote text. Pinning matters
+        # when the quote and the byline are chosen together (a hand-written
+        # script), where a hash of the text could easily land on a different name.
+        line_voice = line.get("voice") or voice or {}
+        attribution, source = pick_quote_author(line_voice, seed=line["text"])
         if line.get("attribution"):
             attribution = line["attribution"]
         if line.get("source"):
@@ -289,7 +322,7 @@ def render(script: dict, voice: dict) -> str:
               f"+{tail_s:.1f}s — {attribution or '(no byline)'}")
         render_card(
             quote=line["text"],
-            image_path=image_path,
+            image_path=faces[line["id"]],
             audio_path=audio_path,
             out_path=seg,
             attribution=attribution,

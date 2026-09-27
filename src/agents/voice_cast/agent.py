@@ -13,13 +13,19 @@ would open on the same character.
 
 import json
 import os
+from pathlib import Path
 
 from src.agents.voice_cast.voices import get_enabled_voices, get_voice
 from src.agents.voice_cast.writing_styles import get_style
 
-# Inside src/ so cleanup_temp() cannot wipe it. Override with
-# VOICE_ROTATION_FILE.
-ROTATION_FILE = os.getenv("VOICE_ROTATION_FILE", "src/state/voice_rotation.json")
+# The rotation cursor, at the repo root next to the quote pool. It lives in a
+# file rather than a module global because a batch runs in one process while
+# separate invocations do not (see the module docstring). Absolute for the same
+# reason as STATE_FILE: a relative path resolves against the CWD, so every
+# invocation from a different directory would restart the cycle at zero.
+# Override with VOICE_ROTATION_FILE.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+ROTATION_FILE = os.getenv("VOICE_ROTATION_FILE", str(_REPO_ROOT / "voice_rotation.json"))
 
 
 def _load_last_voice(path: str = None) -> str:

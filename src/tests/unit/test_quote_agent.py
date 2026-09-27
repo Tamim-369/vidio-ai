@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -24,6 +25,55 @@ def pool_file(tmp_path):
 def _reply(*quotes):
     """Build a model reply in the requested JSON array format."""
     return json.dumps([{"quote": q} for q in quotes])
+
+
+# --- token budget ------------------------------------------------------------
+
+class TestTokenBudget:
+    """A too-small max_tokens looks like an outage but is the caller's fault.
+
+    gpt-oss spends output tokens on reasoning before the answer, so a fixed
+    budget that fits a 1-2 quote request truncates a 6 quote one. The model
+    returns finish_reason="length" with an empty body, and every key then fails
+    the same way -- which reads as Groq being down and costs a whole batch.
+    """
+
+    def _capture(self, monkeypatch, pool_file, n):
+        seen = {}
+
+        def fake_call(messages, **k):
+            seen.update(k)
+            want = quote_agent._MAX_TOKENS_OVERHEAD + max(
+                quote_agent.BATCH, n * 2) * quote_agent._MAX_TOKENS_PER_QUOTE
+            # Long enough to clear the min_chars filter, or every candidate
+            # is rejected and the test measures the wrong thing.
+            return _reply(*[f"A properly long parody quote number {i} "
+                            f"about the subject at hand." for i in range(want)])
+
+        monkeypatch.setattr(quote_agent.llm, "call_groq", fake_call)
+        generate_quotes(n=n, subject="War", character="donald-trump",
+                        pool_path=pool_file)
+        return seen
+
+    def test_the_budget_grows_with_the_request(self, monkeypatch, pool_file):
+        small = self._capture(monkeypatch, pool_file, 2)["max_tokens"]
+        monkeypatch.undo()
+        big = self._capture(monkeypatch, pool_file, 8)["max_tokens"]
+        assert big > small, "a bigger batch must not reuse a small budget"
+
+    def test_a_batch_request_fits_its_own_answers(self, monkeypatch, pool_file):
+        # Enough headroom for every requested quote plus reasoning, or the
+        # response truncates and comes back empty.
+        seen = self._capture(monkeypatch, pool_file, 8)
+        want = max(quote_agent.BATCH, 8 * 2)
+        assert seen["max_tokens"] >= want * quote_agent._MAX_TOKENS_PER_QUOTE
+
+    def test_a_single_quote_still_gets_reasoning_headroom(self, monkeypatch,
+                                                         pool_file):
+        # Not just the answers: gpt-oss needs room to reason first, which is
+        # the whole reason this budget is not simply len(quotes) * something.
+        seen = self._capture(monkeypatch, pool_file, 1)
+        assert seen["max_tokens"] >= quote_agent._MAX_TOKENS_OVERHEAD
 
 
 # --- parsing -----------------------------------------------------------------
@@ -240,9 +290,42 @@ class TestPool:
         quote_agent._save_pool(_Pool(), path)
         assert (tmp_path / "deep" / "nested" / "pool.json").is_file()
 
-    def test_state_file_is_inside_src_by_default(self):
-        # Keeps the pool durable and out of the repo root.
-        assert quote_agent.STATE_FILE.startswith("src/")
+    def test_state_file_is_at_the_repo_root_by_default(self):
+        # Durable local history, anchored so that a run from any working
+        # directory still reads and writes the one pool instead of quietly
+        # starting a fresh, empty one. Deliberately no exists() check: the file
+        # is gitignored and only appears once a run has accepted a quote, so
+        # asserting it would fail on a fresh clone and in CI.
+        path = quote_agent.STATE_FILE
+        assert os.path.isabs(path), path
+        assert os.path.basename(path) == "used_quotes.json", path
+
+    def test_the_quote_pool_fixture_survives_a_machine_with_no_state(self, tmp_path):
+        """The suite must not depend on the gitignored pool file existing.
+
+        used_quotes.json is per-machine run history and is not in the repo, so a
+        fresh clone and CI have none. If the quote_pool fixture raised instead of
+        falling back, every test reading it would pass here and fail everywhere
+        else, which is the failure mode worth preventing.
+        """
+        import conftest as unit_conftest
+
+        # No pool file at all: the frozen sample stands in.
+        assert unit_conftest.load_quote_pool(tmp_path) == unit_conftest.SAMPLE_QUOTES
+        # A machine with history: the real pool wins, empty entries dropped.
+        (tmp_path / "used_quotes.json").write_text(json.dumps(
+            {"quotes": [{"text": "a real quote"}, {"nope": 1}, {"text": ""}]}))
+        assert unit_conftest.load_quote_pool(tmp_path) == ["a real quote"]
+        # Corrupt JSON is a missing pool, not a crash.
+        (tmp_path / "used_quotes.json").write_text("{ not json")
+        assert unit_conftest.load_quote_pool(tmp_path) == unit_conftest.SAMPLE_QUOTES
+
+        # The sample has to span the length range the title-limit tests are
+        # calibrated against, including quotes long enough that adding a
+        # pseudonym overflows YouTube's 100-character cap.
+        lengths = [len(q) for q in unit_conftest.SAMPLE_QUOTES]
+        assert min(lengths) < 70 and max(lengths) > 90, lengths
+        assert len(set(lengths)) == len(lengths), "want a spread, not one length"
 
 
 class TestPromptFidelity:

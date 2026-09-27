@@ -100,57 +100,98 @@ already reflects it and card lengths stay correct."""
             pass
 
 
-def _chat_loop(lines: list, voice: dict, audio_dir: str) -> list:
-    """Generate voiceover with Chatterbox real-voice cloning (English)."""
+def _line_voice(line: dict, default_voice: dict) -> dict:
+    """The voice a line is spoken in.
+
+    A multi-character video carries its own voice on every line; the
+    ``default_voice`` argument is the single-narrator case and the fallback
+    when a line has no voice of its own.
+    """
+    return line.get("voice") or default_voice
+
+
+def _voice_key(line: dict, default_voice: dict) -> str:
+    voice = _line_voice(line, default_voice)
+    return voice.get("ref_audio") or voice.get("name") or "default"
+
+
+def _group_by_voice(lines: list, default_voice: dict) -> list:
+    """Group lines into (voice, [lines]) runs, keeping first-seen order.
+
+    Voice conditionals are expensive to load, so a chunk is synthesised one
+    character at a time instead of switching back and forth per line. Audio is
+    written per line id, so the grouping order does not have to match the
+    script order.
+    """
+    groups: dict = {}
+    order: list = []
+    for line in lines:
+        key = _voice_key(line, default_voice)
+        if key not in groups:
+            groups[key] = (_line_voice(line, default_voice), [])
+            order.append(key)
+        groups[key][1].append(line)
+    return [groups[k] for k in order]
+
+
+def _chat_loop(lines: list, audio_dir: str, default_voice: dict = None) -> list:
+    """Generate voiceover with Chatterbox real-voice cloning (English).
+
+    Each line may name its own voice, so one video can be spoken by several
+    characters. Lines are rendered grouped by character so the voice
+    conditionals load once per character rather than once per line.
+    """
     from chatterbox.tts import ChatterboxTTS  # noqa: F401  (type ref only)
 
     model = _get_chatterbox_model()
-    params = voice.get("params", {})
-    exaggeration = params.get("exaggeration", 0.5)
-    cfg_weight = params.get("cfg_weight", 0.5)
-    temperature = params.get("temperature", 0.8)
-    repetition_penalty = params.get("repetition_penalty", 1.2)
-    min_p = params.get("min_p", 0.05)
-    top_p = params.get("top_p", 1.0)
-    pitch_shift = params.get("pitch_shift", 0.0)
-
-    _prep_chat_conds(model, voice)  # no-op if this process already prepared
-
     sr = _chat_sr
-    for line in lines:
-        line_id = line["id"]
-        cleaned = _clean_text(line["text"])
-        text = _de_shout(cleaned) if line.get("loud") else cleaned
-        path = os.path.join(audio_dir, f"{line_id}.wav")
 
-        print(f"  [tts] Line {line_id}: {text}", flush=True)
+    for voice, group in _group_by_voice(lines, default_voice):
+        params = (voice or {}).get("params", {})
+        exaggeration = params.get("exaggeration", 0.5)
+        cfg_weight = params.get("cfg_weight", 0.5)
+        temperature = params.get("temperature", 0.8)
+        repetition_penalty = params.get("repetition_penalty", 1.2)
+        min_p = params.get("min_p", 0.05)
+        top_p = params.get("top_p", 1.0)
+        pitch_shift = params.get("pitch_shift", 0.0)
 
-        wav = model.generate(
-            text=text,
-            exaggeration=exaggeration,
-            cfg_weight=cfg_weight,
-            temperature=temperature,
-            repetition_penalty=repetition_penalty,
-            min_p=min_p,
-            top_p=top_p,
-        )
+        _prep_chat_conds(model, voice)  # no-op if this process already prepared
 
-        if hasattr(wav, 'numpy'):
-            combined = wav.squeeze(0).numpy()
-        else:
-            combined = np.asarray(wav).squeeze()
+        for line in group:
+            line_id = line["id"]
+            cleaned = _clean_text(line["text"])
+            text = _de_shout(cleaned) if line.get("loud") else cleaned
+            path = os.path.join(audio_dir, f"{line_id}.wav")
 
-        combined = combined.astype(np.float32)
-        silence = np.zeros(int(0.06 * sr), dtype=np.float32)
-        combined = np.concatenate([combined, silence])
-        combined = np.concatenate([np.zeros(int(0.06 * sr), dtype=np.float32), combined])
-        combined = _apply_rate(combined, sr)
-        peak = float(np.abs(combined).max())
-        if peak > 0.95:
-            combined = combined * (0.95 / peak)
-        sf.write(path, combined, sr)
-        line["audio_path"] = path
-        line["actual_duration"] = len(combined) / sr
+            print(f"  [tts] Line {line_id}: {text}", flush=True)
+
+            wav = model.generate(
+                text=text,
+                exaggeration=exaggeration,
+                cfg_weight=cfg_weight,
+                temperature=temperature,
+                repetition_penalty=repetition_penalty,
+                min_p=min_p,
+                top_p=top_p,
+            )
+
+            if hasattr(wav, 'numpy'):
+                combined = wav.squeeze(0).numpy()
+            else:
+                combined = np.asarray(wav).squeeze()
+
+            combined = combined.astype(np.float32)
+            silence = np.zeros(int(0.06 * sr), dtype=np.float32)
+            combined = np.concatenate([combined, silence])
+            combined = np.concatenate([np.zeros(int(0.06 * sr), dtype=np.float32), combined])
+            combined = _apply_rate(combined, sr)
+            peak = float(np.abs(combined).max())
+            if peak > 0.95:
+                combined = combined * (0.95 / peak)
+            sf.write(path, combined, sr)
+            line["audio_path"] = path
+            line["actual_duration"] = len(combined) / sr
 
     return lines
 
@@ -194,16 +235,16 @@ def _generate_pocket(lines: list, audio_dir: str) -> list:
 
     return lines
 
-def _worker_chatterbox(idx, chunk, voice, audio_dir, seed, threads, queue):
+def _worker_chatterbox(idx, chunk, audio_dir, default_voice, seed, threads, queue):
     try:
         _setup_worker_rng(seed, threads)
-        out = _chat_loop(chunk, voice, audio_dir)  # model + conds inherited via fork
+        out = _chat_loop(chunk, audio_dir, default_voice)
         queue.put((False, idx, out))
     except Exception as exc:
         queue.put((True, idx, f"{exc!r}"))
 
 
-def _generate_chatterbox(lines: list, voice: dict, audio_dir: str) -> list:
+def _generate_chatterbox(lines: list, audio_dir: str, voice: dict = None) -> list:
     """Chatterbox voiceover with parallel line rendering (same model, same params).
 
     With workers > 1 the parent does NOT load the model itself; each worker loads
@@ -212,23 +253,30 @@ def _generate_chatterbox(lines: list, voice: dict, audio_dir: str) -> list:
     workers = _effective_workers(len(lines))
     if workers > 1:
         try:
-            return _parallel_lines(workers, _worker_chatterbox, lines, voice, audio_dir)
+            return _parallel_lines(workers, _worker_chatterbox, lines, audio_dir,
+                                   voice)
         except Exception as exc:
             print(f"  [tts] Parallel render failed ({exc}); falling back to sequential.", flush=True)
-    _prep_chat_conds(_get_chatterbox_model(), voice)  # sequential: load once here
-    return _chat_loop(lines, voice, audio_dir)
+    return _chat_loop(lines, audio_dir, voice)  # sequential: load once here
 
 
 def generate_audio(lines: list, voice: dict = None) -> list:
     """Generate voiceover for each line, written to temp/audio/<id>.wav.
 
-    voice: registry entry from src/config/voices.py. If None (or engine
-    "pocket") the legacy Pocket-TTS narrator is used.
+    voice: fallback registry entry for lines that do not carry their own. A
+    multi-character video puts a "voice" on every line instead, and each is
+    spoken by that character. If None (or engine "pocket") the legacy Pocket-TTS
+    narrator is used for every line.
     """
     audio_dir = os.path.join(TEMP_DIR, "audio")
     os.makedirs(audio_dir, exist_ok=True)
 
-    engine = (voice or {}).get("engine", "pocket")
-    if engine == "chatterbox":
-        return _generate_chatterbox(lines, voice, audio_dir)
-    return _generate_pocket(lines, audio_dir)
+    engines = {(line.get("voice") or voice or {}).get("engine", "pocket")
+               for line in lines}
+    if engines == {"chatterbox"}:
+        return _generate_chatterbox(lines, audio_dir, voice)
+    if engines == {"pocket"} or not engines:
+        return _generate_pocket(lines, audio_dir)
+    raise RuntimeError(
+        f"a video cannot mix TTS engines: {sorted(engines)}. "
+        "Every character in one video must use the same engine.")

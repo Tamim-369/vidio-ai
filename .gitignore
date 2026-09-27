@@ -14,6 +14,11 @@ token.json
 cookie
 used_topics.json
 
+# Run state: local mutable history, not source. Anchored to the repo root in
+# src/agents/quotes/agent.py and src/agents/voice_cast/agent.py.
+/used_quotes.json
+/voice_rotation.json
+
 # Virtual environments
 .venv
 .env

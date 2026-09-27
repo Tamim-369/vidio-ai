@@ -112,18 +112,23 @@ class TestRotation:
         # Two independent interpreters, each picking once, must also differ.
         assert _pick_in_subprocess(rotation_file) != _pick_in_subprocess(rotation_file)
 
-    def test_state_file_is_inside_src_by_default(self):
+    def test_state_file_sits_at_the_repo_root_by_default(self):
         # Read the declared default from a cold interpreter: conftest redirects
         # ROTATION_FILE to tmp_path for every test, so the patched module
-        # global cannot answer this. It must stay under src/ because
-        # cleanup_temp() is allowed to wipe anything outside it.
+        # global cannot answer this. It lives at the repo root, next to the
+        # quote pool, and the reason is the opposite of the old one: it must
+        # NOT live under temp/, because cleanup_temp() rmtree's that directory
+        # and would take the rotation cursor with it. Absolute for the same
+        # reason -- a relative path resolves against the CWD, so runs from
+        # different directories would each start their own cycle at zero.
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__)))))
         code = ("from src.agents.voice_cast import agent as c;"
                 "print(c.ROTATION_FILE)")
         out = subprocess.run([sys.executable, "-c", code], cwd=root, check=True,
                              capture_output=True, text=True).stdout.strip()
-        assert out.startswith("src/")
+        assert os.path.dirname(out) == root
+        assert os.path.basename(out) == "voice_rotation.json"
 
     def test_the_last_voice_is_recorded_on_disk(self, rotation_file):
         vid, _ = cast.pick_voice(path=rotation_file)

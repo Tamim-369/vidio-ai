@@ -21,6 +21,8 @@ VOICES = {
     # --- Template (uncomment to add a voice) ---
     # "new_voice": {
     #     "name": "New Voice",
+    #     "short_name": "NewVoice",   # one token; fallback when pseudonym is unset
+    #     "short_subject": "discipline",
     #     "engine": "chatterbox",
     #     "ref_audio": "src/experiments/voices_to_clone/voice_candidates/myvoice_ref.wav",
     #     "params": {"exaggeration": 0.5, "cfg_weight": 0.5, "temperature": 0.8},
@@ -31,7 +33,10 @@ VOICES = {
     # },
 
     "donald-trump": {
+        "pseudonym": "Don Tzu",
         "name": "Donald Trump",
+        "short_name": "Trump",
+        "short_subject": "war",
         "engine": "chatterbox",
         "ref_audio": "src/experiments/voices_to_clone/candidates/donald-trump/donald-trump_ref.wav",
         # Lower temp = stable speaker identity/emotion across lines; the script's
@@ -52,7 +57,10 @@ VOICES = {
     },
 
     "arnold-schwarzenegger": {
+        "pseudonym": "Brolexander",
         "name": "Arnold Schwarzenegger",
+        "short_name": "Arnold",
+        "short_subject": "gains",
         "engine": "chatterbox",
         "ref_audio": "src/experiments/voices_to_clone/candidates/arnold-schwarzenegger/arnold-schwarzenegger_ref.wav",
         # Measured sweeps (word-end pitch droop + identity drift on 24k ref):
@@ -75,7 +83,10 @@ VOICES = {
     },
 
     "andrew-tate": {
+        "pseudonym": "Andru Tatte",
         "name": "Andrew Tate",
+        "short_name": "Tate",
+        "short_subject": "discipline",
         "engine": "chatterbox",
         "ref_audio": "src/experiments/voices_to_clone/candidates/andrew-tate/andrew-tate_ref.wav",
         # A/B selected: prime 103.5–114.0s (119Hz conversational register).
