@@ -96,7 +96,7 @@ def word_times_from_waveform(y: np.ndarray, sr: int, text: str) -> list:
 
     starts = []
     idx = 0
-    for (b_start, b_end), cnt in zip(bursts, shares):
+    for (b_start, b_end), cnt in zip(bursts, shares, strict=True):
         w_fracs = fracs[idx:idx + cnt]  # boundaries for words in this burst
         # Normalize within-burst: fraction span [w_fracs[0]..w_fracs[-1]]
         lo, hi = w_fracs[0], w_fracs[-1]
@@ -128,4 +128,4 @@ def word_times_from_waveform(y: np.ndarray, sr: int, text: str) -> list:
             starts[i] = starts[i - 1] + MIN_WORD_GAP
             ends[i] = max(ends[i], starts[i])
     ends[-1] = dur
-    return list(zip(starts, ends))
+    return list(zip(starts, ends, strict=True))

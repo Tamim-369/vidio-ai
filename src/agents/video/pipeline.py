@@ -180,19 +180,26 @@ def _attempt(plan: VideoPlan, number: int, publish: bool, script_only: bool,
 
     A video is retried up to ``attempts`` times because the expensive step is
     neural TTS and a single call can fail on its own -- an unlucky quote, a
-    transient model error, memory pressure. The retry re-runs the whole build, so
-    it also draws fresh quotes, and quote generation deduplicates against
-    everything already used, so a retry cannot repeat the ones that failed.
+    transient model error, memory pressure. The retry re-runs the whole build,
+    so it also draws fresh quotes.
 
-    The number is spent only on success. A build that never finished put no video
-    on the channel, so it must leave the number free for the retry to reuse --
-    which is also what keeps a failed slot's type and cast reserved.
+    The number is spent only on success, and only for a real build. A build that
+    never finished put no video on the channel, so it must leave the number free
+    -- otherwise the next video would take a number that is already on YouTube.
+    A ``--script-only`` run is a dry run that produces no video, so it never
+    spends a number at all.
+
+    The trade this makes: a freed number is picked up by the *next* slot, so the
+    layout that failed never gets published and the sequence of shapes loses an
+    entry. Dense numbering is worth more than a gapless layout sequence, because
+    a viewer can see a duplicate number and cannot see a missing layout.
     """
     for attempt in range(1, attempts + 1):
         try:
             video = create_video(plan=plan, number=number, publish=publish,
                                  script_only=script_only)
-            advance_number()
+            if not script_only:
+                advance_number()
             return video
         except Exception as e:
             # A failed build can leave a half-written wav or card behind, and the
@@ -269,12 +276,17 @@ def run_batch(count: int = 5, publish: bool = True, voice: str = "",
     first_number = peek_number()
     plans = plan_batch(count, enabled, start=first_number - 1)
     if voice:
-        plans = [with_lead(p, voice) for p in plans]
+        plans = [with_lead(p, voice, enabled) for p in plans]
 
     made, failed = [], []
     for i, plan in enumerate(plans, start=1):
-        number = peek_number()
-        label = f"Video {i}/{count} (number #{number})" if number else f"Video {i}/{count}"
+        # A real build spends numbers, so it takes the live counter -- that is
+        # what guarantees a number is never issued twice when a slot fails
+        # mid-batch. A dry run spends nothing, so it shows the number this slot
+        # would take if the batch were run for real, and repeating the dry run
+        # gives the same answer instead of drifting forward.
+        number = (first_number + i - 1) if script_only else peek_number()
+        label = f"Video {i}/{count} (number #{number})"
         print(f"\n{'=' * 62}\n  {label}\n{'=' * 62}")
         video_t0 = time.monotonic()
         video = _attempt(plan, number, publish, script_only, attempts, label)

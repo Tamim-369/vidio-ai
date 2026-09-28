@@ -21,9 +21,9 @@ TITLE_MAX_CHARS = 100
 def build_title(quote: str, voice_id: str = "", name: str = "") -> str:
     """Title for a video: the channel's pseudonym, then the quote.
 
-    Built from the quote rather than a template, which makes it unique for free
-    -- quotes are already deduplicated against used_quotes.json, so two videos
-    cannot collide on a title.
+    Built from the quote rather than a template, which makes it naturally varied
+    -- each video's opening line is its own, so titles do not read as one
+    repeated string.
 
     The pseudonym is the channel's, not the real name. These are fabricated
     quotes in the voice of living public figures, so the parody name is the one

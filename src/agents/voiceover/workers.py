@@ -17,11 +17,19 @@ TTS_WORKERS = int(os.getenv("TTS_WORKERS", "2"))
 
 
 def _effective_workers(n_lines: int) -> int:
-    """Number of parallel render workers (settings.TTS_WORKERS, default 2).
+    """Number of parallel render workers (TTS_WORKERS, default 2).
 
     Measured on this machine: each worker holds ~4.3GB (own model copy) and a
     single worker already uses all memory bandwidth, so 2 workers give ~1.9x
-    wall-clock speedup at identical quality; 3+ would exceed RAM on 14GB boxes.
+    wall-clock speedup at identical quality; 3+ would exceed RAM on a 14GB box.
+
+    Set TTS_WORKERS=1 on a machine that is also running a desktop. A 10-video
+    batch at 2 workers peaked around 8.6GB and was killed mid-render with no
+    traceback -- the OOM killer, not an exception. At 1 worker the peak is
+    ~4.3GB and the same batch finished 10/10 in 17.8 minutes, which was *faster*
+    than the parallel path because spawning two interpreters and loading two
+    models costs more than it saves. 1 is the better default anywhere the batch
+    is not the only thing running.
     """
     if not n_lines or n_lines < 2:
         return 1

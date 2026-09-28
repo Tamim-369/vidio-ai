@@ -40,10 +40,50 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    # There is no test suite, so pytest is deliberately absent. pyflakes stays
-    # because it is the only thing standing between a typo and a runtime
-    # AttributeError in a pipeline whose expensive step is a 45-second render.
+    # The suite is deliberately narrow: it covers the logic that is cheap to get
+    # wrong and expensive to discover late (the number -> cast mapping, the
+    # counter's advance rules, script JSON parsing, title/description limits).
+    # It does not mock the TTS or the renderer -- those are verified by running
+    # the pipeline, not by asserting on their internals.
+    "pytest==9.0.1",
+    # pyflakes stays because it is the only thing standing between a typo and a
+    # runtime AttributeError in a pipeline whose expensive step is a 45-second
+    # render. ruff lints and formats; it is not a correctness gate.
     "pyflakes==3.4.0",
+    "ruff==0.15.1",
+]
+
+[tool.pytest.ini_options]
+# `package = false` means the project is never installed into the venv, so
+# `import src...` only resolves with the repo root on the path. Without this,
+# pytest prepends the tests/ directory instead and every import fails.
+pythonpath = ["."]
+testpaths = ["tests"]
+# The suite must never touch the network or a real API key. Anything that needs
+# one is an integration check, run by running the pipeline, not by pytest.
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+# Chatterbox and google-genai are third-party and not ours to reformat.
+line-length = 100
+target-version = "py313"
+extend-exclude = [".venv", "output", "debug_output"]
+
+[tool.ruff.lint]
+# E4/E7/E9 are the correctness-adjacent pycodestyle rules (unused imports,
+# undefined names). The stylistic E1/E2/E3 and W sets are left off on purpose:
+# this repo is not ruff-formatted, and enabling them would bury real findings
+# under hundreds of pre-existing nits.
+select = ["E4", "E7", "E9", "F", "B", "UP"]
+ignore = [
+    # Imports deliberately follow load_dotenv() in the entry points and in
+    # llm.py itself, which reads its keys from the environment at import time.
+    # Moving them above the dotenv call would silently produce a client with no
+    # credentials, which is a far worse failure than the style warning.
+    "E402",
+    # `l` for a left/limit/line local is used throughout and is unambiguous in
+    # context.
+    "E741",
 ]
 
 [tool.uv]

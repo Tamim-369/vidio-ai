@@ -9,19 +9,18 @@ three one- or two-sentence jokes on one subject, not a documentary about a topic
   script/research GROQ_MODEL.
 - Batch, then filter: one reply yields several candidates so a rejection costs
   no extra round trip.
-- Accumulating pool: accepted quotes are persisted so later videos avoid
-  repeats. The prompt's rotation rules are only enforceable across videos if
-  that history is persisted.
+- No quote history: nothing is persisted between runs. The prompt is asked for
+  fresh material every time and each call is independent. The only duplication
+  check is within a single call, because two identical quotes in one video
+  would render as two identical cards.
 - Rejection is local: the prompt is never edited and no extra instructions are
   appended, so a bad candidate is filtered here and the round is simply
   resampled."""
 from __future__ import annotations
 
-import json
 import os
 import re
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
+from dataclasses import dataclass
 
 from src.agents.completion import llm
 from src.agents.quotes.json_parse import _loads_json
@@ -32,13 +31,6 @@ from src.agents.quotes.prompt import get_prompt
 # allow_fallback=False so a dead key raises instead of silently returning
 # another provider's output.
 GROQ_QUOTE_MODEL = os.getenv("GROQ_QUOTE_MODEL", "openai/gpt-oss-20b")
-
-# Accepted-quote history, at the repo root so it sits with the other run data.
-# Absolute on purpose: a bare "used_quotes.json" resolves against the CWD, so
-# running the pipeline from anywhere but the repo root would quietly open an
-# empty pool and restart the dedup from zero. Override with QUOTE_STATE_FILE.
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-STATE_FILE = os.getenv("QUOTE_STATE_FILE", str(_REPO_ROOT / "used_quotes.json"))
 
 # How many candidates to request per round. More than we need so rotation works
 # and rejects are cheap.
@@ -101,38 +93,6 @@ class Quote:
     """One accepted joke."""
 
     text: str
-
-
-@dataclass
-class _Pool:
-    quotes: list = field(default_factory=list)
-
-
-# --- state -------------------------------------------------------------------
-
-def _load_pool(path: str = None) -> _Pool:
-    path = path or STATE_FILE
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return _Pool()
-    if not isinstance(data, dict):
-        return _Pool()
-    return _Pool(quotes=[q for q in data.get("quotes", []) if isinstance(q, dict)])
-
-
-def _save_pool(pool: _Pool, path: str = None) -> None:
-    path = path or STATE_FILE
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"quotes": pool.quotes}, f, indent=2)
-
-
-def _remember(pool: _Pool, quote: Quote) -> None:
-    pool.quotes.append(asdict(quote))
 
 
 # --- parsing / filtering -----------------------------------------------------
@@ -199,13 +159,17 @@ def parse_candidates(raw: str) -> list:
     return [c for c in out if c["quote"]]
 
 
-def reject_reason(cand: dict, pool: _Pool, min_chars: int = MIN_QUOTE_CHARS,
+def reject_reason(cand: dict, seen: set, min_chars: int = MIN_QUOTE_CHARS,
                   max_chars: int = MAX_QUOTE_CHARS) -> str:
     """Return why a candidate is unusable, or "" to accept it.
 
-    These are the mechanically checkable rules: no meta-commentary, no
-    duplicate of something already used, and a length inside the window the
+    These are the mechanically checkable rules: no meta-commentary, not a repeat
+    of another quote in this same video, and a length inside the window the
     character's prompt asked for.
+
+    ``seen`` holds the normalised text of everything already accepted for the
+    current call. It is deliberately not persisted: a duplicate is only a
+    visible defect when both copies land on the same video.
     """
     text = (cand.get("quote") or "").strip()
 
@@ -224,10 +188,8 @@ def reject_reason(cand: dict, pool: _Pool, min_chars: int = MIN_QUOTE_CHARS,
             or _FACT_ASSERTION.search(text) or _FACT_NARRATIVE.search(text):
         return "reads like a fact, not a joke"
 
-    norm = _normalise(text)
-    for q in pool.quotes:
-        if _normalise(q.get("text", "")) == norm:
-            return "already used"
+    if _normalise(text) in seen:
+        return "duplicate within this video"
 
     return ""
 
@@ -240,27 +202,18 @@ def _normalise(text: str) -> str:
 
 # --- generation --------------------------------------------------------------
 
-def _build_messages(pool: _Pool, n: int, subject: str, prompt_mod) -> list:
+def _build_messages(n: int, subject: str, prompt_mod) -> list:
     """Return the user's prompt, filled in, as the single user message.
 
     The prompt is sent as-is. It already states the length hint ("preferably
     10-35 words"), the output format and the self-check, so restating any of
     that here would only be a second, drifting copy of the specification.
-
-    The one addition is the list of quotes already used. That is not a rule and
-    not a rewording -- it is cross-video state the prompt structurally cannot
-    carry, since each request starts with no memory of previous videos. Delete
-    the block below to send the prompt completely untouched.
     """
     user = prompt_mod.build_prompt(subject, n)
-    if pool.quotes:
-        recent = [q.get("text", "") for q in pool.quotes[-40:]]
-        user += ("\n\nAlready used — do NOT repeat or paraphrase any of these:\n"
-                 + "\n".join(f"- {t}" for t in recent))
     return [{"role": "user", "content": user}]
 
 
-def generate_quotes(n: int = 1, subject: str = "", pool_path: str = None,
+def generate_quotes(n: int = 1, subject: str = "",
                     explain: bool = False, character: str = "") -> list:
     """Return up to ``n`` fresh, validated jokes on ``subject``.
 
@@ -281,15 +234,15 @@ def generate_quotes(n: int = 1, subject: str = "", pool_path: str = None,
         # has no prompt of its own yet.
         print(f"    [quotes] {character} has no prompt yet, using the shared one")
 
-    pool = _load_pool(pool_path)
     accepted: list = []
+    seen: set = set()
 
     for round_no in range(1, MAX_ROUNDS + 1):
         need = n - len(accepted)
         if need <= 0:
             break
         want = max(BATCH, need * 2)
-        messages = _build_messages(pool, want, subject, prompt_mod)
+        messages = _build_messages(want, subject, prompt_mod)
         # max_tokens has to scale with the request. A fixed budget looks fine
         # for a 1-2 quote call and silently breaks a 6 quote one: gpt-oss spends
         # tokens reasoning first, so asking for 12 candidates inside 2048 tokens
@@ -309,14 +262,14 @@ def generate_quotes(n: int = 1, subject: str = "", pool_path: str = None,
         for cand in parse_candidates(raw):
             if len(accepted) >= n:
                 break
-            reason = reject_reason(cand, pool, min_chars, max_chars)
+            reason = reject_reason(cand, seen, min_chars, max_chars)
             if reason:
                 if explain:
                     print(f"   ✗ dropped ({reason}): {cand['quote']}")
                 continue
             quote = Quote(text=cand["quote"])
             accepted.append(quote)
-            _remember(pool, quote)
+            seen.add(_normalise(quote.text))
 
     if len(accepted) < n:
         raise RuntimeError(
@@ -324,5 +277,4 @@ def generate_quotes(n: int = 1, subject: str = "", pool_path: str = None,
             f"{MAX_ROUNDS} rounds"
         )
 
-    _save_pool(pool, pool_path)
     return accepted

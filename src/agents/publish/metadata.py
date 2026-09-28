@@ -57,11 +57,9 @@ def build_description(script: dict, number: int = 0) -> str:
     and attributed to the pseudonym that spoke them, which is what lets a viewer
     tell a three-character video apart at a glance.
 
-    The quote lines come from a pool already deduplicated against
-    used_quotes.json, so the description cannot duplicate another video's: an LLM
-    asked for N descriptions writes N near-identical paragraphs, and the only
-    cure is watching for collisions and regenerating. It also means no model
-    call, which drops a whole step off a batch.
+    The quote lines are written straight from the script, so this costs no model
+    call at all -- an LLM asked for N descriptions writes N near-identical
+    paragraphs, and a deterministic builder cannot.
 
     The disclaimer is not decoration. These are fabricated quotes in the voices
     of living public figures, and it has to be visible without expanding

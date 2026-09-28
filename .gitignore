@@ -33,6 +33,9 @@ temp/
 cookie
 /topics
 debug_output/
+# The channel's video counter. Local mutable state: committing it would put one
+# developer's numbering in the repository for everyone else to inherit.
+/video_number.json
 /voices
 /channel_cache
 .venv*/

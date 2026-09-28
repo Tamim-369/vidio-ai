@@ -140,9 +140,11 @@ character's prompt asks for, for reading like a fact rather than a joke, or for
 duplicating anything already used. The prompt treats sincere wisdom as a
 failure, so the filter is deliberately strict.
 
-**No quote is ever used twice.** Every accepted quote is appended to
-`used_quotes.json` and checked against on the way in. The file is local mutable
-state, deliberately untracked.
+**No quote is repeated inside a video.** A batch asks for several candidates and
+keeps the first n that pass, tracking what it has already taken for that call so
+the same joke cannot land on two cards. There is deliberately no history across
+videos: the prompt is asked for fresh material every time and nothing is
+persisted between runs.
 
 **The text client has somewhere else to go.** A batch of ten is nineteen calls
 against a rate limit, and a hard 429 mid-batch means a half-finished run. The
@@ -186,22 +188,46 @@ behaviour for this content, so it stays off.
 
 ## Verifying a change
 
-There is no test suite. Changes are checked by running the thing:
-
 ```bash
-uv run --with pyflakes python -m pyflakes src/   # unused/undefined names
-uv run src/main.py --batch=10 --script-only      # the plan, titles, numbering
-uv run src/main.py --batch=1 --no-upload         # one full render, kept local
+uv run pytest                                     # the fast checks
+uv run ruff check src/                            # lint
+uv run --with pyflakes python -m pyflakes src/    # unused/undefined names
+uv run src/main.py --batch=10 --script-only       # the plan, titles, numbering
+uv run src/main.py --batch=1 --no-upload          # one full render, kept local
 ```
 
-`--script-only` is the cheap one and the one to reach for: it exercises
-planning, quote generation, validation, dedupe, the title and description
-builders and the number counter, and stops before the 45-second render.
+`pytest` covers the logic that is cheap to get wrong and expensive to discover
+late: the number-to-cast mapping, when a number is and is not spent, the title
+length limit, the description format, and the quote filter. It stubs the
+expensive stages, so it runs in under a second and never calls a model. It does
+not test TTS or the renderer — those are checked by running the pipeline.
+
+`--script-only` is the cheap end-to-end one: it exercises planning, quote
+generation, validation, the title and description builders and the number
+counter, and stops before the render. It spends no numbers, so it is safe to
+re-run.
+
+## Memory, and why `TTS_WORKERS=1`
+
+Each TTS worker is a spawned subprocess holding its own Chatterbox model, about
+4.3GB. Two workers is roughly 8.6GB of peak memory, which fits a 14GB machine
+that is running nothing else and does not fit one with a browser open — a
+10-video batch was killed mid-render on this box with no traceback, which is the
+OOM killer rather than an exception.
+
+```bash
+TTS_WORKERS=1 uv run src/main.py --batch=10 --no-upload
+```
+
+At one worker the peak is ~4.3GB and the batch is *faster*, because spawning two
+interpreters and loading two models costs more than the parallelism saves. Use 2
+only on a machine with headroom to spare.
 
 Two things it will not catch, and which cost real time when they slip:
 
 - **A title over 100 characters.** YouTube rejects the whole upload at the API,
   after a full render. `build_numbered_title` fits the quote to whatever the
   suffix leaves, and a number reaching five digits makes the suffix longer.
-- **A quote that repeats.** The dedupe pool is what stops it, and it lives in
-  `used_quotes.json` next to this file.
+- **A quote that repeats on the same video.** The per-call `seen` set in the
+  quote agent is what stops it, and it lives and dies inside one
+  `generate_quotes` call.

@@ -115,17 +115,34 @@ def plan_batch(count: int, enabled, start: int = 0) -> list:
     return plans
 
 
-def with_lead(plan: VideoPlan, voice: str) -> VideoPlan:
+def with_lead(plan: VideoPlan, voice: str, enabled=None) -> VideoPlan:
     """The same slot, but spoken by ``voice`` instead of the cycle's choice.
 
     ``--voice`` is an override of who leads, not of what shape the video is: a
     three-character video stays three characters. Only the lead moves, and the
     co-stars are re-derived from the override so the cast is not somebody
     followed by a cast that was picked around them.
+
+    The promoted voice is dropped from the co-stars, and a replacement is pulled
+    in to keep the cast the same size. Without that, ``--voice`` naming somebody
+    already in the cast yields the same character twice, which is one voice and
+    one face rendered onto two cards.
     """
     if voice == plan.lead:
         return plan
-    rest = [c for c in plan.characters[1:]]
+
+    want = len(plan.characters)
+    rest = [c for c in plan.characters[1:] if c != voice]
+    # Top up from the enabled voices in cycle order, skipping anyone already in
+    # the cast. `enabled` is passed by the caller so a disabled voice can never
+    # be promoted into a cast; without it the current cast is the only pool,
+    # which can leave the video short rather than invent a character.
+    for candidate in (list(enabled) if enabled else list(plan.characters)):
+        if len(rest) + 1 >= want:
+            break
+        if candidate != voice and candidate not in rest:
+            rest.append(candidate)
+
     return VideoPlan(
         index=plan.index,
         type_id=plan.type_id,
