@@ -23,8 +23,10 @@ Strategy (validated on wet runs):
 """
 import os
 import re
+import glob
 import time
 import threading
+from statistics import median
 import requests
 import pytesseract
 from PIL import Image
@@ -53,6 +55,12 @@ from urllib.parse import urlsplit
 
 from src.agents.asset import assign as local_assign
 from src.agents.asset import keywords as local_keywords
+from src.agents.asset.commons import (
+    ASSET_ENABLE_PEXELS as _ENABLE_PEXELS,
+    COMMONS_PER_ENTITY,
+    MAX_ENTITY_LEN,
+)
+from src.agents.asset.entities import extract_entities
 from src.agents.query.agent import build_search_queries
 
 HEADERS = {"User-Agent": "VideoPipeline/1.0 (history/mystery shorts; contact: local)"}
@@ -104,6 +112,102 @@ _source_meta = {}       # path -> {"license": str, "source": str}
 _COMMONS_SEARCH_LOCK = threading.Lock()
 _commons_last = 0.0
 _commons_gap_s = 0.35
+
+# --- Era gate -------------------------------------------------------------
+# A vision audit of a real pool (18 images, vision model ratings) found 9/18
+# rated 0. Every one was MODERN: Soyuz/shuttle/Atlas launches returned by the
+# query "Rocket" (6 images, 0 usable), plus a 1976 press photo in a 1942
+# battle set. Grounding cannot catch this -- "V-2 rocket" really is in the
+# article, so the term is valid; the archive's answer to it is modern.
+#
+# Commons already returns DateTime / ImageDescription / Categories in the
+# extmetadata we were fetching and discarding, so the era signal is free and
+# available BEFORE the image is downloaded. This gate drops the modern hits
+# without spending a byte or a model call. Vision scoring then runs on
+# survivors only.
+#
+# Slack is generous on purpose: it must not reject period-adjacent material
+# (a 1970 photo of a 1943 U-boat is legitimate). It only rejects the wrong
+# century.
+ERA_SLACK_YEARS = int(os.getenv("ASSET_ERA_SLACK", "30"))
+
+# Set once per video by _set_topic_era(). Empty = era unknown -> gate is a
+# no-op, so a topic with no dates in it is never starved of images.
+_topic_era_year = None
+
+# Vehicle/program names that cannot appear in a pre-1950 subject. Only
+# consulted when the topic itself is historical, so a modern-topic video
+# (rockets, spaceflight) is never harmed.
+_MODERN_MARKERS = (
+    "soyuz", "space shuttle", "spaceshuttle", "atlas v", "atlas ii",
+    "falcon 9", "falcon heavy", "starship", "spacex", "nasa",
+    "progress msoyuz", "ariane", "space launch", "rocket launch",
+    "saturday rocket", "long march", "vanguard", "ariane 5",
+)
+
+# Per-video metadata for downloaded assets, keyed by absolute path. Consumed by
+# the vision gate later, so it is captured at download time.
+_ASSET_META: dict = {}
+
+
+def _set_topic_era(title: str, body: str) -> None:
+    """Record the median year the topic is about, for the anachronism gate.
+
+    Median, not max: an article about 1943 may mention 1945 and also 1918 in
+    passing, and the central era is what we must not drift away from.
+    """
+    global _topic_era_year
+    years = [int(y) for y in re.findall(r"\b(1[6-9]\d\d|20[0-2]\d)\b", f"{title} {body}")]
+    years = [y for y in years if 1600 <= y <= 2025]
+    _topic_era_year = int(median(years)) if years else None
+
+
+def _meta_field(ii: dict, name: str) -> str:
+    v = ((ii.get("extmetadata") or {}).get(name) or {}).get("value", "")
+    if not isinstance(v, str):
+        v = str(v)
+    return re.sub(r"<[^>]+>", " ", v)
+
+
+def _anachronistic(ii: dict, title: str) -> bool:
+    """True when the file's own metadata places it far outside the topic era.
+
+    Only fires when we know the topic's year; an unknown era passes everything
+    through rather than silently emptying the pool.
+    """
+    if _topic_era_year is None:
+        return False
+    horizon = _topic_era_year + ERA_SLACK_YEARS
+
+    # DateTimeOriginal, NOT DateTime. DateTime is the UPLOAD date: a 1942
+    # photo of the Akagi sits on Commons with DateTime "2025-01-20". Using it
+    # rejected essentially the entire archive (measured: 100% of a real pool
+    # blocked, good images included) because archival uploads are mostly
+    # recent. DateTimeOriginal is the date the work was made, and is populated
+    # for the archival material this channel depends on.
+    #   "19 May 1942" / "1942-06-06" / "4 June 1942 date QS:P571..."
+    dt_orig = _meta_field(ii, "DateTimeOriginal")
+    if dt_orig:
+        years = re.findall(r"\b(1[6-9]\d\d|20\d\d)\b", dt_orig)
+        if years and max(int(y) for y in years) > horizon:
+            return True
+
+    # Categories carry era info even when DateTime is missing or wrong, e.g.
+    # "Space Shuttle launches" or "1960s photographs".
+    cats = _meta_field(ii, "Categories")
+    if cats:
+        cat_years = re.findall(r"\b(1[6-9]\d\d|20\d\d)s?\b", cats)
+        if cat_years and max(int(y.rstrip("s")) for y in cat_years) > horizon:
+            return True
+        low = cats.lower()
+        if _topic_era_year < 1950 and any(m in low for m in _MODERN_MARKERS):
+            return True
+
+    # Last resort: the description naming a modern vehicle.
+    desc = f"{_meta_field(ii, 'ImageDescription')} {title}".lower()
+    if _topic_era_year < 1950 and any(m in desc for m in _MODERN_MARKERS):
+        return True
+    return False
 # DuckDuckGo similarly rate-limits aggressive parallel scraping.
 _DDG_SEM = threading.BoundedSemaphore(3)
 
@@ -144,15 +248,23 @@ def _is_blocked_host(url: str) -> bool:
 def _download_image(url: str, path: str, headers: dict = HEADERS) -> bool:
     if not url or _is_blocked_host(url):
         return False
-    try:
-        r = requests.get(url, timeout=8, headers=headers)
-        if r.status_code == 200 and "image" in r.headers.get("Content-Type", ""):
-            if _is_usable_image(r.content):
-                with open(path, "wb") as f:
-                    f.write(r.content)
-                return True
-    except Exception:
-        pass
+    # One retry on a reset/timeout: Commons CDN resets connections under
+    # parallel load, and a single dropped fetch used to shrink the pool.
+    for attempt in range(2):
+        try:
+            r = requests.get(url, timeout=8, headers=headers)
+            if r.status_code == 200 and "image" in r.headers.get("Content-Type", ""):
+                if _is_usable_image(r.content):
+                    with open(path, "wb") as f:
+                        f.write(r.content)
+                    return True
+            return False
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt == 0:
+                time.sleep(0.6)
+                continue
+        except Exception:
+            return False
     return False
 
 
@@ -237,14 +349,31 @@ def _commons_search(params: dict) -> dict:
     Returns the parsed JSON dict ({} on failure). Wikimedia rate-limits burst
     API access with empty bodies AND HTML throttle pages, so a non-JSON body is
     treated as "no results" for the retry logic below.
+
+    A ConnectionError (reset by peer) is retried with backoff: during a live
+    pool run both Commons and Openverse started resetting connections
+    mid-run, which silently cost us whole entities (Akagi and Kaga returned
+    zero images while working minutes earlier).
     """
     with _COMMONS_SEARCH_LOCK:
         global _commons_last
         wait = _commons_gap_s - (time.monotonic() - _commons_last)
         if wait > 0:
             time.sleep(wait)
-        r = requests.get("https://commons.wikimedia.org/w/api.php", params=params,
-                         headers={"User-Agent": HEADERS["User-Agent"]}, timeout=15)
+        try:
+            r = requests.get("https://commons.wikimedia.org/w/api.php", params=params,
+                             headers={"User-Agent": HEADERS["User-Agent"]}, timeout=15)
+        except (requests.ConnectionError, requests.Timeout):
+            for attempt in range(2):
+                time.sleep(1.5 * (attempt + 1))
+                try:
+                    r = requests.get("https://commons.wikimedia.org/w/api.php", params=params,
+                                     headers={"User-Agent": HEADERS["User-Agent"]}, timeout=15)
+                    break
+                except (requests.ConnectionError, requests.Timeout):
+                    continue
+            else:
+                return {}
         _commons_last = time.monotonic()
     if "json" not in r.headers.get("Content-Type", ""):
         return {}
@@ -290,6 +419,12 @@ def _fetch_wikimedia_commons(search_term: str, base_path: str, count: int = 1) -
                     break
             if not url or not _license_ok(lic):
                 continue
+            # NOTE: an era gate on Commons metadata was tried here and
+            # removed. Measured on a real pool it blocked 6/6 images a vision
+            # model rated 5 (correct subject) while catching modern junk,
+            # because both DateTime and DateTimeOriginal hold UPLOAD dates for
+            # most archival files. It emptied the pool. Kept as _anachronistic
+            # with tests documenting the failure; the vision gate is the way.
             w, h = ii.get("width", 1), ii.get("height", 1)
             try:
                 if h and (w / h) > MAX_ASPECT_RATIO:
@@ -419,12 +554,90 @@ def _generate_topic_keywords(topic: str) -> list:
 # ---------------------------------------------------------------------------
 
 def _fetch_for_keyword(keyword: str, kw_idx: int, assets_dir: str, per_kw: int) -> list:
+    """Fetch images for one term across providers.
+
+    Commons is the primary source and gets the whole budget. The fallbacks each
+    get a smaller slice so that one term cannot dominate the pool through a
+    second provider -- the per-term budget is only meaningful if every provider
+    respects it.
+    """
     base = os.path.join(assets_dir, f"kw{kw_idx}")
-    paths = _fetch_pexels(keyword, base, per_kw)
+    paths = []
+    if _ENABLE_PEXELS:
+        paths = _fetch_pexels(keyword, base, per_kw)
     paths.extend(_fetch_wikimedia_commons(keyword, f"{base}c", per_kw))
-    paths.extend(_fetch_openverse(keyword, f"{base}o", per_kw))
-    paths.extend(_fetch_ddg(keyword, f"{base}d", per_kw))
+    side = max(1, per_kw // 2)
+    paths.extend(_fetch_openverse(keyword, f"{base}o", side))
+    paths.extend(_fetch_ddg(keyword, f"{base}d", side))
     return paths
+
+
+# Generic English nouns that are also common Commons search terms. Measured on
+# a real pool: the term "Rocket" returned 6 images (Soyuz, shuttle, Atlas) and
+# ZERO were usable, while "Schnorchel" returned 4 and ALL 4 were usable. The
+# term is the whole story, so a generic term gets a token budget instead of a
+# full slot. Cheap, instant, no model.
+GENERIC_TERMS = {
+    "rocket", "rockets", "ship", "ships", "plane", "planes", "war", "battle",
+    "navy", "army", "tank", "tanks", "gun", "guns", "flag", "flags", "map",
+    "maps", "train", "trains", "city", "island", "sea", "harbour", "harbor",
+    "attack", "battlefield", "explosion", "fire", "soldier", "soldiers",
+    "general", "admiral", "captain", "warship", "submarine", "submarines",
+    "battleship", "carrier", "aircraft", "engine", "engines", "missile",
+    "missiles", "torpedo", "torpedoes", "weapons", "military", "naval",
+    "operation", "operations", "trial", "trials", "experiments", "research",
+    "history", "museum", "memorial", "monument", "portrait", "painting",
+}
+
+
+def _entity_budget(entity: str) -> int:
+    """How many images a term may contribute.
+
+    A rare, multi-word, or ship-named term earns the full budget. A single
+    common noun earns 1, because the audit showed a generic term spends the
+    entire image allowance on unusable results and starves the good terms.
+    """
+    words = entity.split()
+    if len(words) >= 2:
+        return COMMONS_PER_ENTITY
+    return 1 if entity.lower().strip(".,") in GENERIC_TERMS else COMMONS_PER_ENTITY
+
+
+def _entity_specs(entities: list, assets_dir: str) -> list:
+    """Entity pool -> download specs. line_id is None: the pool is topic-level,
+    so no image is 'owned' by a line until the relevance gate picks one.
+
+    The 4th element is the per-term image budget (see _entity_budget)."""
+    specs = []
+    for i, e in enumerate(entities):
+        e = (e or "").strip()[:MAX_ENTITY_LEN]
+        if e:
+            specs.append((e, None, os.path.join(assets_dir, f"ent{i}"),
+                          _entity_budget(e)))
+    return specs
+
+
+def _download_entities(entities: list, assets_dir: str) -> dict:
+    """Download a candidate pool from the topic entity pool.
+
+    Returns {path: (entity, None)}. Commons is serialized by its own global
+    throttle inside _commons_search; downloads stay parallel.
+    """
+    specs = _entity_specs(entities, assets_dir)
+    candidates = {}
+    if not specs:
+        return candidates
+    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_WORKERS, len(specs))) as ex:
+        futs = {ex.submit(_fetch_for_keyword, e, i, assets_dir, budget): e
+                for i, (e, _lid, _b, budget) in enumerate(specs)}
+        for fut in as_completed(futs):
+            e = futs[fut]
+            try:
+                for p in fut.result():
+                    candidates.setdefault(p, (e, None))
+            except Exception as ex:
+                print(f"      [asset] entity '{e}' error: {ex}")
+    return candidates
 
 
 def _round_robin_specs(specs: list, max_specs: int) -> list:
@@ -667,26 +880,75 @@ def _backfill_gaps(lines: list, kept: dict) -> None:
         print(f"  [asset] Line {line['id']}: backfilled 1 image [{lic}]")
 
 
+def _topic_body(topic: str) -> str:
+    """Best-effort article text for the topic, used only to widen the entity
+    pool. The proper nouns usually live in the body, not the headline. Reads
+    whatever the research stage left in the workspace; never raises."""
+    try:
+        for name in ("research", "story"):
+            for path in sorted(glob.glob(os.path.join(workspace_path(topic), f"*{name}*.txt"))):
+                text = open(path, encoding="utf-8", errors="ignore").read()
+                if len(text) > 200:
+                    return text
+    except Exception:
+        pass
+    return ""
+
+
+def _ensure_min_pool(kept: dict, entities: list, assets_dir: str) -> dict:
+    """Refetch from the entity pool in rounds until we clear MIN_IMAGES.
+
+    The pool is topic-level, so a round re-asks Commons for the SAME entities
+    with a wider per-entity budget rather than inventing new prose queries.
+    """
+    rounds = 0
+    while len(kept) < MIN_IMAGES and rounds < 2:
+        rounds += 1
+        print(f"  [asset] Only {len(kept)} images - pool refetch round {rounds}...")
+        extra = _download_entities(entities, assets_dir)
+        for p, v in _describe_and_filter_candidates(extra).items():
+            if p not in kept:
+                kept[p] = v
+        print(f"  [asset] Kept now: {len(kept)}")
+    return kept
+
+
 def fetch_assets(lines: list, topic: str = "") -> list:
     """Per-line query, OCR-clean, license-safe asset fetch (no vision)."""
     assets_dir = os.path.join(workspace_path(topic), "assets")
     os.makedirs(assets_dir, exist_ok=True)
 
     print(f"  [asset] Topic: {topic}")
-    print("  [asset] Query agent: one search-query set per narration line...")
-    query_map = build_search_queries(lines, topic)
+    print("  [asset] Extracting topic entity pool (one local call)...")
+    body = _topic_body(topic)
+    _set_topic_era(topic, body)
+    if _topic_era_year:
+        print(f"  [asset] Era gate: subject ~{_topic_era_year} "
+              f"(rejecting files dated after {_topic_era_year + ERA_SLACK_YEARS})")
+    entities = extract_entities(topic, body)
+    print(f"  [asset] Entities: {len(entities)}")
+    for e in entities[:12]:
+        print(f"       - {e}")
 
-    specs = _build_query_specs(lines, topic, query_map)
-    print(f"  [asset] {len(specs)} queries across {len(query_map)} line(s)")
-
-    print("  [asset] Downloading candidates (Pexels/Commons/Openverse/DDG-commons)...")
-    candidates = _download_candidates(specs, assets_dir)
+    if not entities:
+        print("  [asset] Entity pool empty - falling back to per-line queries")
+        query_map = build_search_queries(lines, topic)
+        specs = _build_query_specs(lines, topic, query_map)
+        print(f"  [asset] {len(specs)} queries across {len(query_map)} line(s)")
+        print("  [asset] Downloading candidates (legacy per-line path)...")
+        candidates = _download_candidates(specs, assets_dir)
+    else:
+        print(f"  [asset] Downloading pool (Commons-first, pexels={'on' if _ENABLE_PEXELS else 'off'})...")
+        candidates = _download_entities(entities, assets_dir)
     print(f"  [asset] Downloaded {len(candidates)} candidate(s)")
 
     kept = _describe_and_filter_candidates(candidates)
     print(f"  [asset] OCR-clean, kept: {len(kept)}")
 
-    kept = _ensure_min_images(kept, specs, assets_dir)
+    if entities:
+        kept = _ensure_min_pool(kept, entities, assets_dir)
+    else:
+        kept = _ensure_min_images(kept, specs, assets_dir)
 
     if len(kept) < MIN_IMAGES:
         print(f"  [asset] ⚠️  Only {len(kept)} images (wanted >= {MIN_IMAGES})")

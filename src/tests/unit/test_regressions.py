@@ -77,19 +77,32 @@ def test_split_parts_nudge_never_makes_parts_worse():
     nudge is only taken when every resulting part is at least
     MIN_PART_WORDS and the sizes differ by at most one word.
     """
-    import glob
-    import json
-
-    lines = []
-    for p in glob.glob("debug_output/*_script_*.json"):
-        try:
-            data = json.load(open(p))
-        except Exception:
-            continue
-        for ln in data.get("lines", []):
-            text = (ln.get("text") or "").strip()
-            if len(text.split()) >= 4:
-                lines.append(text.split())
+    # Real narration lines captured from pipeline renders (Battle of Midway,
+    # V-2, paratroop drop, Operation Big Ben, Baron 52). Embedded on purpose:
+    # debug_output/ is gitignored and only exists on a machine that has run a
+    # render, so globbing it made this test silently pass with zero coverage
+    # and then fail for anyone else.
+    SAMPLES = [
+        "How does a fleet of planes turn the world's most feared navy into scrap?",
+        "The Japanese Combined Fleet was right there, carriers refueling and rearming.",
+        "It was the exact moment the U.S. Strike groups found them.",
+        "Planes from the Enterprise, Hornet, and Yorktown went in.",
+        "A single direct hit struck the Akagi.",
+        "It exploded among the armed and fueled aircraft on the deck.",
+        "The ship was instantly set ablaze and abandoned.",
+        "The Kaga and Soryu met the same fiery fate in the attack.",
+        "The entire Kido Butai was destroyed in a matter of hours.",
+        "The Japanese Combined Fleet suffered a decisive defeat at Midway.",
+        "A family of nine in France falls asleep to the sound of bombs.",
+        "Louis Leroux and his wife had just watched Allied fighter-bombers smash the bridges.",
+        "They decided the night was over, so the whole family crawled back into bed.",
+        "Parachutes began descending into the nearby marshes, drifting down.",
+        "How does a weapon of mass destruction turn into a ticket to space?",
+        "The rocket that ended the war became the key to the stars.",
+        "But a secret group saw something else entirely.",
+        "They simply stopped existing on every map.",
+    ]
+    lines = [s.split() for s in SAMPLES if len(s.split()) >= 4]
 
     def even_split(words, n_parts):
         import math
@@ -125,7 +138,7 @@ def test_split_parts_nudge_never_makes_parts_worse():
         assert smallest >= captions.MIN_PART_WORDS, f"stranded tiny part in {words!r}"
         assert spread <= 1, f"lopsided parts {spread} wide in {words!r}"
         checked += 1
-    assert checked > 0, "expected real narration samples in debug_output/"
+    assert checked > 0, "expected the embedded narration samples to be exercised"
 
 
 # --------------------------------------------------------------------------
@@ -215,3 +228,147 @@ def test_output_path_disambiguates_collisions(tmp_path, monkeypatch):
     second = fh.output_path(b)
     assert second != first, "a long shared prefix must not silently overwrite"
     assert os.path.basename(second).startswith(os.path.basename(first)[:-4])
+
+
+# --- era gate: 18-image vision audit, 9/18 rated 0 and all 9 were modern ----
+# Ground truth is the ratings a vision model returned for probe_results/
+# e2e_assets/uboat. Every rating-0 hit was a modern space launch returned by
+# the query "Rocket", or a 1976 press photo in a 1942 battle set.
+
+def _ii(orig="", cats="", desc="", upload=""):
+    return {"extmetadata": {k: {"value": v} for k, v in
+                            (("DateTimeOriginal", orig), ("Categories", cats),
+                             ("ImageDescription", desc), ("DateTime", upload))}}
+
+
+@pytest.fixture
+def era(monkeypatch):
+    import src.agents.asset.agent as A
+    monkeypatch.setattr(A, "_topic_era_year", 1943)
+    return A
+
+
+@pytest.mark.parametrize("name,orig,cats,desc", [
+    ("soyuz",        "2010-06-15 00:00:00", "", ""),
+    ("shuttle",      "1985-04-12 00:00:00", "Space Shuttle launches", ""),
+    ("atlas",        "2018-02-06 00:00:00", "", ""),
+    ("modern_press", "2021-01-01 00:00:00", "", "modern navy media interview"),
+    ("cat_dated",    "", "2010s photographs|Spacecraft", ""),
+    ("cat_future",   "", "2040s photographs", ""),
+])
+def test_era_gate_rejects_modern_markers(era, name, orig, cats, desc):
+    assert era._anachronistic(_ii(orig, cats, desc), f"File:{name}.jpg") is True, name
+
+
+@pytest.mark.parametrize("name,orig,cats,desc,upload", [
+    ("schnorchel",   "1943-01-01 00:00:00", "Schnorchel|German U-boats", "", ""),
+    ("u117",         "1944-06-01 00:00:00", "1944 in naval aviation", "deck crew", ""),
+    ("no_date",      "", "", "some description", ""),
+    ("paint",        "", "Paintings of submarines", "a 1940s painting", ""),
+    ("peril_near",   "1958-01-01 00:00:00", "Schnorchel", "restored boat", ""),
+    # The real Akagi file on Commons: made 1942, uploaded 2025. Gating on
+    # DateTime (upload) rejected it; DateTimeOriginal is what makes it usable.
+    ("akagi_uploaded_late", "1942-06-06 00:00:00", "Akagi (ship, 1927)",
+     "diorama of the attack", "2025-01-20 06:18:58"),
+    ("enterprise_2015", "4 June 1942 date QS:P571", "USS Enterprise (CV-6)",
+     "steaming at high speed", "2015-01-23 15:30:34"),
+    ("sbd_2023",     "19 May 1942", "Douglas SBD Dauntless|PD US Navy",
+     "SBD-3 taking off", "2023-04-23 17:06:28"),
+])
+def test_era_gate_keeps_period_material(era, name, orig, cats, desc, upload):
+    assert era._anachronistic(_ii(orig, cats, desc, upload), f"File:{name}.jpg") is False, name
+
+
+def test_era_gate_ignores_upload_date_alone(era):
+    """A recent upload is NOT anachronism. This was a silent total-wipe bug:
+    every archival image on Commons is uploaded in the 2000s-2020s."""
+    assert era._anachronistic(_ii("1942-06-06", upload="2025-01-20"),
+                              "File:Akagi.jpg") is False
+    assert era._anachronistic(_ii("", cats="Schnorchel", upload="2026-01-01"),
+                              "File:U-boat.jpg") is False
+
+
+def test_era_gate_is_noop_when_topic_year_unknown(monkeypatch):
+    import src.agents.asset.agent as A
+    monkeypatch.setattr(A, "_topic_era_year", None)
+    # Must not starve the pool for a topic with no dates in it.
+    assert A._anachronistic(_ii("2021-01-01", "SpaceX", "falcon"), "File:x.jpg") is False
+
+
+def test_set_topic_era_uses_median_not_max(monkeypatch):
+    import src.agents.asset.agent as A
+    A._set_topic_era("Battle of Midway",
+                     "In 1942 the fleet sailed. The war began 1914 and ended 1945.")
+    assert A._topic_era_year == 1942, "max would wrongly pick 1945 or 1914"
+
+
+def test_set_topic_era_none_without_years(monkeypatch):
+    import src.agents.asset.agent as A
+    A._set_topic_era("Something undated", "no years in here at all")
+    assert A._topic_era_year is None
+
+
+def test_modern_markers_do_not_hurt_modern_topics(monkeypatch):
+    import src.agents.asset.agent as A
+    A._set_topic_era("Falcon 9 and the Dragon capsule", "Since 2010 SpaceX has flown")
+    # A modern subject must NOT be blocked by the spaceflight marker list.
+    assert A._anachronistic(_ii("2020-05-30", "Falcon 9 launches", ""), "File:f9.jpg") is False
+
+
+# --- per-term budget: generic terms eat the pool and return nothing --------
+# Measured on a real 18-image pool (vision-model ratings):
+#   "Schnorchel" -> 4 images, 4 usable.  "Rocket" -> 6 images, 0 usable.
+# The term is the whole story, so a generic term gets a token budget.
+
+def test_entity_budget_starves_generic_terms():
+    from src.agents.asset.agent import _entity_budget, COMMONS_PER_ENTITY
+    # a generic single noun: 1 image, not the full slot
+    assert _entity_budget("Rocket") == 1
+    assert _entity_budget("rocket") == 1
+    assert _entity_budget("Submarine") == 1
+    # a rare single word is still a real entity and keeps its budget
+    assert _entity_budget("Schnorchel") == COMMONS_PER_ENTITY
+    assert _entity_budget("Werwolf") == COMMONS_PER_ENTITY
+    # multi-word entities always keep the full budget
+    assert _entity_budget("Kido Butai") == COMMONS_PER_ENTITY
+    assert _entity_budget("Japanese Combined Fleet") == COMMONS_PER_ENTITY
+
+
+def test_entity_budget_tolerates_punctuation():
+    from src.agents.asset.agent import _entity_budget
+    assert _entity_budget("Rocket.") == 1
+    assert _entity_budget("missile,") == 1
+
+
+def test_entity_specs_carry_budget_through():
+    from src.agents.asset.agent import _entity_specs
+    specs = _entity_specs(["Rocket", "Schnorchel", "Kido Butai"], "/tmp/a")
+    assert [s[0] for s in specs] == ["Rocket", "Schnorchel", "Kido Butai"]
+    assert specs[0][3] == 1, "generic term must carry the small budget"
+    assert specs[1][3] > 1 and specs[2][3] > 1
+    # every spec is a 4-tuple now; the downloader unpacks exactly that
+    for s in specs:
+        assert len(s) == 4
+
+
+def test_generic_budget_does_not_starve_a_narrow_topic():
+    """A topic made ONLY of generic terms must still return images, not zero."""
+    from src.agents.asset.agent import _entity_budget
+    budget = sum(_entity_budget(t) for t in ("Rocket", "Submarine", "Tanks"))
+    assert budget >= 3, "at least one image per term, always"
+
+
+def test_fallback_providers_get_a_smaller_slice(monkeypatch):
+    """A per-term budget is meaningless if DDG re-spends it on the same term."""
+    from src.agents.asset import agent as A
+    seen = {}
+    monkeypatch.setattr(A, "_ENABLE_PEXELS", False)
+    monkeypatch.setattr(A, "_fetch_wikimedia_commons",
+                        lambda kw, base, count: seen.setdefault("commons", count) and [] or [])
+    monkeypatch.setattr(A, "_fetch_openverse",
+                        lambda kw, base, count: seen.setdefault("openverse", count) and [] or [])
+    monkeypatch.setattr(A, "_fetch_ddg",
+                        lambda kw, base, count: seen.setdefault("ddg", count) and [] or [])
+    A._fetch_for_keyword("Rocket", 0, "/tmp/a", 6)
+    assert seen["commons"] == 6
+    assert seen["openverse"] < 6 and seen["ddg"] < 6

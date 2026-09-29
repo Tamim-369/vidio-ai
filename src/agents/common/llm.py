@@ -49,6 +49,7 @@ NUM_PREDICT = {
     "assign": 1200,     # asset_agent: image -> line JSON mapping
     "as_repair": 800,   # asset_agent: one self-correction pass
     "queries": 3500,    # query builder stage: topic-grounded per-line queries
+    "entities": 500,    # asset_agent: topic -> short entity-shaped search terms
 }
 
 _MODELS: dict[str, str] = {"scene": LOCAL_MODEL}
@@ -77,14 +78,18 @@ def _model_for(tag: str) -> str:
     return _MODELS.get(tag, LOCAL_MODEL)
 
 
-def _generate(prompt: str, temperature: float, budget_tag: str, model: str | None = None, repeat_penalty: float = 1.1) -> str:
+def _generate(prompt: str, temperature: float, budget_tag: str, model: str | None = None, repeat_penalty: float = 1.1, local_only: bool = False) -> str:
     """One generation call through the central seam.
 
     Groq (default) when a key exists; local Ollama otherwise. `budget_tag`
     selects the token budget / model routing (NUM_PREDICT above) so each stage
     keeps its existing quotas on both backends.
+
+    `local_only=True` pins the call to Ollama regardless of provider config,
+    for cheap deterministic utility calls that should never spend API quota
+    (e.g. the topic entity pool). Raises like the Ollama path if local is down.
     """
-    if _provider() == "groq":
+    if _provider() == "groq" and not local_only:
         from src.services.providers import call_groq
         # No max_tokens here: qwen (primary) caps output tokens per minute and
         # gpt-oss-120b (fallback) is a reasoning model whose small caps are
@@ -129,5 +134,5 @@ def _generate(prompt: str, temperature: float, budget_tag: str, model: str | Non
     return val
 
 
-def _local(prompt: str, temperature: float = 0.5, tag: str = "story", model: str | None = None, repeat_penalty: float = 1.1) -> str:
-    return _generate(prompt, temperature, tag, model, repeat_penalty)
+def _local(prompt: str, temperature: float = 0.5, tag: str = "story", model: str | None = None, repeat_penalty: float = 1.1, local_only: bool = False) -> str:
+    return _generate(prompt, temperature, tag, model, repeat_penalty, local_only)
