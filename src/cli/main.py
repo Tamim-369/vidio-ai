@@ -33,7 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("topic", nargs="?", default=None, help="Single topic to make a video for")
     parser.add_argument("--batch", action="store_true", help="Generate topics and make videos for all")
     parser.add_argument("--use-saved", action="store_true", help="Use saved topic batch instead of generating")
-    parser.add_argument("--upload", action="store_true", help="Upload to YouTube after rendering (default)")
+    parser.add_argument("--upload", action="store_true",
+                        help="(no-op) uploading is the default; use --no-upload to disable")
     parser.add_argument("--no-upload", action="store_true", help="Render WITHOUT uploading to YouTube")
     parser.add_argument("--voice", default="", help="Force a specific voice id (see --list-voices)")
     parser.add_argument("--list-voices", action="store_true", help="List all registered voices and exit")

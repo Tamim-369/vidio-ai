@@ -321,7 +321,11 @@ def _on_free_host(url: str) -> bool:
         host = (urlsplit(url).netloc or "").lower()
     except Exception:
         host = (url or "").lower()
-    return host.endswith(_FREE_HOST_SUFFIXES) or any(h in host for h in _FREE_HOST_SUFFIXES)
+    # Match the host EXACTLY or as a subdomain of an allowed suffix. A plain
+    # substring test would let "loc.gov.attacker.com" (and lookalikes like
+    # "xloc.gov") through the whitelist.
+    host = host.split("@")[-1].split(":")[0]
+    return any(host == sfx or host.endswith("." + sfx) for sfx in _FREE_HOST_SUFFIXES)
 
 
 def _fetch_ddg(search_term: str, base_path: str, count: int = 1) -> list:

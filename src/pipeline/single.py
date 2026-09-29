@@ -84,68 +84,72 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
 
     ensure_workspace(topic)
 
-    if raw_data:
-        print(f"\n📚 Using provided story for: {topic}")
-    else:
-        print(f"\n🔍 Researching: {topic}")
-        raw_data = research(topic)
-    timing["research"] = time.monotonic() - t0
-    dump_artifact("research", raw_data, topic)
-
-    print(f"\n📝 Building script (100% local, Ollama {LOCAL_MODEL})...")
     try:
-        script = _timed("script", build_lab_script,
-                        topic, str(raw_data or ""),
-                        style=speaking_style_for_style(style), timing=timing)
-    except Exception as e:
-        print(f"   ❌ Local script lab failed: {e}")
-        raise
-    print(f"   {len(script['lines'])} lines generated")
+        if raw_data:
+            print(f"\n📚 Using provided story for: {topic}")
+        else:
+            print(f"\n🔍 Researching: {topic}")
+            raw_data = research(topic)
+        timing["research"] = time.monotonic() - t0
+        dump_artifact("research", raw_data, topic)
 
-    if script_only:
-        dump_artifact("script", script, topic)
+        print(f"\n📝 Building script (100% local, Ollama {LOCAL_MODEL})...")
+        try:
+            script = _timed("script", build_lab_script,
+                            topic, str(raw_data or ""),
+                            style=speaking_style_for_style(style), timing=timing)
+        except Exception as e:
+            print(f"   ❌ Local script lab failed: {e}")
+            raise
+        print(f"   {len(script['lines'])} lines generated")
+
+        if script_only:
+            dump_artifact("script", script, topic)
+            timing["total"] = time.monotonic() - t0
+            print(f"\n⏱️  Script-only time: {_format_timing(timing)}")
+            print("\n✅ Script only — assets, audio, video, and upload were skipped.\n")
+            return script
+
+        # Kick off title/description generation NOW on a background thread. It only
+        # needs the script (never the video), so it runs in parallel with asset
+        # fetch / audio / assembly and the upload never waits on the LLM metadata.
+        metadata_future = None
+        if publish:
+            print("   (spawning title & description generation in parallel...)")
+            metadata_future = _get_metadata_pool().submit(generate_metadata, topic, script)
+
+        print("\n🖼️  Fetching images...")
+        script["lines"] = _timed("assets", fetch_assets, script["lines"], topic=topic, timing=timing)
+
+        print("\n🎙️  Generating voiceover...")
+        if gate_heavy:
+            print(f"   (waiting for a heavy slot: ≤{HEAVY_SLOTS} video(s) render at once)")
+        with _heavy_slots if gate_heavy else nullcontext():
+            script["lines"] = _timed("audio", generate_audio, script["lines"], voice=voice_cfg, topic=topic, timing=timing)
+
+            print("\n🎬 Assembling video...")
+            output = _timed("assemble", assemble, script, topic=topic, timing=timing)
+
+        # Record the topic as done so it is never regenerated (fuzzy + exact dedup).
+        from src.agents.topic.helpers import record_made_video
+        record_made_video(topic)
+
+        if publish:
+            print("  (publishing...)")
+            metadata = metadata_future.result() if metadata_future else None
+            _timed("publish", publish_video, output, script["topic"], script,
+                   metadata=metadata, timing=timing)
+        else:
+            print("\n⏭️  Skipping YouTube upload (pass --no-upload to keep it local)")
+
         timing["total"] = time.monotonic() - t0
-        print(f"\n⏱️  Script-only time: {_format_timing(timing)}")
-        print("\n✅ Script only — assets, audio, video, and upload were skipped.\n")
-        return script
-
-    # Kick off title/description generation NOW on a background thread. It only
-    # needs the script (never the video), so it runs in parallel with asset
-    # fetch / audio / assembly and the upload never waits on the LLM metadata.
-    metadata_future = None
-    if publish:
-        print("   (spawning title & description generation in parallel...)")
-        metadata_future = _get_metadata_pool().submit(generate_metadata, topic, script)
-
-    print("\n🖼️  Fetching images...")
-    script["lines"] = _timed("assets", fetch_assets, script["lines"], topic=topic, timing=timing)
-
-    print("\n🎙️  Generating voiceover...")
-    if gate_heavy:
-        print(f"   (waiting for a heavy slot: ≤{HEAVY_SLOTS} video(s) render at once)")
-    with _heavy_slots if gate_heavy else nullcontext():
-        script["lines"] = _timed("audio", generate_audio, script["lines"], voice=voice_cfg, topic=topic, timing=timing)
-
-        print("\n🎬 Assembling video...")
-        output = _timed("assemble", assemble, script, topic=topic, timing=timing)
-
-    # Record the topic as done so it is never regenerated (fuzzy + exact dedup).
-    from src.agents.topic.helpers import record_made_video
-    record_made_video(topic)
-
-    if publish:
-        print("  (publishing...)")
-        metadata = metadata_future.result() if metadata_future else None
-        _timed("publish", publish_video, output, script["topic"], script,
-               metadata=metadata, timing=timing)
-    else:
-        print("\n⏭️  Skipping YouTube upload (pass --no-upload to keep it local)")
-
-    cleanup_temp(topic)
-    timing["total"] = time.monotonic() - t0
-    print(f"\n⏱️  Build time: {_format_timing(timing)}")
-    print(f"\n✅ Done! Video saved to: {output}\n")
-    return output
+        print(f"\n⏱️  Build time: {_format_timing(timing)}")
+        print(f"\n✅ Done! Video saved to: {output}\n")
+        return output
+    finally:
+        # Always release this video's workspace, including on failure and on
+        # the script-only early return, so temp/ cannot grow without bound.
+        cleanup_temp(topic)
 
 
 def create_video_from_topic(topic: dict, publish: bool = True, voice: str = "", script_only: bool = False,

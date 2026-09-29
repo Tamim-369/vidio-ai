@@ -78,6 +78,24 @@ def research(topic: str, urls: list[str] | None = None) -> str:
         pass
 
     if not results:
+        # Last resort. The `wikipedia` lib frequently fails (PageError) on
+        # titles it cannot auto-suggest, which is exactly the case that leaves
+        # a bare title - useless to the story stage. Before giving up, try the
+        # project's own Wikipedia API layer, which searches properly.
+        try:
+            from src.agents.topic.wikipedia import _wiki_extract_many, _wiki_search
+            hits = _wiki_search(topic)
+            if hits:
+                extracts = _wiki_extract_many([hits[0]])
+                body = extracts.get(hits[0]) or ""
+                if len(body) >= 300:
+                    return f"Wikipedia ({hits[0]}):\n{body}"
+        except Exception:
+            pass
+        # Still nothing: echo the source URLs so the stage at least knows
+        # where the material was supposed to come from.
+        if urls:
+            return topic + "\n\nSources:\n" + "\n".join(f"- {u}" for u in urls)
         return topic  # fallback: just return the topic itself
 
     return "\n\n".join(results)

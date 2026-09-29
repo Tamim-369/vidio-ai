@@ -18,7 +18,14 @@ def load_used_titles() -> list:
 
 
 def dedupe_leads_leads(leads: list[Lead]) -> list[Lead]:
-    """Remove near-duplicate leads within the agent's own collected list."""
+    """Remove near-duplicate leads within the agent's own collected list.
+
+    NOTE: the 0.7 fuzzy threshold here is deliberately stricter than the 0.6
+    used by topic.helpers._is_duplicate(). This prunes near-identical leads
+    from a single crawl (where a second near-duplicate is worthless), whereas
+    _is_duplicate guards against re-making a video that already exists (where
+    a looser match is safer). Do not "unify" these two numbers.
+    """
     kept: list[Lead] = []
     seen_titles = [l.title for l in leads[:1]] if leads else []
     for lead in leads:

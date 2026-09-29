@@ -32,9 +32,9 @@ from src.agents.story.agent import build_story
 from src.agents.common.llm import LOCAL_MODEL
 from src.utils.file_helpers import dump_artifact
 
-# Source of truth for the ordered stage list (logging + any tooling that needs
-# to enumerate the pipeline). The function calls below are what actually run.
-STAGES = ["scene", "story", "agent", "queries"]
+# Documentation of the ordered stage list. The calls in run_pipeline() below are
+# what actually execute; keep this in sync when adding a stage.
+STAGES = ["scene", "story", "script", "queries"]
 
 
 def run_pipeline(topic: str, story: str, style: str = "narrator") -> dict:
@@ -83,8 +83,11 @@ def run_pipeline(topic: str, story: str, style: str = "narrator") -> dict:
 def speaking_style_for_style(style: dict | None) -> str:
     """Resolve a voice writing-style dict to a speaking style id.
 
-    The main branch has a single speaking style (the neutral narrator);
-    persona styles (arnold/trump/tate) live on the wizdom branch.
+    Only the neutral narrator ships on this branch, so every voice resolves to
+    "narrator" and the persona/rules text in writing_styles.WRITING_STYLES is
+    not injected into any prompt. Persona styles (arnold/trump/tate) live on
+    the wizdom branch. The argument is kept so that branch can restore the
+    mapping without changing call sites.
     """
     return "narrator"
 

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -76,6 +77,18 @@ def dump_artifact(step: str, data, topic: str = "") -> str:
 
 
 def output_path(topic: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "_", topic.lower()).strip("_")
-    slug = slug[:60]  # cap length to avoid OS path issues
-    return os.path.join(OUTPUT_DIR, f"{slug}.mp4")
+    """Final MP4 path for a topic.
+
+    The slug is capped at 60 chars, so two topics sharing a long prefix would
+    otherwise write to the same file and silently overwrite each other. If the
+    plain path is already taken, append a short hash of the FULL topic so both
+    survive. A topic that has not been rendered yet keeps the exact path it
+    always had, so existing output filenames are unchanged.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "_", (topic or "").lower()).strip("_")
+    slug = slug[:60] or "video"  # cap length to avoid OS path issues
+    path = os.path.join(OUTPUT_DIR, f"{slug}.mp4")
+    if os.path.exists(path):
+        digest = hashlib.sha1((topic or "").encode("utf-8")).hexdigest()[:6]
+        path = os.path.join(OUTPUT_DIR, f"{slug}_{digest}.mp4")
+    return path

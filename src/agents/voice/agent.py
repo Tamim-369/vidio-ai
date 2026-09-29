@@ -6,11 +6,15 @@ Responsibilities:
 - Resolve a voice's writing style for script generation.
 """
 
+import threading
+
 from src.agents.voice.registry import get_all_voices, get_enabled_voices, get_voice
 from src.agents.voice.writing_styles import get_style
 
 # Round-robin cursor: modulo by the number of enabled voices.
+# Guarded because batch rendering calls pick_voice() from a thread pool.
 _round_robin_index = 0
+_round_robin_lock = threading.Lock()
 
 
 def list_voices() -> None:
@@ -41,8 +45,9 @@ def pick_voice(preferred: str = "", exclude: set = None) -> tuple:
     if not candidates:
         candidates = get_enabled_voices()
 
-    voice_id, voice_cfg = candidates[_round_robin_index % len(candidates)]
-    _round_robin_index += 1
+    with _round_robin_lock:
+        voice_id, voice_cfg = candidates[_round_robin_index % len(candidates)]
+        _round_robin_index += 1
     return voice_id, voice_cfg
 
 

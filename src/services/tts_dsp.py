@@ -22,6 +22,10 @@ load_dotenv()
 # narration (~3.0-3.4 wps of burst speech): a floor of 2.6 left lots of lines
 # audibly draggy, and forcing a 1.05x stretch felt robotic, so the floor sits at
 # normal narration (+1) and the ceiling just reins in the rare rush; 0 disables.
+# Not yet implemented: the words-per-second rate corrector is described below
+# but no code reads these yet. postprocess_line() currently only forwards
+# `gain`, so _sox_process() always early-returns and these have no effect.
+# Setting them in the environment currently does nothing.
 TTS_MIN_WPS = float(os.getenv("TTS_MIN_WPS", "3.0"))
 TTS_MAX_WPS = float(os.getenv("TTS_MAX_WPS", "3.4"))
 

@@ -55,6 +55,9 @@ MIN_WORD_GAP = 0.045           # force a word to hold at least this long (s)
 MIN_PARTS = 3                  # short/medium sentences -> 3 parts
 MAX_PARTS = 4                  # long sentences (>= LONG_WORD_N words) -> 4
 LONG_WORD_N = 12
+# A caption part shorter than this reads as a stray fragment on screen, so a
+# punctuation snap that creates one is rejected in favour of the even split.
+MIN_PART_WORDS = 2
 PART_FADE_S = 0.12             # fade-in per part (avoids hard pops)
 _PUNCT_PART = set(".,;:!?—…")
 
@@ -263,9 +266,19 @@ def _split_parts(words: list, n_parts: int) -> list:
         return [[w] for w in words]
     size = math.ceil(n / n_parts)
     bounds = [min(size * p, n) for p in range(1, n_parts)]
+    # The even split as it stands today, including the bounds that fall off
+    # the end (`best < n`). Nudging is only allowed to move boundaries, never
+    # to add or drop one, so the part count stays exactly as it was.
+    even_kept = []
+    for b in bounds:
+        k = b
+        if even_kept and k <= even_kept[-1]:
+            k = even_kept[-1] + 1
+        if k < n:
+            even_kept.append(k)
     refined = []
     for b in bounds:
-        best, best_d = b, abs(b - b)
+        best, best_d = b, math.inf
         for k in range(max(1, b - 2), min(n, b + 3)):
             if words[k - 1][-1] in _PUNCT_PART:
                 d = abs(k - b)
@@ -275,7 +288,23 @@ def _split_parts(words: list, n_parts: int) -> list:
             best = refined[-1] + 1
         if best < n:
             refined.append(best)
-    bounds = sorted(refined)
+    # A nudge is only worth taking if it does NOT make the parts lopsided.
+    # Snapping to a comma can strand a single word ("only", "and") in its own
+    # caption part, which reads worse than a clean even split. Accept the snap
+    # only when every resulting part keeps at least MIN_PART_WORDS words and
+    # the part sizes stay within one word of each other.
+    if (len(refined) == len(even_kept)
+            and all(a < b for a, b in zip(refined, refined[1:]))
+            and all(0 < x < n for x in refined)):
+        candidate = [words[a:b] for a, b in zip([0] + sorted(refined), sorted(refined) + [n])]
+        candidate = [p for p in candidate if p]
+        sizes = [len(p) for p in candidate]
+        balanced = (len(sizes) > 1
+                    and min(sizes) >= MIN_PART_WORDS
+                    and (max(sizes) - min(sizes)) <= 1)
+        if balanced:
+            return candidate
+    bounds = even_kept
     parts = [words[a:b] for a, b in zip([0] + bounds, bounds + [n])]
     return [p for p in parts if p]
 

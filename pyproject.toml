@@ -45,6 +45,17 @@ dependencies = [
 [project.scripts]
 videoai = "src.cli.main:main"
 
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+# Only src/tests/unit holds automated tests. The files directly in src/tests/
+# are MANUAL scripts that call live Groq/YouTube APIs and must never be
+# collected by a plain `pytest` run.
+testpaths = ["src/tests/unit"]
+python_files = ["test_*.py"]
+addopts = "-q"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]

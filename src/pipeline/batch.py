@@ -16,6 +16,7 @@ self-contained phases:
   per-video timing is still reported.
 """
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 from src.utils.file_helpers import dump_artifact
@@ -87,6 +88,7 @@ def _produce_topics(topics: list, publish: bool, voice: str, script_only: bool =
                                     gate_heavy=gate_heavy)
         except Exception as e:
             print(f"❌ Failed on topic: {e}")
+            traceback.print_exc()
         return (topic["title"], time.monotonic() - v_t0)
 
     if concurrency <= 1:
@@ -106,7 +108,14 @@ def _produce_topics(topics: list, publish: bool, voice: str, script_only: bool =
 
 def run_batch(generate: bool = True, limit: int = 100, target: int = 24, publish: bool = True,
               voice: str = "", script_only: bool = False, concurrency: int = 1):
-    """Pick the first `target` fresh topics (no ranking) and produce a video each."""
+    """Pick the first `target` fresh topics (no ranking) and produce a video each.
+
+    `limit` bounds the queue as well, so `--limit` is not silently ignored.
+    It only ever SHORTENS the run: with the default limit=100 and target=24 it
+    is never the binding constraint, so default behaviour is unchanged.
+    """
+    if limit and limit > 0:
+        target = min(target, limit)
     topics = _select_topics(generate=generate, target=target)
 
     dump_artifact("topics", topics)
