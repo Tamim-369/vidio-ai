@@ -907,3 +907,58 @@ def test_no_frozen_tail_after_a_crossfade(tmp_path):
     while tail > 0 and np.array_equal(frames[tail], frames[tail - 1]):
         tail -= 1
     assert tail == len(frames) - 1, f"{(len(frames) - 1 - tail)} frozen frames at the tail"
+
+
+# --- face reuse -----------------------------------------------------------
+# "Dude's face way more than it should be shown." A 6-image pool fills ~24
+# slots in a 10-line video, so without a cap every picture recurs about four
+# times, and a portrait's face appears four times.
+
+def test_no_image_repeats_more_than_the_cap(monkeypatch):
+    import collections
+    from src.agents.asset import agent as A
+    monkeypatch.setattr(A, "_IS_PORTRAIT", {}, raising=False)
+    terms = ["akagi", "yamamoto", "nagumo", "pearl", "midway", "enterprise"]
+    imgs = {f"/a/{i}.jpg": (f"{terms[i % 6]} carrier", f"{terms[i % 6]}", None)
+            for i in range(6)}
+    lines = [{"id": i, "text": f"Japanese carrier {terms[i % 6]} at sea."}
+             for i in range(1, 11)]
+    out = A._assign_images_to_lines(imgs, lines, "Battle of Midway")
+    uses = collections.Counter(p for deck in out.values() for p in deck)
+    assert max(uses.values()) <= A.MAX_USES_PER_IMAGE, dict(uses)
+
+
+def test_a_face_is_capped_tighter_than_an_ordinary_image(monkeypatch):
+    import collections
+    from src.agents.asset import agent as A
+    monkeypatch.setattr(A, "_IS_PORTRAIT", {"/a/3.jpg": True}, raising=False)
+    terms = ["akagi", "yamamoto", "nagumo", "pearl", "midway", "enterprise"]
+    imgs = {f"/a/{i}.jpg": (f"{terms[i % 6]} carrier", f"{terms[i % 6]}", None)
+            for i in range(6)}
+    lines = [{"id": i, "text": f"Japanese carrier {terms[i % 6]} at sea."}
+             for i in range(1, 11)]
+    out = A._assign_images_to_lines(imgs, lines, "Battle of Midway")
+    uses = collections.Counter(p for deck in out.values() for p in deck)
+    assert uses["/a/3.jpg"] <= A.MAX_USES_PER_PORTRAIT, dict(uses)
+    assert A.MAX_USES_PER_PORTRAIT < A.MAX_USES_PER_IMAGE
+
+
+def test_portrait_detection_uses_commons_categories():
+    from src.agents.asset.validate import is_portrait_image
+    assert is_portrait_image("File:Yamamoto Isoroku.jpg", "Portraits")
+    assert is_portrait_image("File:Admiral Halsey.jpg",
+                             "Military portraits of the United States Navy")
+    assert not is_portrait_image("File:SBD Dauntless landing.jpg", "Aircraft")
+
+
+def test_reuse_spreads_over_the_pool_instead_of_leaning_on_one_picture():
+    """Reuse must prefer the least-used match, not the highest-scoring one."""
+    import collections
+    from src.agents.asset import agent as A
+    terms = ["akagi", "yamamoto", "nagumo", "pearl", "midway", "enterprise"]
+    imgs = {f"/a/{i}.jpg": (f"{terms[i % 6]} carrier", f"{terms[i % 6]}", None)
+            for i in range(6)}
+    lines = [{"id": i, "text": "carrier at sea"} for i in range(1, 8)]
+    out = A._assign_images_to_lines(imgs, lines, "Battle of Midway")
+    uses = collections.Counter(p for deck in out.values() for p in deck)
+    assert len(uses) >= 4, f"video leans on {len(uses)} of {len(imgs)} images"

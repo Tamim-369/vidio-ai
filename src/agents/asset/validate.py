@@ -110,6 +110,25 @@ _SACRED = re.compile(
 )
 
 
+_PORTRAIT = re.compile(
+    r"\bPortraits?\b|\bHeadshots?\b|\bSelf-portraits?\b|"
+    r"\bPeople of .{0,30}\b|\bNavy Cross of Honor\b",
+    re.I,
+)
+
+
+def is_portrait_image(title: str, cats: str) -> bool:
+    """True when the picture is a person's face rather than an event.
+
+    A face is the single most attention-grabbing frame available, so a portrait
+    that gets reused four times in a 45-second video reads as "this video is
+    about one guy" no matter what the narration says. Portraits are capped
+    separately (see MAX_USES_PER_PORTRAIT) instead of being banned, because a
+    named commander genuinely is the right picture for the line that names him.
+    """
+    return bool(_PORTRAIT.search(cats or ""))
+
+
 def is_memorial_image(title: str, cats: str) -> bool:
     """True for memorials, cemeteries, graves and commemorations.
 

@@ -21,6 +21,7 @@ Strategy (validated on wet runs):
    path; the deterministic greedy matcher is the fallback. Multi-image per line
    allowed; every line is guaranteed >= 1 image.
 """
+import collections
 import os
 import re
 import time
@@ -63,6 +64,7 @@ from src.agents.asset.commons import (
 from src.agents.asset.entities import extract_entities
 from src.agents.asset.validate import (
     validate_candidate, is_non_visual_entity, resolve_hull, hull_designator,
+    is_portrait_image,
 )
 from src.agents.query.agent import build_search_queries
 
@@ -489,6 +491,11 @@ def _commons_pass(search_term: str, base_path: str, count: int) -> list:
                 continue
             path = f"{base_path}_c{len(downloaded)}.jpg"
             if _download_image(url, path) and _remember(path, lic, "Wikimedia Commons"):
+                # Recorded here because this is the only point where the file
+                # title and Commons categories are both available; assignment
+                # needs it later to cap how often a face may reappear.
+                _IS_PORTRAIT[path] = is_portrait_image(
+                    page.get("title", ""), _meta_field(ii, "Categories"))
                 downloaded.append(path)
     except Exception as e:
         print(f"      [commons] Error: {e}")
@@ -628,6 +635,10 @@ def _generate_topic_keywords(topic: str) -> list:
 # ---------------------------------------------------------------------------
 # 2. DOWNLOAD
 # ---------------------------------------------------------------------------
+
+# path -> is a portrait of a person. Populated by _commons_pass.
+_IS_PORTRAIT: dict = {}
+
 
 def _fetch_for_keyword(keyword: str, kw_idx: int, assets_dir: str, per_kw: int) -> list:
     """Fetch images for one term across providers.
@@ -1020,26 +1031,37 @@ def _assign_images_to_lines(images: dict, lines: list, topic: str) -> dict:
 
     out: dict = {lid: [] for lid in order}
 
+    # How often one picture may appear in the whole video. A 6-image pool fills
+    # ~24 slots in a 10-line video, so without a cap every picture is reused
+    # about four times -- and a portrait's face then appears four times, which
+    # is what was reported ("dude's face way more than it should be").
+    # Portraits get a tighter cap because a face is the most arresting image
+    # available; one appearance is enough to establish who someone is.
+    uses = collections.Counter()
+    limits = {p: (MAX_USES_PER_PORTRAIT if _IS_PORTRAIT.get(p)
+                  else MAX_USES_PER_IMAGE) for p in images}
+
+    def room_for(p: str) -> bool:
+        return uses[p] < limits[p]
+
     # Phase 1: give every image its single best-matching line, no repeats. This
     # is what stops the pool collapsing -- scoring every (image, line) pair and
     # filling to the cap sent the same best image to nine lines and left 3 of 5
     # images unused in the render.
     for score, lid, p in scores:
-        if score <= 0:
-            continue
-        if p in placed:
+        if score <= 0 or p in placed or not room_for(p):
             continue
         if len(out[lid]) >= MAX_IMAGES_PER_LINE:
             continue
         out[lid].append(p)
         placed.add(p)
+        uses[p] += 1
 
-    # Phase 2: reuse. A line under its cap takes another image only if one
-    # genuinely matches it; otherwise it stays bare. Consecutive lines are
-    # kept off the same picture -- "the same 2 images repeated over and over"
-    # was the visible symptom of a pool with too little variety to alternate.
-    for score, lid, p in scores:
-        if score <= 0 or p in out[lid]:
+    # Phase 2: reuse, but prefer the LEAST-used matching image so the video
+    # spreads evenly instead of leaning on the single best-scoring picture, and
+    # keep consecutive lines off the same frame.
+    for score, lid, p in sorted(scores, key=lambda t: (uses[t[2]], -t[0], t[1])):
+        if score <= 0 or p in out[lid] or not room_for(p):
             continue
         if len(out[lid]) >= MAX_IMAGES_PER_LINE:
             continue
@@ -1047,6 +1069,7 @@ def _assign_images_to_lines(images: dict, lines: list, topic: str) -> dict:
         if idx and out.get(order[idx - 1]) and out[order[idx - 1]][-1] == p:
             continue                      # same image as the previous line
         out[lid].append(p)
+        uses[p] += 1
 
     bare = [lid for lid in order if not out[lid]]
     if bare:
@@ -1099,6 +1122,11 @@ ENTITY_OVERFETCH = int(os.getenv("ASSET_ENTITY_OVERFETCH", "12"))
 # sequence ("launch, then the strike hits") without turning every line into a
 # slideshow.
 MAX_IMAGES_PER_LINE = int(os.getenv("ASSET_MAX_IMAGES_PER_LINE", "3"))
+# How many times one picture may appear in a whole video. Without a cap a small
+# pool is recycled until every image is on screen four times.
+MAX_USES_PER_IMAGE = int(os.getenv("ASSET_MAX_USES_PER_IMAGE", "2"))
+# A face is the most arresting image available, so it is held to one appearance.
+MAX_USES_PER_PORTRAIT = int(os.getenv("ASSET_MAX_USES_PER_PORTRAIT", "1"))
 
 
 def mapping_paths(mapping: dict) -> list:
