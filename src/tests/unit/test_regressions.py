@@ -858,3 +858,52 @@ def test_archival_photographs_of_the_actual_fighting_still_pass():
         "File:Douglas SBD-3 Dauntless of VB-6 taking off from USS Enterprise.jpg",
         "USS Akagi", 1942)
     assert r["verdict"] == "keep", r
+
+
+# --- Ken Burns micro-freeze -------------------------------------------------
+# "The image stops zooming and just freezes for milliseconds." Two independent
+# causes, both of which had to go.
+
+def _tmp_images(n, tmp_path, w=1080, h=1920):
+    import numpy as np
+    from PIL import Image
+    out = []
+    for i in range(n):
+        p = tmp_path / f"i{i}.jpg"
+        Image.fromarray(
+            (np.random.rand(h, w, 3) * 255).astype("uint8")).save(p)
+        out.append(str(p))
+    return out
+
+
+def test_zoom_never_repeats_a_frame(tmp_path):
+    """int(w * scale) truncated, so the crop stalled on some frames.
+
+    A 6% zoom over ~50 frames moves the crop edge about 1.3px per frame at
+    1080px, so integer rounding held it still long enough to read as a freeze.
+    """
+    import numpy as np
+    from src.services.video_assembler import _line_frames
+    frames = _line_frames(_tmp_images(1, tmp_path), 4.0, (270, 480))
+    dupes = sum(1 for a, b in zip(frames, frames[1:]) if np.array_equal(a, b))
+    assert dupes == 0, f"{dupes} identical consecutive frames"
+
+
+def test_line_frames_cover_the_line_duration_exactly(tmp_path):
+    """Crossfades overlap, so each one consumed frames and the shortfall was
+    padded by holding the last frame -- a freeze lasting until the audio ended."""
+    from src.services.video_assembler import _line_frames, FPS
+    for dur in (6.0, 3.2, 2.0):
+        frames = _line_frames(_tmp_images(3, tmp_path), dur, (270, 480))
+        assert len(frames) == round(dur * FPS), (dur, len(frames))
+
+
+def test_no_frozen_tail_after_a_crossfade(tmp_path):
+    """The visible artefact: zoom ends, final image holds until the cut."""
+    import numpy as np
+    from src.services.video_assembler import _line_frames
+    frames = _line_frames(_tmp_images(3, tmp_path), 6.0, (270, 480))
+    tail = len(frames) - 1
+    while tail > 0 and np.array_equal(frames[tail], frames[tail - 1]):
+        tail -= 1
+    assert tail == len(frames) - 1, f"{(len(frames) - 1 - tail)} frozen frames at the tail"

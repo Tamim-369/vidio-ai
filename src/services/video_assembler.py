@@ -63,23 +63,36 @@ def _load_image(img_path: str, size: tuple) -> np.ndarray:
     return np.array(img.crop((left, top, left + w, top + h)))
 
 
-def _make_zoom_frames(img_array: np.ndarray, duration: float, size: tuple) -> np.ndarray:
-    """Pre-render all frames with Ken Burns zoom. Returns (n_frames, H, W, 3) array."""
+def _make_zoom_frames(img_array: np.ndarray, duration: float, size: tuple,
+                      n_frames: int | None = None) -> np.ndarray:
+    """Pre-render all frames with Ken Burns zoom. Returns (n_frames, H, W, 3) array.
+
+    n_frames overrides duration so the caller can allocate an exact frame
+    budget and avoid a rounding shortfall at the end.
+    """
     w, h = size
-    n_frames = max(1, int(duration * FPS))
+    if n_frames is None:
+        n_frames = max(1, int(duration * FPS))
+    n_frames = max(1, n_frames)
     zoom_start, zoom_end = 1.0, 1.06  # Much more subtle zoom (was 1.12)
     pil_img = Image.fromarray(img_array)
     frames = np.empty((n_frames, h, w, 3), dtype=np.uint8)
+    src_w, src_h = pil_img.size
 
     for i in range(n_frames):
         scale = zoom_start + (zoom_end - zoom_start) * (i / max(n_frames - 1, 1))
-        new_w, new_h = int(w * scale), int(h * scale)
-        # BILINEAR is ~2x faster than LANCZOS and visually identical for a 6%
-        # subtle zoom; the resize+center-crop happens every frame regardless.
-        img = pil_img.resize((new_w, new_h), Image.BILINEAR)
-        left = (new_w - w) // 2
-        top = (new_h - h) // 2
-        frames[i] = np.asarray(img.crop((left, top, left + w, top + h)))
+        # Crop a source rectangle of size src/scale and resample it to the
+        # frame, using a FLOAT box.
+        #
+        # The previous version scaled the whole image per frame with
+        # int(w * scale). At 1080px wide a 6% zoom moves the edge by 1.32px per
+        # frame, so integer truncation left the crop unchanged for a frame here
+        # and there -- the zoom visibly stalled, which reads as a micro-freeze
+        # at the end of every image. A fractional box has no such plateau.
+        cw, ch = src_w / scale, src_h / scale
+        left, top = (src_w - cw) / 2.0, (src_h - ch) / 2.0
+        frames[i] = np.asarray(pil_img.resize(
+            (w, h), Image.BILINEAR, box=(left, top, left + cw, top + ch)))
 
     return frames
 
@@ -119,19 +132,36 @@ def _line_frames(asset_paths: list, total_duration: float, size: tuple) -> np.nd
     if num_images == 1:
         return _make_zoom_frames(_load_image(asset_paths[0], size), total_duration, size)
 
-    time_per_image = total_duration / num_images
+    target = max(1, int(round(total_duration * FPS)))
+    CROSSFADE_DURATION = 0.8  # Slower crossfade: 800ms instead of 300ms
+    # Never spend more than 30% of a window on a fade.
+    fade_frames = min(int(CROSSFADE_DURATION * FPS),
+                      int((target / num_images) * 0.3 * FPS))
+    time_per_image = (target / FPS) / num_images
+    print(f"  [assembler] Each image: {time_per_image:.1f}s, "
+          f"crossfade: {fade_frames/FPS:.1f}s")
 
-    fade_frames = int(CROSSFADE_DURATION * FPS)
-    max_fade_frames = int((time_per_image * 0.3) * FPS)  # Max 30% of image time
-    fade_frames = min(fade_frames, max_fade_frames)
-
-    print(f"  [assembler] Each image: {time_per_image:.1f}s, crossfade: {fade_frames/FPS:.1f}s")
+    # A crossfade OVERLAPS: _crossfade_frames returns len(a) + len(b) - fade, so
+    # each transition consumes `fade` frames of coverage. The old code rendered
+    # every image at total_duration/n and then padded whatever was missing by
+    # repeating the final frame -- which is exactly the artefact users spotted:
+    # the zoom stops, the last image freezes, and the freeze holds until the
+    # line's audio runs out (up to ~1.2s with 3 images).
+    #
+    # So the overlap is paid for up front. Each image after the first really
+    # occupies (its frames - fade) of the timeline, so the per-image budget is
+    # sized such that the sum after overlap is exactly the line's duration.
+    base, rem = divmod(target + (num_images - 1) * fade_frames, num_images)
+    counts = [base + (1 if i < rem else 0) for i in range(num_images)]
+    # A fade longer than the shortest window would eat the whole image.
+    fade_frames = max(0, min(fade_frames, min(counts) - 1))
+    assert sum(counts) - (num_images - 1) * fade_frames == target, "frame budget drifted"
 
     all_frames = []
     for i, img_path in enumerate(asset_paths):
         print(f"  [assembler] Pre-rendering image {i+1}/{num_images}...")
         img_array = _load_image(img_path, size)
-        img_frames = _make_zoom_frames(img_array, time_per_image, size)
+        img_frames = _make_zoom_frames(img_array, 0, size, n_frames=counts[i])
 
         if i == 0:
             all_frames = img_frames
@@ -141,7 +171,6 @@ def _line_frames(asset_paths: list, total_duration: float, size: tuple) -> np.nd
     # Crossfades overlap frames, so the array can come up short of the line's
     # real-time budget. Pad by holding the final frame so playback (frame i at
     # i/FPS) extends through the full duration instead of freezing mid-audio.
-    target = max(1, int(round(total_duration * FPS)))
     n = len(all_frames)
     if n < target:
         pad = np.repeat(all_frames[-1:], target - n, axis=0)
