@@ -23,6 +23,14 @@ import os
 
 ASSET_ENABLE_PEXELS = os.getenv("ASSET_ENABLE_PEXELS", "0") == "1"
 
+# Generic web-image fallbacks (Openverse, DuckDuckGo) are off by default.
+# They carry no Commons extmetadata, so validate_candidate() cannot score them,
+# and they answer a warship query with stock photos of anything vaguely
+# adjacent -- a Midway video came out with ducks sitting in front of a flag.
+# A Battle of Midway render came out containing a photograph of ducks sitting in
+# front of a flag because these two providers were unfiltered and unvalidated.
+ASSET_ENABLE_GENERIC = os.getenv("ASSET_ENABLE_GENERIC", "0") == "1"
+
 # Per-entity result budget. A short video needs a handful of images; we keep a
 # wider pool than we consume so the per-line relevance gate has something to
 # choose from instead of being forced into the only candidate it was given.

@@ -55,6 +55,7 @@ from urllib.parse import urlsplit
 from src.agents.asset import assign as local_assign
 from src.agents.asset import keywords as local_keywords
 from src.agents.asset.commons import (
+    ASSET_ENABLE_GENERIC as _ENABLE_GENERIC,
     ASSET_ENABLE_PEXELS as _ENABLE_PEXELS,
     COMMONS_PER_ENTITY,
     MAX_ENTITY_LEN,
@@ -518,6 +519,23 @@ def _on_free_host(url: str) -> bool:
     return any(host == sfx or host.endswith("." + sfx) for sfx in _FREE_HOST_SUFFIXES)
 
 
+# Words too common to prove relevance on their own.
+_STOP = {"a", "an", "the", "of", "and", "in", "on", "at", "to", "for", "with",
+         "from", "by", "is", "was", "are", "were", "be", "as", "or", "it",
+         "his", "her", "its", "their", "new", "old", "1", "2", "3"}
+
+
+def _relevance_ok(text: str, search_term: str) -> bool:
+    """True when a generic provider's alt text shares a content word with the
+    query. DDG answered "USS Akagi Battle of Midway" with a stock photo of
+    ducks in front of a flag, because nothing was checking what came back.
+    Cheap and imperfect, but it stops the obvious non-sequiturs.
+    """
+    got = {w for w in _tokens(text) if w not in _STOP}
+    want = {w for w in _tokens(search_term) if w not in _STOP}
+    return bool(got & want)
+
+
 def _fetch_ddg(search_term: str, base_path: str, count: int = 1) -> list:
     """DuckDuckGo as a fallback general source - FREE HOSTS ONLY.
 
@@ -543,6 +561,9 @@ def _fetch_ddg(search_term: str, base_path: str, count: int = 1) -> list:
                         break
                     url = r.get("image", "")
                     if not url or not _on_free_host(url):
+                        continue
+                    if not _relevance_ok(f"{r.get('title','')} "
+                                          f"{r.get('image','')}", search_term):
                         continue
                     path = f"{base_path}_d{i}.jpg"
                     if url and _download_image(url, path) and \
@@ -611,19 +632,27 @@ def _generate_topic_keywords(topic: str) -> list:
 def _fetch_for_keyword(keyword: str, kw_idx: int, assets_dir: str, per_kw: int) -> list:
     """Fetch images for one term across providers.
 
-    Commons is the primary source and gets the whole budget. The fallbacks each
-    get a smaller slice so that one term cannot dominate the pool through a
-    second provider -- the per-term budget is only meaningful if every provider
-    respects it.
+    Commons is the primary source and gets the whole budget. The generic
+    web-image fallbacks are OFF by default: a Battle of Midway render came out
+    with a photograph of ducks sitting in front of a flag, because DDG scrapes
+    stock-photo sites and answers a warship query with whatever stock photo is
+    nearest the keywords. Neither fallback carries the Commons extmetadata that
+    validate_candidate() scores, so nothing screened them. Commons alone is
+    both cleaner and verifiable, and it is not short of images for a historical
+    topic.
+
+    Set ASSET_ENABLE_GENERIC=1 to restore them; each result must then share a
+    content word with the query or it is dropped.
     """
     base = os.path.join(assets_dir, f"kw{kw_idx}")
     paths = []
     if _ENABLE_PEXELS:
         paths = _fetch_pexels(keyword, base, per_kw)
     paths.extend(_fetch_wikimedia_commons(keyword, f"{base}c", per_kw))
-    side = max(1, per_kw // 2)
-    paths.extend(_fetch_openverse(keyword, f"{base}o", side))
-    paths.extend(_fetch_ddg(keyword, f"{base}d", side))
+    if _ENABLE_GENERIC:
+        side = max(1, per_kw // 2)
+        paths.extend(_fetch_openverse(keyword, f"{base}o", side))
+        paths.extend(_fetch_ddg(keyword, f"{base}d", side))
     return paths
 
 

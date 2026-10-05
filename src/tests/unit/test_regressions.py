@@ -374,9 +374,40 @@ def test_fallback_providers_get_a_smaller_slice(monkeypatch):
                         lambda kw, base, count: seen.setdefault("openverse", count) and [] or [])
     monkeypatch.setattr(A, "_fetch_ddg",
                         lambda kw, base, count: seen.setdefault("ddg", count) and [] or [])
+    monkeypatch.setattr(A, "_ENABLE_GENERIC", True)
     A._fetch_for_keyword("Rocket", 0, "/tmp/a", 6)
     assert seen["commons"] == 6
     assert seen["openverse"] < 6 and seen["ddg"] < 6
+
+
+def test_generic_providers_are_off_by_default(monkeypatch):
+    """A Midway render came out with ducks in front of a flag.
+
+    DDG and Openverse carry no Commons metadata, so validate_candidate() cannot
+    score them and nothing screened what they returned.
+    """
+    from src.agents.asset import agent as A
+    import src.agents.asset.commons as C
+    assert C.ASSET_ENABLE_GENERIC is False, "generic web-image sources are on"
+    called = []
+    monkeypatch.setattr(A, "_ENABLE_GENERIC", False)
+    monkeypatch.setattr(A, "_fetch_wikimedia_commons",
+                        lambda kw, base, count: called.append("commons") or [])
+    monkeypatch.setattr(A, "_fetch_openverse",
+                        lambda kw, base, count: called.append("openverse") or [])
+    monkeypatch.setattr(A, "_fetch_ddg",
+                        lambda kw, base, count: called.append("ddg") or [])
+    A._fetch_for_keyword("USS Akagi Battle of Midway", 0, "/tmp/a", 6)
+    assert called == ["commons"], called
+
+
+def test_relevance_gate_rejects_a_stock_photo_of_ducks():
+    """The alt-text gate that would have caught the ducks."""
+    from src.agents.asset.agent import _relevance_ok
+    assert _relevance_ok("Ducks sitting in front of a flag on grass",
+                          "USS Akagi Battle of Midway") is False
+    assert _relevance_ok("Japanese aircraft carrier Akagi burning at sea",
+                          "USS Akagi Battle of Midway") is True
 
 
 # --- per-term cap in assignment ------------------------------------------
