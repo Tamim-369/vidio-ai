@@ -1,3 +1,4 @@
+import glob
 import hashlib
 import json
 import os
@@ -33,6 +34,36 @@ def workspace_path(topic: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", (topic or "generic").lower()).strip("_")
     slug = slug[:40] or "video"
     return os.path.join(TEMP_DIR, slug)
+
+
+def topic_body_text(topic: str) -> str:
+    """Best-effort article/research text for a topic.
+
+    The asset stage needs the real article body: the proper nouns that make
+    good search terms (Akagi, Kido Butai, Schnorchel) live in the prose, not
+    the headline. Research output is written by dump_artifact() into
+    debug_output/ as "<stamp>_<seq>_research.txt", so that is where it has to
+    be read from -- looking in temp/<slug>/ finds nothing, which silently
+    collapsed the entity pool to a single term and shipped an island full of
+    seabirds. Falls back to the story artifact, then to nothing.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "_", (topic or "generic").lower()).strip("_")[:40]
+    patterns = [os.path.join(DEBUG_DIR, f"*_{slug}_*.txt"),
+                os.path.join(DEBUG_DIR, f"*{slug}*.txt"),
+                os.path.join(DEBUG_DIR, "*research*.txt"),
+                os.path.join(DEBUG_DIR, "*story*.txt"),
+                os.path.join(TEMP_DIR, slug, "*research*.txt"),
+                os.path.join(TEMP_DIR, slug, "*story*.txt")]
+    best = ""
+    for pat in patterns:
+        try:
+            for path in sorted(glob.glob(pat), key=os.path.getmtime, reverse=True):
+                text = open(path, encoding="utf-8", errors="ignore").read()
+                if len(text) > len(best):
+                    best = text
+        except OSError:
+            continue
+    return best
 
 
 def ensure_workspace(topic: str) -> str:

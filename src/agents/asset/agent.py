@@ -23,7 +23,6 @@ Strategy (validated on wet runs):
 """
 import os
 import re
-import glob
 import time
 import threading
 from statistics import median
@@ -50,7 +49,7 @@ ASSET_REJECT_TEXT_OVERLAY = os.getenv("ASSET_REJECT_TEXT_OVERLAY", "1") == "1"
 ASSET_MAX_TEXT_AREA = float(os.getenv("ASSET_MAX_TEXT_AREA", "0.04"))
 ASSET_TEXT_MIN_CONF = int(os.getenv("ASSET_TEXT_MIN_CONF", "50"))
 
-from src.utils.file_helpers import workspace_path
+from src.utils.file_helpers import workspace_path, topic_body_text
 from urllib.parse import urlsplit
 
 from src.agents.asset import assign as local_assign
@@ -627,9 +626,22 @@ def _download_entities(entities: list, assets_dir: str) -> dict:
     candidates = {}
     if not specs:
         return candidates
-    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_WORKERS, len(specs))) as ex:
+
+    # Bound total work BEFORE fetching: the pool is capped at MAX_POOL_IMAGES,
+    # so budgets shrink as the entity count grows. Commons search is globally
+    # throttled, so cost is roughly proportional to entity count; fetching
+    # 14 entities x 6 = 84 searches took 6.4 minutes for a pool that ended up
+    # 94 images deep and only 7 usable.
+    n = len(specs)
+    even = max(1, MAX_POOL_IMAGES // n)
+    trimmed = [(e, base, min(b, even)) for (e, _l, base, b) in specs]
+    if even < COMMONS_PER_ENTITY:
+        print(f"  [asset] Pool capped: {n} entities x {even} images "
+              f"(= {n * even} of max {MAX_POOL_IMAGES})")
+
+    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_WORKERS, len(trimmed))) as ex:
         futs = {ex.submit(_fetch_for_keyword, e, i, assets_dir, budget): e
-                for i, (e, _lid, _b, budget) in enumerate(specs)}
+                for i, (e, base, budget) in enumerate(trimmed)}
         for fut in as_completed(futs):
             e = futs[fut]
             try:
@@ -637,6 +649,10 @@ def _download_entities(entities: list, assets_dir: str) -> dict:
                     candidates.setdefault(p, (e, None))
             except Exception as ex:
                 print(f"      [asset] entity '{e}' error: {ex}")
+    if len(candidates) > MAX_POOL_IMAGES:
+        print(f"  [asset] Trimming pool {len(candidates)} -> {MAX_POOL_IMAGES}")
+        keep = list(candidates)[:MAX_POOL_IMAGES]
+        candidates = {p: candidates[p] for p in keep}
     return candidates
 
 
@@ -797,18 +813,146 @@ def _assign_images_to_lines(images: dict, lines: list, topic: str) -> dict:
             imgs.append((p, images[p][0] or images[p][1], p, best))
         mapping = _greedy_assign(imgs, lines)
 
-    # Spread unused images onto empty lines.
-    assigned = {p for deck in mapping.values() for p in deck}
-    unassigned = [p for p in images if p not in assigned]
-    empty_lines = [ln for ln in lines if not mapping.get(ln["id"])]
-    if unassigned and empty_lines:
-        for img_path in unassigned:
-            if not empty_lines:
+    # Cap first, then fill. Capping drops over-represented terms, which can leave
+    # lines empty, so the fill must run afterwards or the cap silently undoes
+    # itself by starving a line.
+    mapping = _cap_per_term(mapping, images, lines)
+
+    # Every line gets a distinct image. The planner's plan is honoured first,
+    # then empty lines are filled from the unused pool by token overlap so no
+    # line ends up backfilled onto a neighbour's picture. A 94-image pool
+    # produced only 7 assigned visuals and 3 backfilled lines -- the planner
+    # simply stops early, and reuse is not an acceptable substitute for a
+    # real match.
+    used = set()
+    for lid in [ln["id"] for ln in lines]:
+        used.update(p for p in mapping.get(lid, []) if p in images)
+
+    # Spread: give every line its own image before allowing any line a second
+    # one. The greedy fallback hands a whole line all remaining images, which
+    # leaves later lines with nothing to fill from -- the fill loop below can
+    # only add a picture when the pool still has one.
+    all_ids = [ln["id"] for ln in lines]
+    for lid in all_ids:
+        while len(mapping.get(lid, [])) > 1:
+            spare = mapping[lid].pop()
+            idle = [i for i in all_ids if not mapping.get(i) and i != lid]
+            if not idle:
+                mapping[lid].append(spare)
                 break
-            ln = empty_lines.pop(0)
-            mapping.setdefault(ln["id"], []).append(img_path)
+            mapping.setdefault(idle[0], []).append(spare)
+
+    for ln in lines:
+        lid = ln["id"]
+        if mapping.get(lid):
+            continue
+        want = _tokens(ln.get("image_features", "")
+                       or ln.get("image_expectation", "")
+                       or ln.get("search_term", ""))
+        pool = [p for p in images if p not in used]
+        if not pool:
+            break
+        if want:
+            best = max(pool, key=lambda p: (
+                len(_tokens(images[p][0] or images[p][1] or "") & want),
+                # stable, deterministic tiebreak
+                p))
+        else:
+            # No usable tokens to match on (short/empty search_term). Take the
+            # first free image rather than leaving the line bare; a wrong image
+            # still beats a neighbour's picture repeated.
+            best = pool[0]
+        mapping.setdefault(lid, []).append(best)
+        used.add(best)
 
     return mapping
+
+
+# A single search term may fill at most this many lines in one video. See
+# _cap_per_term: "Midway" means the atoll, so Commons returned seabirds, and
+# 6 of 6 assigned slots went to that one term.
+MAX_IMAGES_PER_TERM = 2
+
+# Pool size is bounded by the video, not by how many entities we found. A
+# 10-line video needs ~2 images per line with room for assignment to reject
+# some. Fetching 14 entities x 6 images cost 6.4 minutes of Commons throttling
+# for a pool that assignment then used 7 images out of; and 94 images for a
+# 10-line video is wasted download time, not more choice.
+MAX_POOL_IMAGES = int(os.getenv("ASSET_MAX_POOL_IMAGES", "24"))
+MAX_POOL_ENTITIES = int(os.getenv("ASSET_MAX_POOL_ENTITIES", "8"))
+
+
+def mapping_paths(mapping: dict) -> list:
+    """Every image path referenced by a {line_id: [paths]} plan, in order."""
+    out = []
+    for deck in mapping.values():
+        for p in deck or []:
+            if p not in out:
+                out.append(p)
+    return out
+
+
+def _cap_per_term(mapping: dict, images: dict, lines: list) -> dict:
+    """Enforce a maximum number of images per search term across the video.
+
+    A rendered video came out as "a photo of an island and a bunch of white
+    birds": the term "Midway" means the atoll, so Commons returned seabirds
+    and beaches, and all 6 of the 6 assigned slots went to that one term. The
+    pool was fine (58 images, 9 real entities) -- assignment is what failed,
+    because the local planner is shown the catalog as
+    "image 1: Midway ... image 6: Midway" and cannot tell six island photos
+    apart from six carriers.
+
+    Term repetition is a symptom of a term that is wrong for the video, so the
+    fix is structural rather than a better prompt: no term may fill more than
+    one line's worth of visual time. Overflow images are dropped rather than
+    reassigned, because reassigning is what produced the birds in the first
+    place; the remaining terms are the ones the planner already ranked above.
+
+    The cap is adaptive: with many terms every line still gets a fresh visual,
+    but if there are fewer terms than lines (a narrow topic, or the fallback
+    path where one query covers everything) the cap is relaxed to MIN_TERMS so
+    that lines are never left without an image. Never ship a line with no
+    visual to avoid a repetitive one.
+    """
+    if not mapping or not images:
+        return mapping
+
+    # Diversity is counted over the whole candidate POOL, not over the plan.
+    # The pool for a real Midway run held 58 images across 9 terms, but the
+    # planner assigned only "Midway" -- counting terms in the plan saw 1 and
+    # relaxed the cap back to 6, which let the seabirds through and defeated
+    # the entire fix. Backfill draws from the pool, so the pool is the thing
+    # that decides whether a starved line has anything better to fall back on.
+    pool_terms = {(images[p][1] or images[p][0] or "").strip()
+                  for p in images}
+    n_lines = max(1, len([ln for ln in lines]))
+    cap = max(MAX_IMAGES_PER_TERM, -(-n_lines // max(1, len(pool_terms)))) \
+        if pool_terms else MAX_IMAGES_PER_TERM
+
+    # Preserve planner intent, then walk lines in order dropping any image
+    # whose term has already met its cap, and never repeating a path.
+    order = [ln["id"] for ln in lines]
+    seen_terms: dict[str, int] = {}
+    seen_paths: set = set()
+    out: dict = {}
+    for lid in order + [k for k in mapping if k not in order]:
+        deck = [p for p in mapping.get(lid, []) if p in images and p not in seen_paths]
+        kept = []
+        for p in deck:
+            term = (images[p][1] or images[p][0] or "").strip()
+            if seen_terms.get(term, 0) >= cap:
+                print(f"    [assign] dropped {os.path.basename(p)} — term "
+                      f"'{term[:28]}' already has {cap}")
+                continue
+            seen_terms[term] = seen_terms.get(term, 0) + 1
+            seen_paths.add(p)
+            kept.append(p)
+        if kept:
+            out[lid] = kept
+        elif lid in mapping:
+            out[lid] = []
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -882,17 +1026,14 @@ def _backfill_gaps(lines: list, kept: dict) -> None:
 
 def _topic_body(topic: str) -> str:
     """Best-effort article text for the topic, used only to widen the entity
-    pool. The proper nouns usually live in the body, not the headline. Reads
-    whatever the research stage left in the workspace; never raises."""
+    pool. The proper nouns usually live in the body, not the headline.
+
+    Delegates to file_helpers.topic_body_text, which reads the research
+    artifact where dump_artifact() actually writes it. Never raises."""
     try:
-        for name in ("research", "story"):
-            for path in sorted(glob.glob(os.path.join(workspace_path(topic), f"*{name}*.txt"))):
-                text = open(path, encoding="utf-8", errors="ignore").read()
-                if len(text) > 200:
-                    return text
+        return topic_body_text(topic)
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 def _ensure_min_pool(kept: dict, entities: list, assets_dir: str) -> dict:
@@ -925,7 +1066,7 @@ def fetch_assets(lines: list, topic: str = "") -> list:
     if _topic_era_year:
         print(f"  [asset] Era gate: subject ~{_topic_era_year} "
               f"(rejecting files dated after {_topic_era_year + ERA_SLACK_YEARS})")
-    entities = extract_entities(topic, body)
+    entities = extract_entities(topic, body, max_entities=MAX_POOL_ENTITIES)
     print(f"  [asset] Entities: {len(entities)}")
     for e in entities[:12]:
         print(f"       - {e}")

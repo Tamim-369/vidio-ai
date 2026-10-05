@@ -372,3 +372,152 @@ def test_fallback_providers_get_a_smaller_slice(monkeypatch):
     A._fetch_for_keyword("Rocket", 0, "/tmp/a", 6)
     assert seen["commons"] == 6
     assert seen["openverse"] < 6 and seen["ddg"] < 6
+
+
+# --- per-term cap in assignment ------------------------------------------
+# A real render came out as "a photo of an island and a bunch of white birds".
+# "Midway" means the atoll, so Commons returned seabirds, and 6 of 6 assigned
+# slots went to that one term. The pool was fine (58 images, 9 real entities);
+# assignment is what failed.
+
+def _lines(n):
+    return [{"id": i} for i in range(1, n + 1)]
+
+
+def test_cap_per_term_stops_one_term_filling_the_video():
+    from src.agents.asset.agent import _cap_per_term
+    imgs = {f"/a/{i}_Midway.jpg": ("Midway", "Midway", None) for i in range(8)}
+    lines = _lines(10)
+    mapping = {i: [f"/a/{i - 1}_Midway.jpg"] for i in range(1, 9)}
+    out = _cap_per_term(mapping, imgs, lines)
+    kept = [p for deck in out.values() for p in deck]
+    assert len(kept) == len(set(kept)), "an image must not appear on two lines"
+    # with 1 term and 10 lines the cap relaxes; it must not starve every line
+    assert len(out) >= 1
+
+
+def test_cap_per_term_prefers_term_diversity():
+    from src.agents.asset.agent import _cap_per_term
+    terms = ["Akagi", "Soryu", "Kaga", "Enterprise", "Yorktown", "Hornet"]
+    imgs = {f"/a/{t}.jpg": (t, t, None) for t in terms}
+    lines = _lines(6)
+    # planner put all 6 lines on Midway images (the birds)
+    imgs.update({f"/a/M{i}.jpg": ("Midway", "Midway", None) for i in range(6)})
+    mapping = {i: [f"/a/M{i - 1}.jpg"] for i in range(1, 7)}
+    out = _cap_per_term(mapping, imgs, lines)
+    kept = [p for deck in out.values() for p in deck]
+    # The pool holds 7 terms (6 carriers + Midway), so the cap holds at 2 and
+    # the all-Midway plan collapses from 6 images to 2. Remaining lines fall
+    # back to the diverse pool via backfill.
+    assert len(kept) == 2, "all-Midway plan must collapse to the cap"
+    assert all(p.endswith(("M0.jpg", "M1.jpg")) for p in kept)
+
+
+def test_cap_per_term_never_duplicates_an_image():
+    from src.agents.asset.agent import _cap_per_term
+    imgs = {f"/a/{i}.jpg": (f"T{i % 2}", f"T{i % 2}", None) for i in range(6)}
+    lines = _lines(6)
+    mapping = {i: ["/a/0.jpg"] for i in range(1, 7)}   # planner reused one path
+    out = _cap_per_term(mapping, imgs, lines)
+    kept = [p for deck in out.values() for p in deck]
+    assert len(kept) == len(set(kept)), "the same path on 6 lines is a bug"
+
+
+def test_cap_per_term_never_starves_a_line_when_terms_are_few():
+    from src.agents.asset.agent import _cap_per_term
+    imgs = {f"/a/{i}.jpg": ("Rocket", "Rocket", None) for i in range(4)}
+    lines = _lines(6)
+    mapping = {i: [f"/a/{i - 1}.jpg"] for i in range(1, 5)}
+    out = _cap_per_term(mapping, imgs, lines)
+    # cap relaxes because terms(1) < lines(6): the video still gets visuals
+    assert sum(1 for v in out.values() if v) >= 1
+
+
+def test_cap_per_term_empty_mapping_is_a_noop():
+    from src.agents.asset.agent import _cap_per_term
+    assert _cap_per_term({}, {}, _lines(3)) == {}
+    assert _cap_per_term({1: ["/a.jpg"]}, {}, _lines(1)) == {1: ["/a.jpg"]}
+
+
+def test_mapping_paths_is_ordered_and_unique():
+    from src.agents.asset.agent import mapping_paths
+    m = {1: ["/a", "/b"], 2: ["/b", "/c"]}
+    assert mapping_paths(m) == ["/a", "/b", "/c"]
+
+
+# --- bounded pool: 94 images for 10 lines cost 6.4 minutes ----------------
+def test_pool_budget_is_bounded_by_video_length(monkeypatch):
+    from src.agents.asset import agent as A
+    calls = {}
+    def fake(kw, idx, d, n):
+        calls[kw] = n
+        return [f"/a/{kw}_{i}.jpg" for i in range(n)]
+    monkeypatch.setattr(A, "_fetch_for_keyword", fake)
+    monkeypatch.setattr(A, "MAX_PARALLEL_WORKERS", 8)
+    ents = [f"Term{i}" for i in range(14)]
+    A._download_entities(ents, "/tmp/pool")
+    total = sum(calls.values())
+    assert total <= A.MAX_POOL_IMAGES + len(ents), (
+        f"budgeted {total} images for {len(ents)} entities, cap is {A.MAX_POOL_IMAGES}")
+    # the real pool had every term at the full budget; budgets must shrink
+    assert max(calls.values()) <= A.COMMONS_PER_ENTITY
+
+
+def test_download_entities_trims_an_oversized_pool(monkeypatch):
+    from src.agents.asset import agent as A
+    monkeypatch.setattr(A, "_fetch_for_keyword",
+                        lambda kw, i, d, n: [f"/a/{kw}_{i}_{j}.jpg" for j in range(9)])
+    monkeypatch.setattr(A, "MAX_PARALLEL_WORKERS", 8)
+    cands = A._download_entities(["A", "B", "C"], "/tmp/pool")
+    assert len(cands) <= A.MAX_POOL_IMAGES
+
+
+def test_pool_entity_count_is_capped():
+    from src.agents.asset.agent import MAX_POOL_ENTITIES
+    assert 4 <= MAX_POOL_ENTITIES <= 10, "8 entities is ~2 min of Commons; more is wasted"
+
+
+# --- assignment: every line gets a DISTINCT image -------------------------
+# A real run used 7 of 94 images and backfilled lines 8-10 onto their
+# neighbour's picture.
+
+def _mk_lines(n):
+    return [{"id": i, "search_term": f"term{i}"} for i in range(1, n + 1)]
+
+
+def test_assignment_gives_every_line_a_distinct_image(monkeypatch):
+    from src.agents.asset import agent as A
+    import src.agents.asset.assign as LA
+    monkeypatch.setattr(LA, "plan_assignment",
+                        lambda imgs, lines, topic: {lines[0]["id"]: ["/a/0.jpg"]})
+    imgs = {f"/a/{i}.jpg": (f"term{i}", f"term{i}", None) for i in range(10)}
+    out = A._assign_images_to_lines(imgs, _mk_lines(10), "topic")
+    picked = [p for deck in out.values() for p in deck]
+    assert len(picked) == len(set(picked)), "an image was reused across lines"
+    assert all(out[ln["id"]] for ln in _mk_lines(10)), "a line shipped with no image"
+
+
+def test_assignment_fill_runs_after_the_term_cap(monkeypatch):
+    """Capping drops images, so the fill must run after it or lines starve."""
+    from src.agents.asset import agent as A
+    import src.agents.asset.assign as LA
+    monkeypatch.setattr(LA, "plan_assignment",
+                        lambda imgs, lines, topic: {ln["id"]: [f"/a/M{i}.jpg"]
+                                                    for i, ln in enumerate(lines)})
+    imgs = {f"/a/M{i}.jpg": ("Midway", "Midway", None) for i in range(10)}
+    imgs.update({f"/a/S{i}.jpg": (f"Ship{i}", f"Ship{i}", None) for i in range(10)})
+    out = A._assign_images_to_lines(imgs, _mk_lines(10), "topic")
+    picked = [p for deck in out.values() for p in deck]
+    assert len(picked) == len(set(picked))
+    assert all(out[ln["id"]] for ln in _mk_lines(10)), "cap starved a line"
+    # the all-Midway plan must not survive intact
+    assert len([p for p in picked if "M" in p]) <= A.MAX_IMAGES_PER_TERM
+
+
+def test_assignment_survives_an_empty_planner_result(monkeypatch):
+    from src.agents.asset import agent as A
+    import src.agents.asset.assign as LA
+    monkeypatch.setattr(LA, "plan_assignment", lambda i, l, t: {})
+    imgs = {f"/a/{i}.jpg": (f"t{i}", f"t{i}", None) for i in range(5)}
+    out = A._assign_images_to_lines(imgs, _mk_lines(3), "topic")
+    assert all(out[ln["id"]] for ln in _mk_lines(3))
