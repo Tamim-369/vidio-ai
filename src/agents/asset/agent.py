@@ -658,6 +658,44 @@ def _entity_budget(entity: str) -> int:
     return 1 if entity.lower().strip(".,") in GENERIC_TERMS else COMMONS_PER_ENTITY
 
 
+# Topic-anchored query state, set once per run by the pipeline.
+_topic_anchor = [""]
+
+
+def _event_anchor(topic: str) -> str:
+    """The event words a search must carry to stay on-topic.
+
+    A bare entity name is not a focused query. "USS Akagi" returns generic
+    warship photography -- the fleet pictures that made a Midway video look
+    like it was about "random boats". Pairing the entity with the event
+    ("USS Akagi Battle of Midway") is what pulls battle-specific frames out of
+    Commons instead of a generic carrier portrait.
+
+    The topic's own headline is the cheapest reliable event name:
+    "The Battle of Midway: How the US Navy ... 1942" -> "Battle of Midway".
+    """
+    head = (topic or "").split(":")[0]
+    head = re.sub(r"^(the|a|an)\s+", "", head.strip(), flags=re.I)
+    # Drop a leading year and trailing parenthetical year; keep the nouns.
+    head = re.sub(r"\b(19|20)\d{2}\b", "", head)
+    return re.sub(r"\s+", " ", head).strip(" -?:,")[:60]
+
+
+def _focused_query(entity: str, topic: str) -> str:
+    """Entity + event anchor, without duplicating words the entity already has.
+
+    "USS Akagi" -> "USS Akagi Battle of Midway".
+    "Battle of Midway" -> "Battle of Midway" (already focused).
+    """
+    anchor = _event_anchor(topic)
+    if not anchor or not entity:
+        return entity
+    ent_tokens = {w.lower().strip(".,") for w in entity.split()}
+    if {w.lower().strip(".,") for w in anchor.split()} <= ent_tokens:
+        return entity                     # entity already names the event
+    return f"{entity} {anchor}".strip()[:MAX_ENTITY_LEN]
+
+
 def _entity_specs(entities: list, assets_dir: str) -> list:
     """Entity pool -> download specs. line_id is None: the pool is topic-level,
     so no image is 'owned' by a line until the relevance gate picks one.
@@ -665,7 +703,7 @@ def _entity_specs(entities: list, assets_dir: str) -> list:
     The 4th element is the per-term image budget (see _entity_budget)."""
     specs = []
     for i, e in enumerate(entities):
-        e = (e or "").strip()[:MAX_ENTITY_LEN]
+        e = _focused_query((e or "").strip(), _topic_anchor[0])
         if e:
             specs.append((e, None, os.path.join(assets_dir, f"ent{i}"),
                           _entity_budget(e)))
@@ -874,54 +912,64 @@ def _assign_images_to_lines(images: dict, lines: list, topic: str) -> dict:
     # itself by starving a line.
     mapping = _cap_per_term(mapping, images, lines)
 
-    # Every line gets a distinct image. The planner's plan is honoured first,
-    # then empty lines are filled from the unused pool by token overlap so no
-    # line ends up backfilled onto a neighbour's picture. A 94-image pool
-    # produced only 7 assigned visuals and 3 backfilled lines -- the planner
-    # simply stops early, and reuse is not an acceptable substitute for a
-    # real match.
-    used = set()
-    for lid in [ln["id"] for ln in lines]:
-        used.update(p for p in mapping.get(lid, []) if p in images)
+    # Distribution. The pool is small and focused (5 images for a whole video),
+    # so it is SPREAD over the lines rather than spread thin: every image goes
+    # to the line it matches best, a line may hold more than one, reuse across
+    # lines is normal, and a line with no confident match is left bare.
+    #
+    # The previous contract was the opposite: "every line gets a distinct image"
+    # plus a backfill loop that never left a line empty. With a 24-image pool
+    # that forced a marginal photo onto every sentence, which is where the
+    # "random boats" came from -- filler images, not best-match images. A
+    # viewer cannot tell which of six generic carrier portraits is meant to be
+    # Akagi, but a line that simply shows the one good Akagi photo reads fine.
+    order = [ln["id"] for ln in lines]
+    want = {ln["id"]: _tokens(ln.get("image_features", "")
+                               or ln.get("image_expectation", "")
+                               or ln.get("text", "")
+                               or ln.get("search_term", ""))
+            for ln in lines}
 
-    # Spread: give every line its own image before allowing any line a second
-    # one. The greedy fallback hands a whole line all remaining images, which
-    # leaves later lines with nothing to fill from -- the fill loop below can
-    # only add a picture when the pool still has one.
-    all_ids = [ln["id"] for ln in lines]
-    for lid in all_ids:
-        while len(mapping.get(lid, [])) > 1:
-            spare = mapping[lid].pop()
-            idle = [i for i in all_ids if not mapping.get(i) and i != lid]
-            if not idle:
-                mapping[lid].append(spare)
-                break
-            mapping.setdefault(idle[0], []).append(spare)
+    # Rebuild the plan deterministically: score every (image, line) pair, then
+    # give each line its best images up to the per-line cap.
+    scores = []
+    for p in images:
+        feats = _tokens(images[p][0] or images[p][1] or "")
+        for lid in order:
+            scores.append((len(feats & want[lid]), lid, p))
+    scores.sort(key=lambda t: (-t[0], t[1], t[2]))
+    placed: set = set()
 
-    for ln in lines:
-        lid = ln["id"]
-        if mapping.get(lid):
+    out: dict = {lid: [] for lid in order}
+
+    # Phase 1: give every image its single best-matching line, no repeats. This
+    # is what stops the pool collapsing -- scoring every (image, line) pair and
+    # filling to the cap sent the same best image to nine lines and left 3 of 5
+    # images unused in the render.
+    for score, lid, p in scores:
+        if score <= 0:
             continue
-        want = _tokens(ln.get("image_features", "")
-                       or ln.get("image_expectation", "")
-                       or ln.get("search_term", ""))
-        pool = [p for p in images if p not in used]
-        if not pool:
-            break
-        if want:
-            best = max(pool, key=lambda p: (
-                len(_tokens(images[p][0] or images[p][1] or "") & want),
-                # stable, deterministic tiebreak
-                p))
-        else:
-            # No usable tokens to match on (short/empty search_term). Take the
-            # first free image rather than leaving the line bare; a wrong image
-            # still beats a neighbour's picture repeated.
-            best = pool[0]
-        mapping.setdefault(lid, []).append(best)
-        used.add(best)
+        if p in placed:
+            continue
+        if len(out[lid]) >= MAX_IMAGES_PER_LINE:
+            continue
+        out[lid].append(p)
+        placed.add(p)
 
-    return mapping
+    # Phase 2: reuse. A line under its cap takes another image only if one
+    # genuinely matches it; otherwise it stays bare.
+    for score, lid, p in scores:
+        if score <= 0 or p in out[lid]:
+            continue
+        if len(out[lid]) >= MAX_IMAGES_PER_LINE:
+            continue
+        out[lid].append(p)
+
+    bare = [lid for lid in order if not out[lid]]
+    if bare:
+        print(f"    [assign] {len(bare)}/{len(order)} line(s) left with no image "
+              f"(focused pool of {len(images)}, no matching query) - by design")
+    return out
 
 
 # A single search term may fill at most this many lines in one video. See
@@ -934,8 +982,20 @@ MAX_IMAGES_PER_TERM = 2
 # some. Fetching 14 entities x 6 images cost 6.4 minutes of Commons throttling
 # for a pool that assignment then used 7 images out of; and 94 images for a
 # 10-line video is wasted download time, not more choice.
-MAX_POOL_IMAGES = int(os.getenv("ASSET_MAX_POOL_IMAGES", "24"))
-MAX_POOL_ENTITIES = int(os.getenv("ASSET_MAX_POOL_ENTITIES", "8"))
+# The pool is deliberately SMALL. A 24-image pool for a 10-line video meant 2.4
+# marginal photos per sentence, and marginal photos of warships look like
+# random boats. Four to five focused images, spread over the video and reused
+# where they fit, reads better than two dozen near-duplicates.
+MAX_POOL_IMAGES = int(os.getenv("ASSET_MAX_POOL_IMAGES", "5"))
+MAX_POOL_ENTITIES = int(os.getenv("ASSET_MAX_POOL_ENTITIES", "4"))
+# How many raw terms to pull before non-visual filtering. Filtering discards
+# roughly a third of them, so the raw ask has to be comfortably larger than
+# the final count or the pool ends up built from one or two survivors.
+ENTITY_OVERFETCH = int(os.getenv("ASSET_ENTITY_OVERFETCH", "12"))
+# How many images one line may hold. Two is enough for a line that describes a
+# sequence ("launch, then the strike hits") without turning every line into a
+# slideshow.
+MAX_IMAGES_PER_LINE = int(os.getenv("ASSET_MAX_IMAGES_PER_LINE", "2"))
 
 
 def mapping_paths(mapping: dict) -> list:
@@ -1061,7 +1121,16 @@ def _attach_assets_to_lines(lines: list, kept: dict, mapping: dict) -> None:
 
 
 def _backfill_gaps(lines: list, kept: dict) -> None:
-    """No line ships without a visual — reuse a kept image (or prior line's)."""
+    """Opt-in only: force a visual onto every line by reusing kept images.
+
+    Disabled by default. Forcing a picture onto a sentence that has no
+    confident match is what produced the "random boats": the line is not asking
+    for a carrier, so it gets a carrier anyway, and the video ends up showing
+    six unrelated warships for one battle. Set ASSET_BACKFILL=1 to restore the
+    old behaviour.
+    """
+    if os.getenv("ASSET_BACKFILL", "0") not in ("1", "true", "yes"):
+        return
     pool = list(kept.keys())
     if not pool:
         return
@@ -1119,15 +1188,23 @@ def fetch_assets(lines: list, topic: str = "") -> list:
     print("  [asset] Extracting topic entity pool (one local call)...")
     body = _topic_body(topic)
     _set_topic_era(topic, body)
+    _topic_anchor[0] = topic
     if _topic_era_year:
         print(f"  [asset] Era gate: subject ~{_topic_era_year} "
               f"(rejecting files dated after {_topic_era_year + ERA_SLACK_YEARS})")
-    raw_entities = extract_entities(topic, body, max_entities=MAX_POOL_ENTITIES)
+    # Over-fetch, then filter, THEN cap. Capping first was a bug: the extractor
+    # returned 4 raw terms, 3 of which were non-visual ("CV-3", "Pacific
+    # Theater", "World War"), so the pool was built from a single entity.
+    raw_entities = extract_entities(topic, body, max_entities=ENTITY_OVERFETCH)
     # Drop terms that name a place, command or abstract group. "Pacific Theater"
     # and "USS Pacific Fleet" are perfect matches for a Midway article and
     # return a theatre-of-operations map and a command building. Filtering here
     # costs nothing; catching them after download costs a slot in the video.
     entities = [e for e in raw_entities if not is_non_visual_entity(e)]
+    if len(entities) > MAX_POOL_ENTITIES:
+        print(f"  [asset] Capping {len(entities)} visual entities -> "
+              f"{MAX_POOL_ENTITIES}")
+        entities = entities[:MAX_POOL_ENTITIES]
     dropped = [e for e in raw_entities if is_non_visual_entity(e)]
     if dropped:
         print(f"  [asset] Dropped {len(dropped)} non-visual term(s): "

@@ -490,42 +490,57 @@ def _mk_lines(n):
     return [{"id": i, "search_term": f"term{i}"} for i in range(1, n + 1)]
 
 
-def test_assignment_gives_every_line_a_distinct_image(monkeypatch):
+def test_assignment_leaves_a_line_bare_when_nothing_matches():
+    """The new contract, replacing "every line gets a distinct image".
+
+    Forcing a picture onto a sentence with no confident match is what produced
+    the "random boats": the line was not asking for a carrier, so it got a
+    carrier anyway, and one battle rendered as six unrelated warships.
+    """
     from src.agents.asset import agent as A
-    import src.agents.asset.assign as LA
-    monkeypatch.setattr(LA, "plan_assignment",
-                        lambda imgs, lines, topic: {lines[0]["id"]: ["/a/0.jpg"]})
-    imgs = {f"/a/{i}.jpg": (f"term{i}", f"term{i}", None) for i in range(10)}
-    out = A._assign_images_to_lines(imgs, _mk_lines(10), "topic")
-    picked = [p for deck in out.values() for p in deck]
-    assert len(picked) == len(set(picked)), "an image was reused across lines"
-    assert all(out[ln["id"]] for ln in _mk_lines(10)), "a line shipped with no image"
+    imgs = {f"/a/{i}.jpg": ("akagi carrier", "akagi carrier", None) for i in range(5)}
+    lines = _mk_lines(10)
+    for i, ln in enumerate(lines):
+        ln["text"] = "Dauntless dive bombers torpedo the Japanese fleet at 0755."
+    out = A._assign_images_to_lines(imgs, lines, "Battle of Midway")
+    bare = [ln["id"] for ln in lines if not out.get(ln["id"])]
+    assert bare, "a 5-image pool must not be forced onto 10 lines"
 
 
-def test_assignment_fill_runs_after_the_term_cap(monkeypatch):
-    """Capping drops images, so the fill must run after it or lines starve."""
+def test_assignment_spreads_a_small_pool_instead_of_repeating_one_image():
+    """A small pool must not collapse onto a single image per line."""
     from src.agents.asset import agent as A
-    import src.agents.asset.assign as LA
-    monkeypatch.setattr(LA, "plan_assignment",
-                        lambda imgs, lines, topic: {ln["id"]: [f"/a/M{i}.jpg"]
-                                                    for i, ln in enumerate(lines)})
-    imgs = {f"/a/M{i}.jpg": ("Midway", "Midway", None) for i in range(10)}
-    imgs.update({f"/a/S{i}.jpg": (f"Ship{i}", f"Ship{i}", None) for i in range(10)})
-    out = A._assign_images_to_lines(imgs, _mk_lines(10), "topic")
+    imgs = {f"/a/{i}.jpg": (f"term{i}", f"term{i}", None) for i in range(5)}
+    out = A._assign_images_to_lines(imgs, _mk_lines(3), "topic")
     picked = [p for deck in out.values() for p in deck]
-    assert len(picked) == len(set(picked))
-    assert all(out[ln["id"]] for ln in _mk_lines(10)), "cap starved a line"
-    # the all-Midway plan must not survive intact
-    assert len([p for p in picked if "M" in p]) <= A.MAX_IMAGES_PER_TERM
+    assert len(set(picked)) > 1, "the whole pool collapsed onto one image"
+    assert all(len(deck) <= A.MAX_IMAGES_PER_LINE for deck in out.values())
+
+
+def test_assignment_caps_images_per_line():
+    from src.agents.asset import agent as A
+    imgs = {f"/a/{i}.jpg": ("akagi", "akagi", None) for i in range(20)}
+    out = A._assign_images_to_lines(imgs, _mk_lines(4), "Battle of Midway")
+    assert all(len(deck) <= A.MAX_IMAGES_PER_LINE for deck in out.values())
+
+
+def test_backfill_is_off_by_default():
+    """A line with no visual is correct; forced filler is the regression."""
+    from src.agents.asset import agent as A
+    lines = _mk_lines(3)
+    A._backfill_gaps(lines, {"/a/0.jpg": ("akagi", "akagi", None)})
+    assert all(not ln.get("asset_paths") for ln in lines)
 
 
 def test_assignment_survives_an_empty_planner_result(monkeypatch):
+    """The deterministic pass must still run when the planner returns nothing."""
     from src.agents.asset import agent as A
     import src.agents.asset.assign as LA
     monkeypatch.setattr(LA, "plan_assignment", lambda i, l, t: {})
-    imgs = {f"/a/{i}.jpg": (f"t{i}", f"t{i}", None) for i in range(5)}
+    imgs = {f"/a/{i}.jpg": (f"term{i}", f"term{i}", None) for i in range(5)}
     out = A._assign_images_to_lines(imgs, _mk_lines(3), "topic")
-    assert all(out[ln["id"]] for ln in _mk_lines(3))
+    picked = [p for deck in out.values() for p in deck]
+    assert picked, "no image assigned despite matching features"
 
 
 # --- image validation: the building with "pecifc" on it -------------------

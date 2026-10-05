@@ -71,8 +71,12 @@ _TEXTUAL = re.compile(
 
 # Replica / model / prop: a representation rather than the thing.
 _REPLICA = re.compile(
-    r"\bDioramas?\b|Models?\b|Minatures?\b|Replica|Replicas|"
-    r"Scale models|Mock-?ups?|Animatronics\b",
+    r"\bDioramas?\b|\bModels?\b|Minatures?\b|Replica|Replicas|"
+    r"Scale models|Mock-?ups?|Animatronics\b|"
+    # "File:1.700 scale IJN Hiryu Battle of Midway.jpg" -- a collector's
+    # model photographed, which reads exactly like a real carrier at sea.
+    r"\b\d+[.,]\d+\s+scale\b|\b\d+\s*/\s*\d+\s+scale\b|"
+    r"\bscale\s+\d|\bmodel\s+kit\b|\bplastic\s+model\b",
     re.I,
 )
 
@@ -152,6 +156,13 @@ def is_non_visual_entity(entity: str) -> bool:
     if re.fullmatch(r"[\d\s,.\-–—:]+", e):
         return True
     return False
+
+
+_SCALE_MODEL = re.compile(
+    r"\b\d+[.,]\d+\s+scale\b|\b\d+\s*/\s*\d+\s+scale\b|\bscale\s+\d|"
+    r"\bmodel\s+kit\b|\bplastic\s+model\b",
+    re.I,
+)
 
 
 def _cat_hits(pattern, cats: str) -> str:
@@ -271,7 +282,13 @@ def validate_candidate(meta: dict, title: str, entity: str,
         score -= 3
         type_score -= 3
         reasons.append(f"textual artefact: {hit!r}")
-    if _REPLICA.search(cats):
+    if _SCALE_MODEL.search(title or "") or _SCALE_MODEL.search(cats):
+        # A collector's model photographed at a show reads exactly like a real
+        # ship at sea, so this is scored as a hard type mismatch, not a hint.
+        score -= 4
+        type_score -= 4
+        reasons.append("scale model, not a photograph")
+    elif _REPLICA.search(cats):
         score -= 2
         reasons.append("replica/model/diorama")
     if _MODERN_TOURIST.search(cats):
