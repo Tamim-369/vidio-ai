@@ -962,3 +962,49 @@ def test_reuse_spreads_over_the_pool_instead_of_leaning_on_one_picture():
     out = A._assign_images_to_lines(imgs, lines, "Battle of Midway")
     uses = collections.Counter(p for deck in out.values() for p in deck)
     assert len(uses) >= 4, f"video leans on {len(uses)} of {len(imgs)} images"
+
+
+# --- per-line image targeting ----------------------------------------------
+# "It should position the images based on line: if one line is talking about
+# plane then it should get a plane." Token overlap between a narration line and
+# a topic-level entity query is weak by construction, so the line about
+# aircraft scored zero and shipped bare.
+
+def test_a_line_keeps_the_image_fetched_for_it():
+    """An image fetched FOR a line wins that line over token scoring."""
+    from src.agents.asset import agent as A
+    imgs = {
+        "/a/plane.jpg": ("sbd dauntless dive bomber", "sbd dauntless dive bomber", 6),
+        "/a/carrier.jpg": ("uss akagi carrier", "uss akagi carrier", 1),
+    }
+    lines = [{"id": 6, "text": "American aircraft launch their attack."},
+             {"id": 1, "text": "The Japanese fleet sits on the water."}]
+    out = A._assign_images_to_lines(imgs, lines, "Battle of Midway")
+    assert out[6] and out[6][0] == "/a/plane.jpg", out
+    assert out[1] and out[1][0] == "/a/carrier.jpg", out
+
+
+def test_query_boilerplate_is_stripped_before_searching():
+    """Commons ANDs every term, so the photography filler kills the query."""
+    from src.agents.asset.agent import _commons_query
+    got = _commons_query(
+        "Japanese carrier Akagi burning aerial view 1942 archive photo")
+    assert "archive" not in got and "photo" not in got, got
+    assert "Akagi" in got, got
+
+
+def test_a_truncated_query_does_not_end_in_a_function_word():
+    from src.agents.asset.agent import _commons_query
+    assert not _commons_query(
+        "US Navy SBD Dauntless launching from carrier 1942 archive photo"
+    ).endswith("from")
+
+
+def test_backoff_never_shortens_below_three_words():
+    """'US Navy carrier Enterprise 1942' -> 'US Navy' returns generic fleet
+    photography: plausible-looking but unrelated to the line."""
+    from src.agents.asset.agent import _commons_query
+    term = _commons_query("US Navy carrier Enterprise 1942").split()
+    floor = min(3, len(term))
+    variants = [" ".join(term[:n]) for n in range(len(term), floor - 1, -1)]
+    assert all(len(v.split()) >= 3 for v in variants), variants

@@ -423,12 +423,44 @@ def _audited_term(search_term: str) -> str:
     return corrected
 
 
+# Words the query agent adds for a human reader that Commons must not see.
+# "Japanese carrier Akagi burning aerial view 1942 archive photo" is 9 ANDed
+# terms and matches almost nothing; the same query without "archive photo" and
+# "historical photograph" returns the photographs. Measured: 18 per-line
+# queries produced 5 candidates before this, and the boilerplate was in 17 of 18.
+_QUERY_BOILERPLATE = {
+    "archive", "archived", "photo", "photos", "photograph", "photographs",
+    "historical", "history", "period", "close-up", "closeup", "close",
+    "image", "images", "picture", "pictures", "colorized", "colourised",
+    "colorised", "black", "white", "file", "files", "public", "domain",
+    "high", "resolution", "high-resolution", "original", "vintage",
+}
+
+
+def _commons_query(term: str) -> str:
+    """Shorten a written query into something Commons will actually match."""
+    words = (term or "").split()
+    kept = [w for w in words
+            if w.strip(".,;:()\"'").lower() not in _QUERY_BOILERPLATE]
+    if not kept:
+        kept = words
+    # Commons ANDs every term, so a long query collapses to zero hits.
+    trimmed = kept[:6]
+    # Truncation can leave a dangling function word ("...launching from"),
+    # which Commons then requires literally.
+    while trimmed and trimmed[-1].strip(".,;:()\"'").lower() in {
+            "from", "to", "on", "in", "at", "of", "with", "and", "or", "the",
+            "a", "an", "for", "by", "as", "into", "over", "near"}:
+        trimmed.pop()
+    return " ".join(trimmed)
+
+
 def _commons_params(search_term: str, count: int) -> dict:
     return {
             "action": "query",
             "format": "json",
             "generator": "search",
-            "gsrsearch": f"filetype:bitmap {search_term}",
+            "gsrsearch": f"filetype:bitmap {_commons_query(search_term)}",
             "gsrnamespace": 6,
             "gsrlimit": count * 4,
             "prop": "imageinfo",
@@ -437,17 +469,51 @@ def _commons_params(search_term: str, count: int) -> dict:
     }
 
 
-def _commons_pass(search_term: str, base_path: str, count: int) -> list:
-    """One Commons search+download pass."""
-    downloaded = []
-    try:
-        params = _commons_params(search_term, count)
+def _commons_pages_with_backoff(search_term: str, count: int) -> dict:
+    """Search, and on a miss retry with progressively fewer words.
+
+    Commons ANDs every term, so a descriptive query like "Japanese carrier
+    deck crew rearming aircraft" matches nothing at all -- no file uses all
+    seven words. "Japanese carrier deck crew" matches some. Short concrete
+    queries ("SBD Dauntless launching") are unaffected and cost one search;
+    the extra searches are only paid on a miss.
+    """
+    seen_variants: set = set()
+    terms = _commons_query(search_term).split()
+    # Never back off below three words. "US Navy carrier Enterprise 1942"
+    # shortening to "US Navy" returns generic fleet photography -- worse than
+    # no image at all, because it looks plausible and matches nothing in the
+    # narration. A three-word AND is specific enough to stay on topic.
+    floor = min(3, len(terms))
+    variants = [" ".join(terms[:n]) for n in
+                range(len(terms), floor - 1, -1)]
+    pages: dict = {}
+    for variant in variants:
+        if not variant:
+            break
+        if variant in seen_variants:
+            continue
+        seen_variants.add(variant)
+        params = _commons_params(variant, count)
         data = _commons_search(params)
         pages = (data.get("query", {}) or {}).get("pages", {}) or {}
         if not pages:
             # A throttled burst returns an empty body; one quieter retry.
             data = _commons_search(params)
             pages = (data.get("query", {}) or {}).get("pages", {}) or {}
+        if pages:
+            if variant != variants[0]:
+                print(f"      [commons] 0 hits for '{variants[0]}' "
+                      f"- retried shorter as '{variant}'")
+            return pages
+    return pages
+
+
+def _commons_pass(search_term: str, base_path: str, count: int) -> list:
+    """One Commons search+download pass."""
+    downloaded = []
+    try:
+        pages = _commons_pages_with_backoff(search_term, count)
         for key in sorted(pages, key=lambda k: pages[k].get("index", 0)):
             page = pages[key]
             ii = (page.get("imageinfo") or [{}])[0]
@@ -862,10 +928,15 @@ def _round_robin_specs(specs: list, max_specs: int) -> list:
     return out
 
 
-def _download_candidates(query_specs: list, assets_dir: str) -> dict:
+def _download_candidates(query_specs: list, assets_dir: str,
+                         per_q: int = 0) -> dict:
     """Download candidates for each (query, line_id) spec in parallel.
-    Returns {path: (query, line_id)} so assignment keeps the origin-line context."""
-    per_q = max(1, int(round(TARGET_IMAGES * 1.6 / max(1, len(query_specs)))))
+    Returns {path: (query, line_id)} so assignment keeps the origin-line context.
+
+    per_q overrides the shared budget, used by the per-line pass where each
+    query belongs to exactly one sentence and needs a single image."""
+    if per_q <= 0:
+        per_q = max(1, int(round(TARGET_IMAGES * 1.6 / max(1, len(query_specs)))))
     candidates = {}
     with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_WORKERS, len(query_specs))) as ex:
         futs = {ex.submit(_fetch_for_keyword, q, i, assets_dir, per_q): (q, lid)
@@ -1043,6 +1114,27 @@ def _assign_images_to_lines(images: dict, lines: list, topic: str) -> dict:
 
     def room_for(p: str) -> bool:
         return uses[p] < limits[p]
+
+    def score_of(p: str, lid) -> int:
+        feats = _tokens(images[p][0] or images[p][1] or "")
+        return len(feats & want.get(lid, set()))
+
+    # Phase 0: images fetched FOR a line win that line outright. This is what makes
+    # "a line about dive bombers shows a dive bomber" true rather than hoped
+    # for: token overlap between a narration line and a topic-level entity query
+    # is weak by construction, so the line about aircraft scored zero and
+    # shipped bare while the one line naming a carrier got everything.
+    for lid in order:
+        for p, meta in images.items():
+            if len(out[lid]) >= MAX_IMAGES_PER_LINE or not room_for(p):
+                continue
+            if meta[2] != lid:              # fetched for a different line
+                continue
+            if score_of(p, lid) <= 0 and meta[0] is None:
+                continue
+            out[lid].append(p)
+            uses[p] += 1
+            placed.add(p)
 
     # Phase 1: give every image its single best-matching line, no repeats. This
     # is what stops the pool collapsing -- scoring every (image, line) pair and
@@ -1357,6 +1449,22 @@ def fetch_assets(lines: list, topic: str = "") -> list:
         print(f"  [asset] Downloading pool (Commons-first, pexels={'on' if _ENABLE_PEXELS else 'off'})...")
         candidates = _download_entities(entities, assets_dir,
                                        _pool_target(len(lines)))
+        # Per-line queries as well as the topic pool. The pool is focused and
+        # high quality but topic-level: its images are named after entities, and
+        # a narration line about dive bombers shares no tokens with "USS Akagi",
+        # so that line scored zero and shipped bare. The query agent reads the
+        # SCRIPT and asks what should be pictured on each line, which is the
+        # only way "a line about aircraft gets an aircraft" can be true.
+        try:
+            qmap = build_search_queries(lines, topic)
+            line_specs = _build_query_specs(lines, topic, qmap)
+            per_line = _download_candidates(line_specs, assets_dir, per_q=1)
+            print(f"  [asset] Per-line queries: {len(line_specs)} query/ies "
+                  f"-> {len(per_line)} candidate(s) matched to a line")
+            for p, meta in per_line.items():
+                candidates.setdefault(p, meta)
+        except Exception as e:
+            print(f"  [asset] Per-line query pass unavailable: {e}")
     print(f"  [asset] Downloaded {len(candidates)} candidate(s)")
 
     kept = _describe_and_filter_candidates(candidates)
