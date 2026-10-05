@@ -8,6 +8,11 @@ import math
 
 import pytest
 
+from src.agents.asset import agent as agent_mod
+from src.agents.asset.validate import (
+    hull_designator, resolve_hull, validate_candidate, is_non_visual_entity,
+)
+
 from src.services import captions
 from src.agents.asset.agent import _on_free_host, _is_blocked_host
 
@@ -562,12 +567,10 @@ def _vmeta(cats="", date="", desc="", w=2000, h=1500):
     ("Schnorchel", False),
 ])
 def test_non_visual_entities_are_rejected(term, expected):
-    from src.agents.asset.validate import is_non_visual_entity
     assert is_non_visual_entity(term) is expected, term
 
 
 def test_validate_rejects_a_theatre_of_operations_map():
-    from src.agents.asset.validate import validate_candidate
     r = validate_candidate(
         _vmeta("Maps of World War II in the Pacific|PD US NPS", "2024-09-14"),
         "File:Map of Pacific Theater of World War II.jpg", "Pacific Theater", 1942)
@@ -575,7 +578,6 @@ def test_validate_rejects_a_theatre_of_operations_map():
 
 
 def test_validate_rejects_a_memorial_building():
-    from src.agents.asset.validate import validate_candidate
     r = validate_candidate(
         _vmeta("Pearl Harbor Memorial|Monuments in Hawaii", "2020-01-01"),
         "File:Pearl Harbor Memorial.jpg", "Pearl Harbor", 1942)
@@ -585,7 +587,6 @@ def test_validate_rejects_a_memorial_building():
 def test_validate_rejects_a_museum_not_the_ship():
     """The Lexington case: CV-3 was Saratoga, and Commons answered with the
     Corpus Christi museum on the bay."""
-    from src.agents.asset.validate import validate_candidate
     r = validate_candidate(
         _vmeta("Views from Corpus Christi of USS Lexington Museum on the Bay|"
                "Self-published work", "2018-10-05"),
@@ -596,7 +597,6 @@ def test_validate_rejects_a_museum_not_the_ship():
 
 def test_validate_rejects_a_graffiti_wall():
     """The user saw a building with 'pecifc' written on it."""
-    from src.agents.asset.validate import validate_candidate
     r = validate_candidate(
         _vmeta("Graffiti|Street art in Hawaii", "2023-02-01"),
         "File:Graffiti on a wall, Pearl Harbor.jpg", "Pearl Harbor", 1942)
@@ -604,7 +604,6 @@ def test_validate_rejects_a_graffiti_wall():
 
 
 def test_validate_rejects_emblems_and_logos():
-    from src.agents.asset.validate import validate_candidate
     r = validate_candidate(
         _vmeta("United States Pacific Fleet|Fleet emblems of the United States Navy",
                "Unknown date"),
@@ -614,7 +613,6 @@ def test_validate_rejects_emblems_and_logos():
 
 
 def test_validate_rejects_a_made_far_after_the_topic():
-    from src.agents.asset.validate import validate_candidate
     r = validate_candidate(
         _vmeta("June 2011 in California", "Taken on 24 June 2011"),
         "File:USS Midway leaving San Diego.jpg", "USS Akagi", 1942)
@@ -625,7 +623,6 @@ def test_validate_keeps_genuine_war_photographs():
     """The regression that matters most: real archival material must survive.
     Categories once flagged a true 1942 action shot as "Dioramas", so no single
     signal may be allowed to reject on its own."""
-    from src.agents.asset.validate import validate_candidate
     good = [
         # a real combat photograph, PD US Navy
         (_vmeta("Douglas SBD Dauntless|PD US Navy", "19 May 1942"),
@@ -646,7 +643,6 @@ def test_validate_keeps_genuine_war_photographs():
 
 def test_validate_ignores_upload_date_for_era():
     """DateTime is the upload date; a 1942 photo uploaded in 2025 is fine."""
-    from src.agents.asset.validate import validate_candidate
     r = validate_candidate(
         _vmeta("Kaga (ship, 1927)|PD US Navy",
                "1942-06-06"),  # DateTimeOriginal is the artwork date
@@ -655,7 +651,6 @@ def test_validate_ignores_upload_date_for_era():
 
 
 def test_validate_rejects_tiny_images():
-    from src.agents.asset.validate import validate_candidate
     r = validate_candidate(_vmeta("1942 in naval aviation", "1942-01-01",
                                   w=320, h=240),
                            "File:small.jpg", "USS Akagi", 1942)
@@ -663,10 +658,84 @@ def test_validate_rejects_tiny_images():
 
 
 def test_validate_is_a_noop_without_an_era():
-    from src.agents.asset.validate import validate_candidate
     r = validate_candidate(_vmeta("Pearl Harbor|Memorials"),
                            "File:Pearl Harbor Memorial.jpg", "Pearl Harbor", None)
     assert r["verdict"] == "reject", "type rejection must not need an era"
     r2 = validate_candidate(_vmeta("June 2011 in California", "24 June 2011"),
                             "File:x.jpg", "USS Akagi", None)
     assert r2["verdict"] == "keep", "era must not be guessed when unknown"
+
+
+# --- hull designation audit -------------------------------------------------
+# The Midway run searched "USS Lexington (CV-3)". CV-3 was USS Saratoga;
+# Lexington was CV-2. Commons answered with the Corpus Christi museum and the
+# wrong carrier, and grounding passed it because the string was in the article.
+
+
+def test_hull_designator_splits_name_and_number():
+    assert hull_designator("USS Lexington (CV-3)") == ("uss lexington", "cv-3")
+    assert hull_designator("IJNS Akagi") is None
+    assert hull_designator("Battle of Midway") is None
+
+
+def test_resolve_hull_corrects_a_hallucinated_designation():
+    """Commons categories say CV-2; the query said CV-3. Correct it."""
+    cats = ["USS Lexington (CV-2)|PD US Navy"] * 3 + ["USS Lexington (CV-16)|PD US Navy"]
+    assert resolve_hull("USS Lexington (CV-3)", cats) == "USS Lexington (CV-2)"
+
+
+def test_resolve_hull_keeps_a_correct_designation():
+    """When Commons supports the queried hull, change nothing."""
+    assert resolve_hull("USS Lexington (CV-2)",
+                        ["USS Lexington (CV-2)|PD US Navy"] * 3) == "USS Lexington (CV-2)"
+
+
+def test_resolve_hull_leaves_non_ships_alone():
+    assert resolve_hull("USS Akagi", []) == "USS Akagi"
+    assert resolve_hull("Pearl Harbor", []) == "Pearl Harbor"
+
+
+def test_resolve_hull_ignores_a_single_dissenting_result():
+    """One result is not enough evidence to rewrite a term."""
+    assert resolve_hull("USS Lexington (CV-3)",
+                        ["USS Lexington (CV-2)|PD US Navy"]) == "USS Lexington (CV-3)"
+
+
+def test_audited_term_corrects_before_any_download(monkeypatch, tmp_path):
+    """The budget is spent on the first pass, so the audit has to happen first."""
+    searched = []
+
+    def fake_search(params):
+        searched.append(params["gsrsearch"])
+        return {"query": {"pages": {
+            "a": {"imageinfo": [{"extmetadata": {
+                "Categories": {"value": "USS Lexington (CV-2)|PD US Navy"}}}]},
+            "b": {"imageinfo": [{"extmetadata": {
+                "Categories": {"value": "USS Lexington (CV-2)|PD US Navy"}}}]},
+            "c": {"imageinfo": [{"extmetadata": {
+                "Categories": {"value": "USS Lexington (CV-2)|PD US Navy"}}}]},
+        }}}
+
+    monkeypatch.setattr(agent_mod, "_commons_search", fake_search)
+    called = []
+    monkeypatch.setattr(agent_mod, "_commons_pass",
+                        lambda term, base, count: called.append(term) or [])
+    assert agent_mod._audited_term("USS Lexington (CV-3)") == "USS Lexington (CV-2)"
+    agent_mod._fetch_wikimedia_commons("USS Lexington (CV-3)", str(tmp_path), 3)
+    assert called == ["USS Lexington (CV-2)"], called
+
+
+def test_audited_term_costs_nothing_for_terms_without_a_hull(monkeypatch):
+    """No hull designation means no audit search at all."""
+    def boom(params):
+        raise AssertionError("unnecessary audit search")
+    monkeypatch.setattr(agent_mod, "_commons_search", boom)
+    assert agent_mod._audited_term("Pearl Harbor") == "Pearl Harbor"
+    assert agent_mod._audited_term("USS Akagi") == "USS Akagi"
+
+
+def test_audited_term_survives_a_throttled_audit(monkeypatch):
+    def boom(params):
+        raise RuntimeError("429")
+    monkeypatch.setattr(agent_mod, "_commons_search", boom)
+    assert agent_mod._audited_term("USS Lexington (CV-3)") == "USS Lexington (CV-3)"

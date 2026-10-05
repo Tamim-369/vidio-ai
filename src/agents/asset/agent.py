@@ -61,7 +61,7 @@ from src.agents.asset.commons import (
 )
 from src.agents.asset.entities import extract_entities
 from src.agents.asset.validate import (
-    validate_candidate, is_non_visual_entity,
+    validate_candidate, is_non_visual_entity, resolve_hull, hull_designator,
 )
 from src.agents.query.agent import build_search_queries
 
@@ -387,10 +387,41 @@ def _commons_search(params: dict) -> dict:
 
 
 def _fetch_wikimedia_commons(search_term: str, base_path: str, count: int = 1) -> list:
-    """Wikimedia Commons images with explicit, allowed licenses (PD/CC0/CC BY/CC BY-SA)."""
-    downloaded = []
+    """Wikimedia Commons images with explicit, allowed licenses (PD/CC0/CC BY/CC BY-SA).
+
+    Runs at most twice: once for the term as written, and -- only if the term
+    carries a hull designation that Commons contradicts -- once for the
+    designation Commons actually agrees with.
+    """
+    # Correct the hull designation BEFORE downloading: the budget gets spent on
+    # the first pass, so a post-download audit would be too late to matter.
+    return _commons_pass(_audited_term(search_term), base_path, count)
+
+
+def _audited_term(search_term: str) -> str:
+    """Return the term with a hull number Commons agrees with, else unchanged.
+
+    The audit is a metadata-only search (no image bytes) and is skipped for
+    terms with no hull designation, so the common path costs nothing extra.
+    """
+    if not hull_designator(search_term):
+        return search_term
     try:
-        params = {
+        data = _commons_search(_commons_params(search_term, 6))
+        pages = (data.get("query", {}) or {}).get("pages", {}) or {}
+        cats = [_meta_field((pg.get("imageinfo") or [{}])[0], "Categories")
+                for pg in pages.values()]
+        corrected = resolve_hull(search_term, cats)
+    except Exception:
+        return search_term                      # never fail a term on an audit
+    if corrected != search_term:
+        print(f"      [entity] {search_term} -> {corrected} "
+              f"(hull corrected: Commons categories never support the query)")
+    return corrected
+
+
+def _commons_params(search_term: str, count: int) -> dict:
+    return {
             "action": "query",
             "format": "json",
             "generator": "search",
@@ -400,7 +431,14 @@ def _fetch_wikimedia_commons(search_term: str, base_path: str, count: int = 1) -
             "prop": "imageinfo",
             "iiprop": "url|extmetadata|size",
             "iiurlwidth": 1400,
-        }
+    }
+
+
+def _commons_pass(search_term: str, base_path: str, count: int) -> list:
+    """One Commons search+download pass."""
+    downloaded = []
+    try:
+        params = _commons_params(search_term, count)
         data = _commons_search(params)
         pages = (data.get("query", {}) or {}).get("pages", {}) or {}
         if not pages:
@@ -408,10 +446,12 @@ def _fetch_wikimedia_commons(search_term: str, base_path: str, count: int = 1) -
             data = _commons_search(params)
             pages = (data.get("query", {}) or {}).get("pages", {}) or {}
         for key in sorted(pages, key=lambda k: pages[k].get("index", 0)):
-            if len(downloaded) >= count:
-                break
             page = pages[key]
             ii = (page.get("imageinfo") or [{}])[0]
+            if len(downloaded) >= count:
+                continue
+            if not ii:
+                continue
             url = ii.get("thumburl") or ii.get("url")
             lic = ""
             for field in ("LicenseShortName", "LicenseSpdx", "UsageTerms"):

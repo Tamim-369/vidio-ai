@@ -166,6 +166,60 @@ def _cat_hits(pattern, cats: str) -> str:
     return ""
 
 
+_HULL = re.compile(r"\b([A-Z]{2,4})-?(\d{1,3})\b")
+
+
+def hull_designator(entity: str) -> tuple[str, str] | None:
+    """Split a term into (ship name, hull number).
+
+    "USS Lexington (CV-3)" -> ("uss lexington", "cv-3"). The name is stripped of
+    any trailing "(" so it can be matched against a Commons category.
+    """
+    m = _HULL.search(entity or "")
+    if not m:
+        return None
+    name = (entity or "")[: m.start()].strip().rstrip("([").strip().lower()
+    hull = m.group(0).replace(" ", "").lower()
+    return (name, hull) if name else None
+
+
+def resolve_hull(entity: str, cats_of_results: list[str]) -> str:
+    """Correct a term whose hull number disagrees with Commons.
+
+    Commons' own category names carry the true designation, so a hallucinated
+    one can be detected without a ship database. "USS Lexington (CV-3)" is
+    wrong -- CV-3 was Saratoga -- and every result comes back categorised
+    "USS Lexington (CV-2)" or "(CV-16)". Trusting the query would have shipped
+    the wrong ship.
+
+    Only rewrites when the named ship is unambiguous: we need at least two
+    results agreeing on a different hull, and the queried hull must be absent
+    from all of them.
+    """
+    parsed = hull_designator(entity)
+    if not parsed:
+        return entity
+    name, queried = parsed
+    tally: dict[str, int] = {}
+    # Commons writes the category as "USS Lexington (CV-2)" -- no space before
+    # the parenthesis -- so both spellings must be accepted.
+    pat = re.escape(name) + r"\s*\(\s*([a-z]{2,4}-\d{1,3})\s*\)"
+    for cats in cats_of_results:
+        for m in re.finditer(pat, (cats or "").lower()):
+            tally[m.group(1)] = tally.get(m.group(1), 0) + 1
+    if queried in tally or not tally:
+        return entity                      # query agrees, or Commons says nothing
+    # Two different hull numbers for one name is not ambiguity -- it means the
+    # queried hull is simply unattested. Trust the one most of Commons agrees
+    # with, needing at least two results to move off the original term.
+    best = max(tally.items(), key=lambda kv: kv[1])
+    if best[1] < 2:
+        return entity
+    # Reuse the original casing: .title() would render "Uss Lexington".
+    head = (entity or "")[: _HULL.search(entity).start()].strip().rstrip("( ")
+    return f"{head} ({best[0].upper()})"
+
+
 def _meta(meta: dict, key: str) -> str:
     v = ((meta or {}).get("extmetadata") or {}).get(key) or {}
     val = v.get("value", "")
