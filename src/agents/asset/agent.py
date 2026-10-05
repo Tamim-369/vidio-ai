@@ -674,6 +674,26 @@ GENERIC_TERMS = {
 }
 
 
+_PLACE_HINT = re.compile(
+    r"\bHarbour\b|\bHarbor\b|\bBay\b|\bGulf\b|\bAtoll\b|\bIsland\b|"
+    r"\bIslands\b|\bReef\b|\bStrait\s+of\b|\bSea\b|\bOcean\b|"
+    r"\bPeninsula\b|\bCoast\b|\bValley\b|\bMountain\b|\bRiver\b|"
+    r"\bTheater\b|\bTheatre\b",
+    re.I,
+)
+
+
+def _looks_like_place(entity: str) -> bool:
+    """True for place-like terms. Cheap suffix/keyword test.
+
+    Not exhaustive, and deliberately conservative: a false positive costs one
+    image from a background term, whereas a false negative costs half the pool
+    budget on scenery.
+    """
+    e = entity.strip()
+    return bool(_PLACE_HINT.search(e))
+
+
 def _entity_budget(entity: str) -> int:
     """How many images a term may contribute.
 
@@ -681,6 +701,13 @@ def _entity_budget(entity: str) -> int:
     common noun earns 1, because the audit showed a generic term spends the
     entire image allowance on unusable results and starves the good terms.
     """
+    # A PLACE is a container, not one of the things that made the event up, so
+    # it can only ever yield scenery -- and for a war topic that scenery is
+    # beaches, atolls and memorials. Three of seven Midway entities were places
+    # (Pearl Harbor, Coral Sea, Midway Atoll), so half the pool budget went to
+    # background. Places get a single image and no event anchor.
+    if _looks_like_place(entity):
+        return 1
     words = entity.split()
     if len(words) >= 2:
         return COMMONS_PER_ENTITY

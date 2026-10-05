@@ -89,6 +89,38 @@ _MODERN_TOURIST = re.compile(
     re.I,
 )
 
+# HARD BAN, no exceptions. Memorial and commemorative imagery is never correct
+# for this channel, not even for a video about a soldier and his final resting
+# place -- the brief is that such a video shows the war he fought in, not his
+# grave. Short-form retention also punishes it: a wreath on grass is a dead
+# frame, and these reads as "grass with a flag and shapes on it".
+#
+# "80th Commemoration of the Battle of Midway" slipped through for exactly
+# this reason: the word is Commemoration, and the old patterns only knew
+# Memorial. A ceremony photograph has no other tell.
+_SACRED = re.compile(
+    r"\bCemeteries\b|\bCemetery\b|\bGraves\b|\bGrave\b|\bGrave[s]? of\b|"
+    r"\bTombstones?\b|\bHeadstones?\b|\bBurials?\b|\bBurial\b|"
+    r"\bMemorials?\b|\bMonuments?\b|\bMemorial park\b|\bWar memorial\b|"
+    r"\bCommemorations?\b|\bCommemorat(?:e|es|ed|ing|ive)\b|"
+    r"\bAnniversar(?:y|ies)\b|\bCeremon(?:y|ies)\b|\bRites of Remembrance\b|"
+    r"\bWreaths?\b|\bLay(?:ing|ings) of wreaths\b|\bPlaques?\b|\bTomb\b|"
+    r"\bStatues?\b|\bSculptures?\b|\bEulog(?:y|ies)\b|\bFunerals?\b",
+    re.I,
+)
+
+
+def is_memorial_image(title: str, cats: str) -> bool:
+    """True for memorials, cemeteries, graves and commemorations.
+
+    Matched on both title and categories: a commemoration photograph is often
+    titled with the event ("80th Commemoration of the Battle of Midway") and
+    categorised by the memorial site rather than by the word "memorial", so
+    either field alone is not enough.
+    """
+    return bool(_SACRED.search(title or "") or _SACRED.search(cats or ""))
+
+
 _PLACE_TITLE = re.compile(
     r"\bMuseum\b|\bMemorial\b|\bMonument\b|\bStatue\b|\bSculpture\b|"
     r"\bCathedral\b|\bChapel\b|\bTemple\b|\bPalace\b|\bCastle\b|"
@@ -252,6 +284,12 @@ def validate_candidate(meta: dict, title: str, entity: str,
     """
     cats = _meta(meta, "Categories")
     score, reasons = 0, []
+
+    # Hard ban first, so no amount of other evidence can buy it back.
+    if is_memorial_image(title, cats):
+        return {"verdict": "reject", "score": -10,
+                "reasons": ["memorial/cemetery/commemoration - never used "
+                            "in this channel"]}
     type_score = 0
 
     hit = _cat_hits(_MAPY, cats)

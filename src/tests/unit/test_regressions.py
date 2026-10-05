@@ -812,3 +812,49 @@ def test_audited_term_survives_a_throttled_audit(monkeypatch):
         raise RuntimeError("429")
     monkeypatch.setattr(agent_mod, "_commons_search", boom)
     assert agent_mod._audited_term("USS Lexington (CV-3)") == "USS Lexington (CV-3)"
+
+
+# --- memorial ban ----------------------------------------------------------
+# A render came out "with duck images sitting in front of flag". Those were
+# modern commemoration ceremonies: grass, flag, wreaths, people standing
+# around. Channel decision: never show memorial, cemetery, grave or
+# commemorative imagery -- not even for a video about a soldier, where the
+# brief is to show the war he fought in rather than his grave.
+
+def test_commemoration_photographs_are_rejected():
+    """The word is "Commemoration"; the old patterns only knew "Memorial"."""
+    from src.agents.asset.validate import validate_candidate
+    r = validate_candidate(
+        _vmeta("PD US FWS|2022 in Midway Atoll|Flickr"),
+        "File:80th Commemoration of the Battle of Midway (522178044.jpg).jpg",
+        "Midway Atoll", 1942)
+    assert r["verdict"] == "reject", r
+
+
+def test_anniversary_and_memorial_service_photographs_are_rejected():
+    from src.agents.asset.validate import validate_candidate
+    for title in ("File:USFWS Commemorates 77th Anniversary of the Battle.jpg",
+                  "File:Battle of Midway memorial service.jpg",
+                  "File:USS Arizona Memorial, Pearl Harbor.jpg"):
+        r = validate_candidate(_vmeta("PD US FWS"), title, "Pearl Harbor", 1942)
+        assert r["verdict"] == "reject", (title, r)
+
+
+def test_cemeteries_and_graves_are_rejected():
+    from src.agents.asset.validate import validate_candidate
+    for title in ("File:Marine Corps War Cemetery Iwo Jima.jpg",
+                  "File:Arlington National Cemetery.jpg",
+                  "File:Graves of the Unknown Soldier.jpg"):
+        r = validate_candidate(_vmeta("Military cemeteries"), title,
+                               "Battle of Midway", 1942)
+        assert r["verdict"] == "reject", (title, r)
+
+
+def test_archival_photographs_of_the_actual_fighting_still_pass():
+    """The ban must not eat the genuine article."""
+    from src.agents.asset.validate import validate_candidate
+    r = validate_candidate(
+        _vmeta("PD US Navy|Douglas SBD Dauntless"),
+        "File:Douglas SBD-3 Dauntless of VB-6 taking off from USS Enterprise.jpg",
+        "USS Akagi", 1942)
+    assert r["verdict"] == "keep", r
