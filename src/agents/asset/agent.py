@@ -710,12 +710,13 @@ def _entity_specs(entities: list, assets_dir: str) -> list:
     return specs
 
 
-def _download_entities(entities: list, assets_dir: str) -> dict:
+def _download_entities(entities: list, assets_dir: str,
+                       pool_cap: int = 0) -> dict:
     """Download a candidate pool from the topic entity pool.
 
     Returns {path: (entity, None)}. Commons is serialized by its own global
-    throttle inside _commons_search; downloads stay parallel.
-    """
+    throttle inside _commons_search; downloads stay parallel."""
+    pool_cap = pool_cap or _pool_target(len(entities) and 10)
     specs = _entity_specs(entities, assets_dir)
     candidates = {}
     if not specs:
@@ -727,11 +728,11 @@ def _download_entities(entities: list, assets_dir: str) -> dict:
     # 14 entities x 6 = 84 searches took 6.4 minutes for a pool that ended up
     # 94 images deep and only 7 usable.
     n = len(specs)
-    even = max(1, MAX_POOL_IMAGES // n)
+    even = max(1, pool_cap // n)
     trimmed = [(e, base, min(b, even)) for (e, _l, base, b) in specs]
     if even < COMMONS_PER_ENTITY:
         print(f"  [asset] Pool capped: {n} entities x {even} images "
-              f"(= {n * even} of max {MAX_POOL_IMAGES})")
+              f"(= {n * even} of max {pool_cap})")
 
     with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_WORKERS, len(trimmed))) as ex:
         futs = {ex.submit(_fetch_for_keyword, e, i, assets_dir, budget): e
@@ -743,11 +744,32 @@ def _download_entities(entities: list, assets_dir: str) -> dict:
                     candidates.setdefault(p, (e, None))
             except Exception as ex:
                 print(f"      [asset] entity '{e}' error: {ex}")
-    if len(candidates) > MAX_POOL_IMAGES:
-        print(f"  [asset] Trimming pool {len(candidates)} -> {MAX_POOL_IMAGES}")
-        keep = list(candidates)[:MAX_POOL_IMAGES]
-        candidates = {p: candidates[p] for p in keep}
+    if len(candidates) > pool_cap:
+        print(f"  [asset] Trimming pool {len(candidates)} -> {pool_cap}")
+        candidates = dict(_diverse_slice(candidates, pool_cap))
     return candidates
+
+
+def _diverse_slice(candidates: dict, limit: int) -> list:
+    """Pick `limit` candidates round-robin across queries.
+
+    The previous trim was "take the first N in arrival order", so whichever
+    query happened to finish first took every slot -- measured 3 of 5 images
+    from one query, all near-identical carrier portraits. Interleaving by query
+    makes the pool diverse by construction, which is what assignment needs in
+    order to tell images apart at all.
+    """
+    buckets: dict = {}
+    for p, meta in candidates.items():
+        buckets.setdefault((meta[1] or meta[0] or "").strip(), []).append(p)
+    order = list(buckets)
+    out: list = []
+    while len(out) < limit and any(buckets.values()):
+        for q in order:
+            if buckets[q] and len(out) < limit:
+                p = buckets[q].pop(0)
+                out.append((p, candidates[p]))
+    return out
 
 
 def _round_robin_specs(specs: list, max_specs: int) -> list:
@@ -957,12 +979,17 @@ def _assign_images_to_lines(images: dict, lines: list, topic: str) -> dict:
         placed.add(p)
 
     # Phase 2: reuse. A line under its cap takes another image only if one
-    # genuinely matches it; otherwise it stays bare.
+    # genuinely matches it; otherwise it stays bare. Consecutive lines are
+    # kept off the same picture -- "the same 2 images repeated over and over"
+    # was the visible symptom of a pool with too little variety to alternate.
     for score, lid, p in scores:
         if score <= 0 or p in out[lid]:
             continue
         if len(out[lid]) >= MAX_IMAGES_PER_LINE:
             continue
+        idx = order.index(lid)
+        if idx and out.get(order[idx - 1]) and out[order[idx - 1]][-1] == p:
+            continue                      # same image as the previous line
         out[lid].append(p)
 
     bare = [lid for lid in order if not out[lid]]
@@ -986,8 +1013,28 @@ MAX_IMAGES_PER_TERM = 2
 # marginal photos per sentence, and marginal photos of warships look like
 # random boats. Four to five focused images, spread over the video and reused
 # where they fit, reads better than two dozen near-duplicates.
-MAX_POOL_IMAGES = int(os.getenv("ASSET_MAX_POOL_IMAGES", "5"))
-MAX_POOL_ENTITIES = int(os.getenv("ASSET_MAX_POOL_ENTITIES", "4"))
+def _pool_target(n_lines: int) -> int:
+    """Pool size scaled to the video, because a fixed pool cannot both avoid
+    repetition and fill every line.
+
+    Five images across a 12-line video at 3 images per line is 36 slots drawn
+    from 5 pictures, so the same two images necessarily come back constantly --
+    that was the user's complaint. Roughly half the demanded slots is enough to
+    alternate without visible looping, and every image in the pool is now
+    event-anchored and metadata-validated, so a bigger pool no longer means the
+    old "random boats" filler.
+    """
+    want = max(1, n_lines) * MAX_IMAGES_PER_LINE // 2
+    return max(5, min(want, int(os.getenv("ASSET_MAX_POOL_IMAGES", "16"))))
+
+
+MAX_POOL_ENTITIES = int(os.getenv("ASSET_MAX_POOL_ENTITIES", "6"))
+# No single query may dominate the pool. Measured: 3 of 5 images came from
+# "USS Akagi Battle of Midway" and the rest were near-identical carrier
+# portraits, so the matcher had three photos it could not tell apart and
+# alternated the same two across the video. Diversity has to be enforced on
+# the QUERY, not on the file, because the duplicates are different files.
+MAX_IMAGES_PER_QUERY = int(os.getenv("ASSET_MAX_IMAGES_PER_QUERY", "2"))
 # How many raw terms to pull before non-visual filtering. Filtering discards
 # roughly a third of them, so the raw ask has to be comfortably larger than
 # the final count or the pool ends up built from one or two survivors.
@@ -995,7 +1042,7 @@ ENTITY_OVERFETCH = int(os.getenv("ASSET_ENTITY_OVERFETCH", "12"))
 # How many images one line may hold. Two is enough for a line that describes a
 # sequence ("launch, then the strike hits") without turning every line into a
 # slideshow.
-MAX_IMAGES_PER_LINE = int(os.getenv("ASSET_MAX_IMAGES_PER_LINE", "2"))
+MAX_IMAGES_PER_LINE = int(os.getenv("ASSET_MAX_IMAGES_PER_LINE", "3"))
 
 
 def mapping_paths(mapping: dict) -> list:
@@ -1161,7 +1208,8 @@ def _topic_body(topic: str) -> str:
         return ""
 
 
-def _ensure_min_pool(kept: dict, entities: list, assets_dir: str) -> dict:
+def _ensure_min_pool(kept: dict, entities: list, assets_dir: str,
+                     n_lines: int = 10) -> dict:
     """Refetch from the entity pool in rounds until we clear MIN_IMAGES.
 
     The pool is topic-level, so a round re-asks Commons for the SAME entities
@@ -1171,7 +1219,8 @@ def _ensure_min_pool(kept: dict, entities: list, assets_dir: str) -> dict:
     while len(kept) < MIN_IMAGES and rounds < 2:
         rounds += 1
         print(f"  [asset] Only {len(kept)} images - pool refetch round {rounds}...")
-        extra = _download_entities(entities, assets_dir)
+        extra = _download_entities(entities, assets_dir,
+                                   _pool_target(n_lines))
         for p, v in _describe_and_filter_candidates(extra).items():
             if p not in kept:
                 kept[p] = v
@@ -1222,14 +1271,15 @@ def fetch_assets(lines: list, topic: str = "") -> list:
         candidates = _download_candidates(specs, assets_dir)
     else:
         print(f"  [asset] Downloading pool (Commons-first, pexels={'on' if _ENABLE_PEXELS else 'off'})...")
-        candidates = _download_entities(entities, assets_dir)
+        candidates = _download_entities(entities, assets_dir,
+                                       _pool_target(len(lines)))
     print(f"  [asset] Downloaded {len(candidates)} candidate(s)")
 
     kept = _describe_and_filter_candidates(candidates)
     print(f"  [asset] OCR-clean, kept: {len(kept)}")
 
     if entities:
-        kept = _ensure_min_pool(kept, entities, assets_dir)
+        kept = _ensure_min_pool(kept, entities, assets_dir, len(lines))
     else:
         kept = _ensure_min_images(kept, specs, assets_dir)
 

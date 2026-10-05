@@ -460,10 +460,11 @@ def test_pool_budget_is_bounded_by_video_length(monkeypatch):
     monkeypatch.setattr(A, "_fetch_for_keyword", fake)
     monkeypatch.setattr(A, "MAX_PARALLEL_WORKERS", 8)
     ents = [f"Term{i}" for i in range(14)]
-    A._download_entities(ents, "/tmp/pool")
+    cap = A._pool_target(12)
+    A._download_entities(ents, "/tmp/pool", cap)
     total = sum(calls.values())
-    assert total <= A.MAX_POOL_IMAGES + len(ents), (
-        f"budgeted {total} images for {len(ents)} entities, cap is {A.MAX_POOL_IMAGES}")
+    assert total <= cap + len(ents), (
+        f"budgeted {total} images for {len(ents)} entities, cap is {cap}")
     # the real pool had every term at the full budget; budgets must shrink
     assert max(calls.values()) <= A.COMMONS_PER_ENTITY
 
@@ -473,13 +474,39 @@ def test_download_entities_trims_an_oversized_pool(monkeypatch):
     monkeypatch.setattr(A, "_fetch_for_keyword",
                         lambda kw, i, d, n: [f"/a/{kw}_{i}_{j}.jpg" for j in range(9)])
     monkeypatch.setattr(A, "MAX_PARALLEL_WORKERS", 8)
-    cands = A._download_entities(["A", "B", "C"], "/tmp/pool")
-    assert len(cands) <= A.MAX_POOL_IMAGES
+    cap = A._pool_target(12)
+    cands = A._download_entities(["A", "B", "C"], "/tmp/pool", cap)
+    assert len(cands) <= cap
 
 
 def test_pool_entity_count_is_capped():
     from src.agents.asset.agent import MAX_POOL_ENTITIES
-    assert 4 <= MAX_POOL_ENTITIES <= 10, "8 entities is ~2 min of Commons; more is wasted"
+    assert 4 <= MAX_POOL_ENTITIES <= 10, "more entities is wasted Commons time"
+
+
+def test_pool_scales_with_the_video_not_a_flat_five():
+    """A flat 5-image pool cannot fill 12 lines at 3 images each without
+    looping the same two pictures, which is the repetition users reported."""
+    from src.agents.asset.agent import _pool_target
+    assert _pool_target(3) >= 5
+    assert _pool_target(12) > _pool_target(3), "pool must grow with line count"
+
+
+def test_pool_stays_diverse_across_queries():
+    """No query may take most of the pool; near-identical carrier portraits
+    under three filenames are what made the video look like random boats."""
+    from src.agents.asset.agent import _diverse_slice, MAX_IMAGES_PER_QUERY
+    cands = {}
+    for i in range(6):
+        cands[f"/a/akagi{i}.jpg"] = ("USS Akagi Battle of Midway", None)
+    for i in range(2):
+        cands[f"/a/yam{i}.jpg"] = ("Isoroku Yamamoto Battle of Midway", None)
+    out = _diverse_slice(cands, 4)
+    tally = {}
+    for _p, meta in out:
+        tally[meta[0]] = tally.get(meta[0], 0) + 1
+    assert max(tally.values()) <= MAX_IMAGES_PER_QUERY, tally
+    assert len(tally) >= 2, tally
 
 
 # --- assignment: every line gets a DISTINCT image -------------------------
