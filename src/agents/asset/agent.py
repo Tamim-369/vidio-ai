@@ -60,6 +60,9 @@ from src.agents.asset.commons import (
     MAX_ENTITY_LEN,
 )
 from src.agents.asset.entities import extract_entities
+from src.agents.asset.validate import (
+    validate_candidate, is_non_visual_entity,
+)
 from src.agents.query.agent import build_search_queries
 
 HEADERS = {"User-Agent": "VideoPipeline/1.0 (history/mystery shorts; contact: local)"}
@@ -423,13 +426,26 @@ def _fetch_wikimedia_commons(search_term: str, base_path: str, count: int = 1) -
             # model rated 5 (correct subject) while catching modern junk,
             # because both DateTime and DateTimeOriginal hold UPLOAD dates for
             # most archival files. It emptied the pool. Kept as _anachronistic
-            # with tests documenting the failure; the vision gate is the way.
+            # with tests documenting the failure. The real era + type check is
+            # validate.py, which scores several metadata signals and only
+            # rejects when they agree.
             w, h = ii.get("width", 1), ii.get("height", 1)
             try:
                 if h and (w / h) > MAX_ASPECT_RATIO:
                     continue
             except (TypeError, ZeroDivisionError):
                 pass
+
+            # Per-image validation, from metadata only: no pixels are fetched
+            # to decide, so this costs nothing. Catches maps, buildings,
+            # memorials and logos returned for terms that name a region or a
+            # command rather than an object.
+            chk = validate_candidate(ii, page.get("title", ""), search_term,
+                                     _topic_era_year)
+            if chk["verdict"] == "reject":
+                print(f"      [validate] ✗ {page.get('title','')[:44]} — "
+                      f"{'; '.join(chk['reasons'][:2])}")
+                continue
             path = f"{base_path}_c{len(downloaded)}.jpg"
             if _download_image(url, path) and _remember(path, lic, "Wikimedia Commons"):
                 downloaded.append(path)
@@ -1066,7 +1082,16 @@ def fetch_assets(lines: list, topic: str = "") -> list:
     if _topic_era_year:
         print(f"  [asset] Era gate: subject ~{_topic_era_year} "
               f"(rejecting files dated after {_topic_era_year + ERA_SLACK_YEARS})")
-    entities = extract_entities(topic, body, max_entities=MAX_POOL_ENTITIES)
+    raw_entities = extract_entities(topic, body, max_entities=MAX_POOL_ENTITIES)
+    # Drop terms that name a place, command or abstract group. "Pacific Theater"
+    # and "USS Pacific Fleet" are perfect matches for a Midway article and
+    # return a theatre-of-operations map and a command building. Filtering here
+    # costs nothing; catching them after download costs a slot in the video.
+    entities = [e for e in raw_entities if not is_non_visual_entity(e)]
+    dropped = [e for e in raw_entities if is_non_visual_entity(e)]
+    if dropped:
+        print(f"  [asset] Dropped {len(dropped)} non-visual term(s): "
+              f"{', '.join(d[:24] for d in dropped[:6])}")
     print(f"  [asset] Entities: {len(entities)}")
     for e in entities[:12]:
         print(f"       - {e}")

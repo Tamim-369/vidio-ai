@@ -521,3 +521,152 @@ def test_assignment_survives_an_empty_planner_result(monkeypatch):
     imgs = {f"/a/{i}.jpg": (f"t{i}", f"t{i}", None) for i in range(5)}
     out = A._assign_images_to_lines(imgs, _mk_lines(3), "topic")
     assert all(out[ln["id"]] for ln in _mk_lines(3))
+
+
+# --- image validation: the building with "pecifc" on it -------------------
+# The pool was fine but the *type* was wrong. "Pacific Theater" is a region so
+# Commons returned an operations-theatre map; "USS Pacific Fleet" is a command
+# so it returned a building. Grounding cannot catch this: the term really is
+# in the article.
+
+def _vmeta(cats="", date="", desc="", w=2000, h=1500):
+    em = {}
+    if cats:
+        em["Categories"] = {"value": cats}
+    if date:
+        em["DateTimeOriginal"] = {"value": date}
+    if desc:
+        em["ImageDescription"] = {"value": desc}
+    return {"extmetadata": em, "width": w, "height": h}
+
+
+@pytest.mark.parametrize("term,expected", [
+    ("Pacific Theater", True),
+    ("USS Pacific Fleet", True),
+    ("Japanese Combined Fleet", True),
+    ("World War II", True),
+    ("The Battle of Midway", True),
+    ("5th Fleet", True),
+    ("United States Navy", True),
+    ("December 7 1941", True),
+    ("CV-3", True),
+    ("USS Akagi", False),
+    ("Pearl Harbor", False),
+    ("Coral Sea", False),
+    ("Akagi", False),
+    ("Isoroku Yamamoto", False),
+    ("Kido Butai", False),
+    ("Midway Atoll", False),
+    ("USS Enterprise (CV-6)", False),
+    ("Chuichi Nagumo", False),
+    ("Schnorchel", False),
+])
+def test_non_visual_entities_are_rejected(term, expected):
+    from src.agents.asset.validate import is_non_visual_entity
+    assert is_non_visual_entity(term) is expected, term
+
+
+def test_validate_rejects_a_theatre_of_operations_map():
+    from src.agents.asset.validate import validate_candidate
+    r = validate_candidate(
+        _vmeta("Maps of World War II in the Pacific|PD US NPS", "2024-09-14"),
+        "File:Map of Pacific Theater of World War II.jpg", "Pacific Theater", 1942)
+    assert r["verdict"] == "reject", r
+
+
+def test_validate_rejects_a_memorial_building():
+    from src.agents.asset.validate import validate_candidate
+    r = validate_candidate(
+        _vmeta("Pearl Harbor Memorial|Monuments in Hawaii", "2020-01-01"),
+        "File:Pearl Harbor Memorial.jpg", "Pearl Harbor", 1942)
+    assert r["verdict"] == "reject", r
+
+
+def test_validate_rejects_a_museum_not_the_ship():
+    """The Lexington case: CV-3 was Saratoga, and Commons answered with the
+    Corpus Christi museum on the bay."""
+    from src.agents.asset.validate import validate_candidate
+    r = validate_candidate(
+        _vmeta("Views from Corpus Christi of USS Lexington Museum on the Bay|"
+               "Self-published work", "2018-10-05"),
+        "File:USS Lexington -- The-Blue-Ghost' -- Corpus Christi.jpg",
+        "USS Lexington (CV-3)", 1942)
+    assert r["verdict"] == "reject", r
+
+
+def test_validate_rejects_a_graffiti_wall():
+    """The user saw a building with 'pecifc' written on it."""
+    from src.agents.asset.validate import validate_candidate
+    r = validate_candidate(
+        _vmeta("Graffiti|Street art in Hawaii", "2023-02-01"),
+        "File:Graffiti on a wall, Pearl Harbor.jpg", "Pearl Harbor", 1942)
+    assert r["verdict"] == "reject", r
+
+
+def test_validate_rejects_emblems_and_logos():
+    from src.agents.asset.validate import validate_candidate
+    r = validate_candidate(
+        _vmeta("United States Pacific Fleet|Fleet emblems of the United States Navy",
+               "Unknown date"),
+        "File:Commander United States Pacific Fleet logo.jpg",
+        "USS Pacific Fleet", 1942)
+    assert r["verdict"] == "reject", r
+
+
+def test_validate_rejects_a_made_far_after_the_topic():
+    from src.agents.asset.validate import validate_candidate
+    r = validate_candidate(
+        _vmeta("June 2011 in California", "Taken on 24 June 2011"),
+        "File:USS Midway leaving San Diego.jpg", "USS Akagi", 1942)
+    assert r["verdict"] == "reject", r
+
+
+def test_validate_keeps_genuine_war_photographs():
+    """The regression that matters most: real archival material must survive.
+    Categories once flagged a true 1942 action shot as "Dioramas", so no single
+    signal may be allowed to reject on its own."""
+    from src.agents.asset.validate import validate_candidate
+    good = [
+        # a real combat photograph, PD US Navy
+        (_vmeta("Douglas SBD Dauntless|PD US Navy", "19 May 1942"),
+         "File:Douglas SBD-3 of VB-6 taking off.jpg", "USS Akagi"),
+        (_vmeta("USS Enterprise (CV-6)|PD US Navy",
+                "4 June 1942 date QS:P571,+1942-06-04"),
+         "File:USS Enterprise (CV-6) at high speed.jpg", "USS Akagi"),
+        (_vmeta("USS Lexington (CV-2)|PD US Navy|Ship engine smoke",
+                "1933-02-02"),
+         "File:USS Saratoga (CV-3) and USS Lexington.jpg", "Coral Sea"),
+        (_vmeta("1942 in naval aviation|German U-boats", "1943-01-01"),
+         "File:Schnorchel U-boat deck.jpg", "Schnorchel"),
+    ]
+    for meta, title, ent in good:
+        r = validate_candidate(meta, title, ent, 1942)
+        assert r["verdict"] == "keep", (title, r)
+
+
+def test_validate_ignores_upload_date_for_era():
+    """DateTime is the upload date; a 1942 photo uploaded in 2025 is fine."""
+    from src.agents.asset.validate import validate_candidate
+    r = validate_candidate(
+        _vmeta("Kaga (ship, 1927)|PD US Navy",
+               "1942-06-06"),  # DateTimeOriginal is the artwork date
+        "File:Kaga, Akagi and Soryu under attack.jpg", "USS Akagi", 1942)
+    assert r["verdict"] == "keep", r
+
+
+def test_validate_rejects_tiny_images():
+    from src.agents.asset.validate import validate_candidate
+    r = validate_candidate(_vmeta("1942 in naval aviation", "1942-01-01",
+                                  w=320, h=240),
+                           "File:small.jpg", "USS Akagi", 1942)
+    assert r["verdict"] == "reject", r
+
+
+def test_validate_is_a_noop_without_an_era():
+    from src.agents.asset.validate import validate_candidate
+    r = validate_candidate(_vmeta("Pearl Harbor|Memorials"),
+                           "File:Pearl Harbor Memorial.jpg", "Pearl Harbor", None)
+    assert r["verdict"] == "reject", "type rejection must not need an era"
+    r2 = validate_candidate(_vmeta("June 2011 in California", "24 June 2011"),
+                            "File:x.jpg", "USS Akagi", None)
+    assert r2["verdict"] == "keep", "era must not be guessed when unknown"
