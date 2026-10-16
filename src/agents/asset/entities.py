@@ -255,6 +255,32 @@ def _grounded_in(term: str, title: str, body: str) -> bool:
     return all(t in hay for t in toks if len(t) > 2)
 
 
+def clean_entities(terms: list, title: str, body: str = "",
+                   max_entities: int = 14) -> list:
+    """Validate externally-supplied terms with the same filters the model gets.
+
+    The shot planner proposes the topic's real subjects; this guarantees they
+    still pass every deterministic gate (not generic/editorial, not a bare year
+    or nationality, grounded in the source text, not a fragment of a longer
+    term) before they become Commons searches.
+    """
+    cleaned = []
+    for t in terms or []:
+        c = _clean(t)
+        if c and _worth_searching(c) and _grounded_in(c, title, body):
+            cleaned.append(c)
+    out, seen = [], set()
+    for c in cleaned:
+        k = c.lower()
+        if k in seen or _is_fragment(c, out):
+            continue
+        seen.add(k)
+        out.append(c)
+        if len(out) >= max_entities:
+            break
+    return out
+
+
 def extract_entities(title: str, body: str = "", max_entities: int = 14) -> list:
     """Topic -> ordered list of short, entity-shaped Commons search terms.
 
@@ -275,19 +301,5 @@ def extract_entities(title: str, body: str = "", max_entities: int = 14) -> list
         print(f"  [entities] local model unavailable ({type(e).__name__}) - regex only")
 
     # Clean + filter first, then drop fragments relative to the surviving pool.
-    cleaned = []
-    for t in pool + _regex_entities(title, body):
-        c = _clean(t)
-        if c and _worth_searching(c) and _grounded_in(c, title, body):
-            cleaned.append(c)
-
-    out, seen = [], set()
-    for c in cleaned:
-        k = c.lower()
-        if k in seen or _is_fragment(c, out):
-            continue
-        seen.add(k)
-        out.append(c)
-        if len(out) >= max_entities:
-            break
-    return out
+    return clean_entities(pool + _regex_entities(title, body), title, body,
+                          max_entities)

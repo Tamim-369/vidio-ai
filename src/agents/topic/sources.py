@@ -183,6 +183,56 @@ SOURCES = [
         "fetch_articles": 0,
         "body_selectors": [],
     },
+    # ------------------------------------------------- the story subs
+    # The channel's primary source: top posts of the year from the subs whose
+    # material matches the proven shape (named subject, physical stakes,
+    # truth-vs-lies framing). One spec per niche, subs grouped so a single
+    # Chromium session pulls them all.
+    {
+        "key": "reddit_frontier",
+        "name": "r/history",
+        "kind": "reddit",
+        "niche": "frontier_history",
+        "subs": ["history"],
+        "limit": 50,
+        "starts": [],
+        "link_match": [],
+        "exclude": [],
+        "paginate": None,
+        "max_pages": 1,
+        "fetch_articles": 0,
+        "body_selectors": [],
+    },
+    {
+        "key": "reddit_crime",
+        "name": "r/TrueCrime + r/UnresolvedMysteries",
+        "kind": "reddit",
+        "niche": "true_crime",
+        "subs": ["TrueCrime", "UnresolvedMysteries"],
+        "limit": 50,
+        "starts": [],
+        "link_match": [],
+        "exclude": [],
+        "paginate": None,
+        "max_pages": 1,
+        "fetch_articles": 0,
+        "body_selectors": [],
+    },
+    {
+        "key": "reddit_ancient",
+        "name": "r/AncientHistory + r/medievalhistory",
+        "kind": "reddit",
+        "niche": "ancient_world",
+        "subs": ["AncientHistory", "medievalhistory"],
+        "limit": 50,
+        "starts": [],
+        "link_match": [],
+        "exclude": [],
+        "paginate": None,
+        "max_pages": 1,
+        "fetch_articles": 0,
+        "body_selectors": [],
+    },
 ]
 
 # Per-source authority used by the scorer (0..1). Primary sources and major
@@ -198,6 +248,9 @@ AUTHORITY = {
     "wiki_cats": 0.7,
     "wiki_dark": 0.7,
     "wiki_legends": 0.7,
+    "reddit_frontier": 0.75,
+    "reddit_crime": 0.7,
+    "reddit_ancient": 0.75,
 }
 
 TTL_HOURS = {
@@ -205,6 +258,7 @@ TTL_HOURS = {
     "index": 6,
     "api": 12,
     "mediawiki": 24,
+    "reddit": 12,
 }
 
 

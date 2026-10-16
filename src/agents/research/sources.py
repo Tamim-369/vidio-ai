@@ -31,6 +31,39 @@ def _is_junk(line: str) -> bool:
     return bool(_JUNK_RE.search(line)) or len(line.strip()) < 20
 
 
+_TOPIC_STOPWORDS = {
+    "the", "a", "an", "of", "and", "or", "with", "for", "to", "in", "on",
+    "at", "by", "how", "what", "why", "when", "who", "that", "this", "her",
+    "his", "its", "was", "is", "are", "did", "not", "from", "into", "over",
+    "about",
+}
+
+
+def research_is_on_topic(topic: str, text: str) -> bool:
+    """True when research actually mentions the subject the video is about.
+
+    A niche subject returns unrelated web noise rather than nothing, and that
+    noise is confidently turned into a script: "Sue Robinson: The Stage Fire
+    That Burned Her Family" came back as a fire-safety essay, a poem, French
+    student protests and Russian site boilerplate, plus a hallucinated retail
+    theft line -- and the pipeline rendered all ten lines from it.
+
+    So the subject named in the topic must appear in the material. The name is
+    what makes the material ABOUT this video.
+    """
+    subject = (topic or "").split(":")[0]
+    words = re.findall(r"[A-Za-z][A-Za-z'-]{2,}", subject)
+    distinctive = [w.lower() for w in dict.fromkeys(words)
+                   if w.lower() not in _TOPIC_STOPWORDS]
+    if not distinctive:
+        return True
+    haystack = (text or "").lower()
+    strong = [w for w in distinctive if len(w) >= 5]
+    if strong:
+        return any(w in haystack for w in strong)
+    return all(w in haystack for w in distinctive)
+
+
 def research(topic: str, urls: list[str] | None = None) -> str:
     """Gather raw research for a topic: Wikipedia + DDG + real article bodies.
 

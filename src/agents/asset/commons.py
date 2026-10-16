@@ -21,7 +21,12 @@ from __future__ import annotations
 
 import os
 
-ASSET_ENABLE_PEXELS = os.getenv("ASSET_ENABLE_PEXELS", "0") == "1"
+# Pexels is the stock provider for this channel. It is curated, royalty-free
+# and tagged, so a generic/symbolic beat ("woman scrolling phone", "empty
+# courtroom") gets a real, representative photo instead of an unvetted
+# Flickr/maxpixel upload. Commons still leads for real archival subjects.
+# Set ASSET_ENABLE_PEXELS=0 to disable.
+ASSET_ENABLE_PEXELS = os.getenv("ASSET_ENABLE_PEXELS", "1") == "1"
 
 # Generic web-image fallbacks (Openverse, DuckDuckGo) are off by default.
 # They carry no Commons extmetadata, so validate_candidate() cannot score them,

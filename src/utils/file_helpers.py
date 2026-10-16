@@ -48,22 +48,34 @@ def topic_body_text(topic: str) -> str:
     seabirds. Falls back to the story artifact, then to nothing.
     """
     slug = re.sub(r"[^a-z0-9]+", "_", (topic or "generic").lower()).strip("_")[:40]
-    patterns = [os.path.join(DEBUG_DIR, f"*_{slug}_*.txt"),
+    specific = [os.path.join(DEBUG_DIR, f"*_{slug}_*.txt"),
                 os.path.join(DEBUG_DIR, f"*{slug}*.txt"),
-                os.path.join(DEBUG_DIR, "*research*.txt"),
-                os.path.join(DEBUG_DIR, "*story*.txt"),
                 os.path.join(TEMP_DIR, slug, "*research*.txt"),
                 os.path.join(TEMP_DIR, slug, "*story*.txt")]
-    best = ""
-    for pat in patterns:
+    # Patterns 5 and 6 below match EVERY topic ever researched, so they are a
+    # last resort and may only contribute the newest file. They must never be
+    # pooled with another topic's file: this ran a Sue Robinson video and got
+    # the Midway article, so the entity pool came back as Akagi/Pearl Harbor/
+    # Lexington, the era gate locked to 1942, and every search failed.
+    generic = [os.path.join(DEBUG_DIR, "*research*.txt"),
+               os.path.join(DEBUG_DIR, "*story*.txt")]
+
+    def _newest_text(patterns: list) -> str:
+        paths = []
+        for pat in patterns:
+            paths.extend(glob.glob(pat))
+        if not paths:
+            return ""
+        newest = max(paths, key=os.path.getmtime)
         try:
-            for path in sorted(glob.glob(pat), key=os.path.getmtime, reverse=True):
-                text = open(path, encoding="utf-8", errors="ignore").read()
-                if len(text) > len(best):
-                    best = text
+            return open(newest, encoding="utf-8", errors="ignore").read()
         except OSError:
-            continue
-    return best
+            return ""
+
+    best = _newest_text(specific)
+    if best:
+        return best
+    return _newest_text(generic)
 
 
 def ensure_workspace(topic: str) -> str:

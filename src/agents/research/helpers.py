@@ -57,15 +57,24 @@ ANGLE_RULES = [
 ]
 
 
+# Pillars where a recent date or a crime word is the STORY rather than a
+# mis-click: a frontier discovery reported this year, a 1991 cold case, a
+# civil-war murder trial. The legacy pillars still reject both outright.
+_RECENT_OK_NICHES = {
+    "frontier_history", "true_crime", "ancient_world", "history_debate",
+}
+
+
 def _vet_idea(idea: dict) -> dict:
     """Reject off-niche ideas and tag an angle. Returns None if rejected."""
     text = f"{idea['title']} {idea.get('hook', '')} {idea.get('why_viral', '')}".lower()
-    if any(b in text for b in VET_BLOCK):
+    lenient = idea.get("niche") in _RECENT_OK_NICHES
+    if not lenient and any(b in text for b in VET_BLOCK):
         return None
     # Modern-era items (20xx) are off-niche: we produce WW1/WW2 stories,
     # history-rooted legends, and 20th-century experiments, not current-events
     # or pop-culture internet lore.
-    if re.search(r"\b(?:20[0-9]{2}|19[89][0-9])\b", text):
+    if not lenient and re.search(r"\b(?:20[0-9]{2}|19[89][0-9])\b", text):
         return None
     for angle, keywords in ANGLE_RULES:
         if any(k in text for k in keywords):

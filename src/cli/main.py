@@ -57,7 +57,15 @@ def main() -> None:
         run_batch(generate=not args.use_saved, limit=args.limit, target=args.target, publish=publish,
                   voice=args.voice, script_only=args.script_only, concurrency=args.concurrency)
     elif args.topic:
-        create_video(args.topic, publish=publish, voice=args.voice, script_only=args.script_only)
+        try:
+            create_video(args.topic, publish=publish, voice=args.voice,
+                         script_only=args.script_only)
+        except ValueError as e:
+            # A topic whose research never mentions the subject must stop here,
+            # not render ten lines of unrelated fiction. Report it as a
+            # condition to fix, not as a crash.
+            print(f"\n❌ {e}")
+            raise SystemExit(2) from None
     else:
         # Default: generate topics from Reddit and make videos for all of them
         run_batch(generate=True, limit=args.limit, target=args.target, publish=publish,

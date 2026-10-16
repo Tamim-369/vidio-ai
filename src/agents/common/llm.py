@@ -17,6 +17,8 @@ Ollama calls use the worker below with a hard wall-clock timeout.
 """
 from __future__ import annotations
 
+import base64
+import contextlib
 import os
 import queue
 import threading
@@ -39,6 +41,12 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").strip().lower()
 # (LOCAL_MODEL): it is the foundation of the entire story, and the fast 1b
 # model proved too unreliable there.
 STAGE_TIMEOUT_S = int(os.getenv("STAGE_TIMEOUT_S", "300"))
+
+# How long Ollama keeps a model resident after a call. The default (5m) is
+# shorter than the gap between videos in a batch, so every video paid the cold
+# model-load again -- measured at ~40s for gemma3:4b on this CPU box. Keeping
+# it warm for 30m makes the second and later videos start already loaded.
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 NUM_PREDICT = {
     "scene": 700,       # story pre-pass: material -> ONE incident brief (+facts)
     "story": 1200,
@@ -111,6 +119,7 @@ def _generate(prompt: str, temperature: float, budget_tag: str, model: str | Non
             resp = ollama.chat(
                 model=m,
                 messages=[{"role": "user", "content": prompt}],
+                keep_alive=OLLAMA_KEEP_ALIVE,
                 options={
                     "temperature": temperature,
                     "num_predict": NUM_PREDICT.get(budget_tag, 1000),
@@ -136,3 +145,72 @@ def _generate(prompt: str, temperature: float, budget_tag: str, model: str | Non
 
 def _local(prompt: str, temperature: float = 0.5, tag: str = "story", model: str | None = None, repeat_penalty: float = 1.1, local_only: bool = False) -> str:
     return _generate(prompt, temperature, tag, model, repeat_penalty, local_only)
+
+
+# Vision runs on the multimodal sibling of the local text model. Measured on
+# this box: `gemma3:1b` reports Capabilities = completion ONLY, and Ollama
+# rejects an image on it with HTTP 400 "Multimodal data provided, but model
+# does not support multimodal requests" — the 1b cut of Gemma 3 has no vision
+# tower. `gemma3:4b` does, and is already the default LOCAL_MODEL.
+VISION_MODEL = os.getenv("VISION_MODEL", "gemma3:4b")
+
+
+def vision(prompt: str, image_path: str, model: str | None = None,
+           temperature: float = 0.0, num_predict: int = 16,
+           timeout: int = STAGE_TIMEOUT_S,
+           keep_alive: str | None = None) -> str:
+    """One image+text call to the LOCAL Ollama VLM. Never leaves the box.
+
+    Fire these CONCURRENTLY. Measured on this CPU: the same six image calls
+    cost 25s each back to back (154s total) but finished in 2.2s wall when
+    issued together, because Ollama batches the image prompt-processing. A
+    serial loop here is ~70x slower for identical answers.
+    """
+    with open(image_path, "rb") as fh:
+        images = [base64.b64encode(fh.read()).decode()]
+
+    m = model or VISION_MODEL
+    box = queue.Queue(maxsize=1)
+
+    def worker():
+        try:
+            resp = ollama.chat(
+                model=m,
+                messages=[{"role": "user", "content": prompt, "images": images}],
+                keep_alive=keep_alive or OLLAMA_KEEP_ALIVE,
+                options={"temperature": temperature, "num_predict": num_predict},
+            )
+            box.put(("ok", (resp["message"]["content"] or "").strip()))
+        except Exception as e:  # noqa: BLE001
+            box.put(("err", e))
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        kind, val = box.get(timeout=timeout)
+    except queue.Empty:
+        raise RuntimeError(f"[vision] {m} timed out after {timeout}s")
+    if kind == "err":
+        raise val
+    return val
+
+
+def warm_model(model: str, keep_alive: str | None = None) -> None:
+    """Load a model into Ollama's memory in the background.
+
+    The first call to an unloaded model pays the full weight load before it
+    answers (measured ~40s for gemma3:4b here). Kicking this off at the start
+    of a stage hides that load behind work that does not need the model, and
+    keep_alive keeps it resident for later stages/videos. Never raises, never
+    blocks the caller.
+    """
+    def _run():
+        with contextlib.suppress(Exception):
+            ollama.chat(
+                model=model,
+                messages=[{"role": "user", "content": "ok"}],
+                keep_alive=keep_alive or OLLAMA_KEEP_ALIVE,
+                options={"num_predict": 1},
+            )
+
+    threading.Thread(target=_run, daemon=True).start()

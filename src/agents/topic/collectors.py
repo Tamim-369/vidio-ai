@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin
 
@@ -23,7 +24,7 @@ from requests import RequestException
 
 from src.agents.topic.http import fetch, fetch_json
 from src.agents.topic.leads import Lead, clean_text, first_paragraph
-from src.agents.topic.sources import spec_ttl_hours
+from src.agents.topic.sources import SOURCES, spec_ttl_hours
 
 _BODY_CAP_CHARS = 6000
 _MAX_LINKS_PER_PAGE = 30
@@ -85,6 +86,8 @@ def collect(spec: dict, limit: int = 200) -> list[Lead]:
             leads = _collect_api(spec)
         elif kind == "mediawiki":
             leads = _collect_mediawiki(spec)
+        elif kind == "reddit":
+            leads = _collect_reddit(spec)
         else:
             leads = []
         return leads[:limit]
@@ -227,6 +230,74 @@ def _extract_body(soup: BeautifulSoup, selectors: list[str]) -> str:
     return strip_boilerplate(best.get_text(" ", strip=True))[:_BODY_CAP_CHARS]
 
 
+_IMG_SKIP_TOKENS = (
+    "logo", "icon", "sprite", "avatar", "placeholder", "blank", "spacer",
+    "pixel", "1x1", "favicon", "gravatar", "/ad", "ads/", "banner", "doubleclick",
+)
+_IMG_META = (
+    ("meta", {"property": "og:image"}),
+    ("meta", {"property": "og:image:secure_url"}),
+    ("meta", {"name": "twitter:image"}),
+    ("meta", {"property": "twitter:image"}),
+)
+
+
+def _pick_srcset(srcset: str) -> str:
+    """Largest image URL in a srcset string, or ''."""
+    best, best_w = "", -1
+    for part in (srcset or "").split(","):
+        bits = part.strip().split()
+        if not bits:
+            continue
+        w = 0
+        if len(bits) > 1 and bits[1].endswith("w"):
+            try:
+                w = int(bits[1][:-1])
+            except ValueError:
+                w = 0
+        if w >= best_w:
+            best, best_w = bits[0], w
+    return best
+
+
+def _extract_images(soup: BeautifulSoup, base: str, limit: int = 8) -> list[str]:
+    """Real photos that came WITH the article (og:image + in-body <img>).
+
+    For a private/personal story these are often the only genuine images of the
+    subject, so they are handed to the asset stage ahead of generic stock.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(url: str) -> None:
+        if not url:
+            return
+        url = urljoin(base, url.strip())
+        low = url.lower()
+        if not low.startswith(("http://", "https://")):
+            return
+        if low.split("?")[0].endswith(".svg"):
+            return
+        if any(t in low for t in _IMG_SKIP_TOKENS):
+            return
+        if url in seen:
+            return
+        seen.add(url)
+        out.append(url)
+
+    for name, attrs in _IMG_META:
+        el = soup.find(name, attrs=attrs)
+        if el is not None:
+            add(el.get("content") or "")
+
+    for img in soup.find_all("img"):
+        add(_pick_srcset(img.get("srcset") or "")
+            or img.get("src") or img.get("data-src") or img.get("data-lazy-src") or "")
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
 def _meta_date(soup: BeautifulSoup) -> datetime | None:
     for name, attrs in _DATE_META:
         el = soup.find(name, attrs=attrs)
@@ -328,6 +399,9 @@ def _fetch_bodies(leads: list[Lead], spec: dict, n: int) -> list[Lead]:
         with lock:
             lead.body = body
             lead.summary = first_paragraph(body)
+            extracted = _extract_images(soup, lead.url)
+            if extracted:
+                lead.images = extracted
             if lead.published is None:
                 lead.published = _meta_date(soup)
             done += 1
@@ -477,4 +551,99 @@ def _collect_mediawiki(spec: dict) -> list[Lead]:
             )
             if len(leads) >= 100:
                 return leads
+    return leads
+
+
+# -------------------------------------------------------------------- reddit
+# Plain HTTP is bot-blocked on this ISP, so every reddit spec shares one
+# headless-Chromium session: the first spec to run pulls ALL story subs in one
+# browser, the rest read the cache. The lock keeps the parallel crawl pool
+# from launching several browsers at once.
+_REDDIT_TTL_S = 12 * 3600        # a successful crawl is good for half a day
+_REDDIT_FAIL_TTL_S = 600         # a dead crawl must not be retried per spec
+_REDDIT_LIMIT = 50
+
+_reddit_lock = threading.Lock()
+_reddit_cache: dict = {}  # sub -> (expiry unix ts, [post dict, ...])
+
+_ALL_REDDIT_SUBS = [
+    sub for spec in SOURCES if spec.get("kind") == "reddit"
+    for sub in spec.get("subs", [])
+]
+
+
+def _reddit_expired(sub: str, now: float) -> bool:
+    entry = _reddit_cache.get(sub)
+    return entry is None or entry[0] < now
+
+
+def _reddit_pull(now: float) -> None:
+    """Cache every still-expired story sub. Caller holds `_reddit_lock`."""
+    want = [s for s in _ALL_REDDIT_SUBS if _reddit_expired(s, now)]
+    if not want:
+        return
+    raw = []
+    try:
+        from src.agents.topic.generator import fetch_reddit_playwright
+        raw = fetch_reddit_playwright(want, limit=_REDDIT_LIMIT) or []
+    except Exception:
+        raw = []
+
+    by_sub: dict = {}
+    for post in raw:
+        sub = (post.get("source") or "").split(":", 1)[-1]
+        if sub:
+            by_sub.setdefault(sub, []).append(post)
+
+    # Cache misses too: an unreachable Reddit must degrade to "no reddit
+    # leads" once per crawl instead of paying a browser launch per spec.
+    ttl = _REDDIT_TTL_S if raw else _REDDIT_FAIL_TTL_S
+    for sub in want:
+        _reddit_cache[sub] = (now + ttl, by_sub.get(sub, []))
+    print(f"    [reddit] {len(raw)} posts across {len(want)} sub(s)")
+
+
+def _reddit_lead(post: dict, sub: str, spec: dict) -> Lead:
+    title = post.get("title", "")
+    body = post.get("content", "") or title
+    url = (post.get("source_urls") or [""])[0]
+    published = None
+    if post.get("created_utc"):
+        try:
+            published = datetime.fromtimestamp(
+                float(post["created_utc"]), tz=timezone.utc
+            )
+        except (TypeError, ValueError, OSError):
+            published = None
+    return Lead(
+        title=title,
+        url=url,
+        source_key=spec["key"],
+        source_name=f"reddit:{sub}",
+        niche=spec["niche"],
+        published=published,
+        summary=first_paragraph(body, 60) or title,
+        body=body,
+        engagement=int(post.get("score") or 0),
+        upvote_ratio=float(post.get("upvote_ratio") or 0.0),
+        images=list(post.get("images") or []),
+    )
+
+
+def _collect_reddit(spec: dict) -> list[Lead]:
+    """Top-of-year posts for this spec's subs, as scored leads."""
+    subs = spec.get("subs") or []
+    if not subs:
+        return []
+    now = time.time()
+    if any(_reddit_expired(sub, now) for sub in subs):
+        with _reddit_lock:
+            now = time.time()
+            if any(_reddit_expired(sub, now) for sub in subs):
+                _reddit_pull(now)
+
+    leads = []
+    for sub in subs:
+        for post in _reddit_cache.get(sub, (0.0, []))[1]:
+            leads.append(_reddit_lead(post, sub, spec))
     return leads

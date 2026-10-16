@@ -8,7 +8,9 @@ newer sourced agent (``agent.py``); both share ``helpers.py``.
 """
 import json
 import os
+import re
 import time
+from html import unescape as _unescape
 
 import requests
 import urllib3
@@ -107,6 +109,57 @@ def _get_json(session: requests.Session, url: str) -> dict:
     return {}
 
 
+_IMG_EXT_RE = re.compile(r"\.(?:jpe?g|png|webp|gif)(?:\?|#|$)", re.I)
+_INLINE_IMG_RE = re.compile(
+    r"https?://[^\s\"'<>)]+?\.(?:jpe?g|png|webp|gif)(?:\?[^\s\"'<>)]*)?", re.I
+)
+
+
+def _clean_media_url(url: str) -> str:
+    """Reddit JSON HTML-escapes media URLs (``&amp;``); normalise them."""
+    return _unescape(url or "").strip()
+
+
+def _reddit_images(d: dict, selftext: str = "") -> list:
+    """Real image URLs attached to a Reddit post (direct link / preview / gallery).
+
+    A private-person story often ships the only true photo of the subject here.
+    Kept best-effort: anything odd is simply skipped.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(url: str) -> None:
+        url = _clean_media_url(url)
+        if not url.startswith(("http://", "https://")) or url in seen:
+            return
+        low = url.lower()
+        if low.endswith(".svg") or "comment_icon" in low or "emoji" in low:
+            return
+        seen.add(url)
+        out.append(url)
+
+    dest = _clean_media_url(d.get("url_overridden_by_dest") or d.get("url") or "")
+    if dest and (_IMG_EXT_RE.search(dest) or "i.redd.it" in dest
+                 or "preview.redd.it" in dest or "imgur.com" in dest):
+        add(dest)
+
+    for im in ((d.get("preview") or {}).get("images") or []):
+        add((im.get("source") or {}).get("url", ""))
+
+    meta = d.get("media_metadata") or {}
+    if isinstance(meta, dict):
+        for item in meta.values():
+            if not isinstance(item, dict) or str(item.get("status", "valid")) != "valid":
+                continue
+            s = item.get("s") or {}
+            add(s.get("u") or s.get("gif") or "")
+
+    for m in _INLINE_IMG_RE.findall(selftext or ""):
+        add(m)
+    return out
+
+
 def _parse_listing(data: dict, subreddit: str) -> list:
     """Extract candidates from a Reddit Listing JSON payload."""
     candidates = []
@@ -126,7 +179,10 @@ def _parse_listing(data: dict, subreddit: str) -> list:
             "title": (d.get("title") or "").strip(),
             "content": selftext or (d.get("title") or "").strip(),
             "score": d.get("score", 0),
+            "num_comments": d.get("num_comments", 0),
+            "created_utc": d.get("created_utc"),
             "upvote_ratio": d.get("upvote_ratio", 0.0),
+            "images": _reddit_images(d, selftext),
             "source_urls": [
                 f"https://www.reddit.com{d.get('permalink', '')}"
                 if d.get("permalink") else d.get("url", "")
@@ -136,7 +192,7 @@ def _parse_listing(data: dict, subreddit: str) -> list:
 
 
 def fetch_reddit(session: requests.Session, subreddit: str, limit: int = 100) -> list:
-    url = f"https://www.reddit.com/r/{subreddit}/top.json?t=all&limit={limit}"
+    url = f"https://www.reddit.com/r/{subreddit}/top.json?t=year&limit={limit}"
     data = _get_json(session, url)
     if not data:
         print(f"    [reddit] r/{subreddit}: no data")
@@ -149,7 +205,7 @@ def fetch_reddit(session: requests.Session, subreddit: str, limit: int = 100) ->
 
 def fetch_reddit_oauth(token: str, subreddit: str, limit: int = 100) -> list:
     """Fetch top posts via the official OAuth API (not the blocked public endpoint)."""
-    url = f"https://oauth.reddit.com/r/{subreddit}/top?t=all&limit={limit}"
+    url = f"https://oauth.reddit.com/r/{subreddit}/top?t=year&limit={limit}"
     r = requests.get(
         url,
         headers={"Authorization": f"Bearer {token}", "User-Agent": BROWSER_UA},
@@ -184,7 +240,7 @@ def _fetch_sub(page, sub: str, limit: int, candidates: list) -> None:
                 if (r.status !== 200) return { status: r.status, data: null };
                 return { status: r.status, data: await r.json() };
             }""",
-            f"/r/{sub}/top.json?t=all&limit={limit}",
+            f"/r/{sub}/top.json?t=year&limit={limit}",
         )
         if data["status"] == 200 and data["data"]:
             parsed = _parse_listing(data["data"], sub)
@@ -276,47 +332,58 @@ def _collect_raw_sources(limit: int, target: int, used: list, use_browser: bool)
     except Exception as e:
         print(f"  [miner] failed: {e}")
 
-    # 3) Primary backstop: Wikipedia (stable, not ISP-blocked). Runs only if
-    #    LLM + miner came up short, so the slow crawl is a rarity.
+    # 3) Reddit: the primary story source. Plain HTTP is bot-blocked on this
+    #    ISP, so Chromium goes first and the API routes follow as fallbacks.
+    #    REDDIT_ENABLED=0 opts out.
+    if os.environ.get("REDDIT_ENABLED") != "0":
+        reddit_raw = _fetch_reddit_all(limit, use_browser)
+        if reddit_raw:
+            raw.extend(reddit_raw)
+        else:
+            print("  [reddit] no data — continuing without it")
+
+    # 4) Backstop: Wikipedia (stable, not ISP-blocked). Runs only if the
+    #    sources above came up short, so the slow crawl is a rarity.
     target_covered = target * 3
     if len(raw) < target_covered:
         print("Pulling niche topics from Wikipedia as backstop...")
         raw.extend(fetch_wikipedia_candidates(
             limit=limit, target=target_covered - len(raw), used_titles=used))
     else:
-        print("Enough from LLM + channels — skipping Wikipedia")
-
-    # 4) Secondary: Reddit (best-effort — unreliable on this ISP).
-    #    Skipped unless REDDIT_ENABLED=1 (or --limit high forces it) to keep runs fast.
-    if os.environ.get("REDDIT_ENABLED") == "1":
-        reddit_raw = _fetch_reddit_all(limit, use_browser)
-        if reddit_raw:
-            raw.extend(reddit_raw)
-        else:
-            print("  [reddit] skipped — Wikipedia only")
+        print("Enough from earlier sources — skipping Wikipedia")
 
     return raw
 
 
 def _fetch_reddit_all(limit: int, use_browser: bool) -> list:
-    """Best-effort Reddit pull (token OAuth, or cookie requests)."""
+    """Best-effort Reddit pull: Chromium first, then OAuth, then cookie HTTP.
+
+    Order matters on this ISP: the browser session is the only route that is
+    known to work, so trying the blocked HTTP paths first would just burn two
+    timeouts per sub before every run.
+    """
+    if use_browser and PLAYWRIGHT_AVAILABLE:
+        print("  [reddit] Using headless Chromium + browser cookie...")
+        reddit_raw = fetch_reddit_playwright(REDDIT_SUBREDDITS, limit)
+        if reddit_raw:
+            return reddit_raw
+
     token = _get_oauth_token()
-    session = _session()
-    reddit_raw = []
     if token:
         print("  [reddit] Using Reddit OAuth API...")
+        reddit_raw = []
         for sub in REDDIT_SUBREDDITS:
             reddit_raw.extend(fetch_reddit_oauth(token, sub, limit))
             time.sleep(1)
-    else:
-        print("  [reddit] Using requests + browser cookie...")
-        for sub in REDDIT_SUBREDDITS:
-            reddit_raw.extend(fetch_reddit(session, sub, limit))
-            time.sleep(1)
+        if reddit_raw:
+            return reddit_raw
 
-    if not reddit_raw and use_browser and PLAYWRIGHT_AVAILABLE:
-        print("  [reddit] Using headless Chromium + browser cookie...")
-        reddit_raw = fetch_reddit_playwright(REDDIT_SUBREDDITS, limit)
+    print("  [reddit] Using requests + browser cookie...")
+    session = _session()
+    reddit_raw = []
+    for sub in REDDIT_SUBREDDITS:
+        reddit_raw.extend(fetch_reddit(session, sub, limit))
+        time.sleep(1)
     return reddit_raw
 
 

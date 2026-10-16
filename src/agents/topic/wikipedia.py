@@ -391,3 +391,169 @@ def _verify_on_wikipedia(title: str) -> bool:
         return k1 in top and k2 in top
     except Exception:
         return True
+
+
+# ------------------------------------------------------------ source imagery
+# The asset stage can only show what Commons actually hosts. A subject with
+# no free imagery leaves the pipeline picking whatever matched a keyword, so
+# a topic like that is rejected before any research time is spent on it.
+COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+MIN_SOURCE_IMAGES = 1   # non-chrome images on the resolved article
+MIN_COMMONS_HITS = 3    # files Commons can offer for the resolved subject
+
+# Chrome that sits on an article but can never be shown on screen.
+_WIKI_ICONISH = re.compile(
+    r"flag|icon|logo|symbol|map|locator|coat of arms|banner|seal|"
+    r"padlock|disambig|arrow|question book|ambox|wiki|"
+    r"audio|copyright|non-free|edit-|crystal",
+    re.I,
+)
+
+# Words that carry no subject information in a story headline. A title is
+# written as a sentence, so proper-noun matching alone would ask Wikipedia
+# for "Zodiac 2020" and get nothing back.
+_STOPWORDS = {
+    "the", "a", "an", "of", "in", "on", "at", "to", "from", "with", "and",
+    "or", "but", "who", "whom", "whose", "what", "when", "where", "why",
+    "how", "that", "which", "this", "these", "those", "his", "her", "its",
+    "their", "has", "have", "had", "was", "were", "are", "been", "being",
+    "is", "be", "for", "by", "as", "into", "after", "before", "about",
+    "over", "under", "than", "then", "them", "they", "you", "your", "one",
+    "two", "new", "old", "most", "more", "some", "any", "all", "out", "up",
+    "til", "did", "does", "really", "finally", "revealed", "story",
+}
+
+
+def _subject_tokens(title: str) -> list:
+    """Words a headline is actually about, years pushed to the end.
+
+    Short function words and filler are dropped, and years are appended last
+    because AND-ing a year into a search query ("Zodiac killer cipher 2020")
+    matches no article at all while "Zodiac killer cipher" does.
+    """
+    words = re.findall(r"[A-Za-z][a-z]+|\d{3,4}", title)
+    named, eras = [], []
+    for w in words:
+        if w.isdigit():
+            eras.append(w)
+        elif len(w) >= 4 and w.lower() not in _STOPWORDS:
+            named.append(w)
+    return (named + eras)[:6]
+
+
+def _resolve_article(title: str) -> tuple:
+    """Search for the article this story is about.
+
+    Returns (page title, non-chrome image titles). An empty title means the
+    subject could not be resolved — either the API failed or no article
+    matches those words. Callers must treat that as "unknown", never as
+    "no imagery": story headlines routinely fail to match an article title.
+    """
+    key = _subject_tokens(title)
+    if len(key) < 2:
+        return "", []
+    want = {_normalize(t) for t in key[:4]}
+
+    # MediaWiki ANDs every term, so try three words and fall back to two.
+    # Results are ranked by how much of the subject they actually contain —
+    # a bare two-word query otherwise hands back a namesake for the real one.
+    for query in (" ".join(key[:3]), " ".join(key[:2])):
+        data = _wiki_get_json({
+            "action": "query",
+            "generator": "search",
+            "gsrsearch": query,
+            "gsrnamespace": 0,
+            "gsrlimit": 5,
+            "prop": "images",
+            # NOTE: this limit is shared across the WHOLE response, not per
+            # page — one large article would otherwise eat the budget and
+            # starve the page we actually want.
+            "imlimit": 500,
+            "redirects": 1,
+        })
+        if not data:
+            return "", []         # throttled / offline: unknown, not a miss
+        pages = ((data.get("query") or {}).get("pages")) or {}
+        best_title, best_images, best_rank = "", [], (-1, -1)
+        for page in pages.values():
+            if page.get("missing"):
+                continue
+            overlap = len(want & set(_normalize(page.get("title") or "").split()))
+            if overlap < 2:
+                continue          # unrelated article
+            images = [
+                i.get("title", "")
+                for i in (page.get("images") or [])
+                if i.get("title") and not _WIKI_ICONISH.search(i["title"])
+            ]
+            rank = (overlap, len(images))   # right subject first, richer next
+            if rank <= best_rank:
+                continue
+            best_title, best_images, best_rank = (
+                page.get("title", ""), images, rank
+            )
+        if best_title:
+            return best_title, best_images
+    return "", []
+
+
+def _commons_hits(subject: str):
+    """Bitmap files Commons offers for `subject`, or None when it could not ask."""
+    if not subject:
+        return 0
+    try:
+        _wiki_throttle()
+        r = requests.get(
+            COMMONS_API,
+            params={
+                "action": "query",
+                "format": "json",
+                "list": "search",
+                "srsearch": f"filetype:bitmap {subject}",
+                "srnamespace": 6,
+                "srlimit": 10,
+            },
+            headers=WIKI_HEADERS,
+            timeout=20,
+            verify=False,
+        )
+        if r.status_code != 200:
+            return None
+        return int(((r.json().get("query") or {}).get("searchinfo") or {})
+                   .get("totalhits", 0))
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def has_source_imagery(title: str, cache: dict = None) -> bool:
+    """True when free imagery for this subject plausibly exists.
+
+    Two checks, because they fail in different ways:
+      * the article must carry at least one non-chrome image, proving the
+        subject itself is pictured at all;
+      * Commons must actually host files for it — a Wikipedia press photo is
+        often non-free, which is exactly how modern subjects end up with
+        nothing correct to show.
+
+    A subject that does not resolve to an article, a rate limit, or a network
+    failure all return True: this gate only blocks topics it can positively
+    prove are unsourceable, because a story headline that fails to match an
+    article title says nothing about the imagery.
+    """
+    if cache is not None and title in cache:
+        return cache[title]
+    try:
+        page_title, images = _resolve_article(title)
+        if not page_title:
+            result = True         # could not judge
+        elif len(images) < MIN_SOURCE_IMAGES:
+            result = False        # article carries only chrome
+        else:
+            hits = _commons_hits(page_title)
+            result = True if hits is None else hits >= MIN_COMMONS_HITS
+    except Exception as e:
+        print(f"    [imagery] {title[:40]!r}: {e} — not blocking")
+        result = True
+    if cache is not None:
+        cache[title] = result
+    return result

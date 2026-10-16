@@ -5,6 +5,7 @@ future change that silently regresses it fails loudly instead of quietly
 producing worse videos.
 """
 import math
+import os
 
 import pytest
 
@@ -364,10 +365,11 @@ def test_generic_budget_does_not_starve_a_narrow_topic():
 
 
 def test_fallback_providers_get_a_smaller_slice(monkeypatch):
-    """A per-term budget is meaningless if DDG re-spends it on the same term."""
+    """A per-term budget is meaningless if a fallback re-spends it on the same term."""
     from src.agents.asset import agent as A
     seen = {}
     monkeypatch.setattr(A, "_ENABLE_PEXELS", False)
+    monkeypatch.setattr(A, "_ENABLE_OPENVERSE", True)
     monkeypatch.setattr(A, "_fetch_wikimedia_commons",
                         lambda kw, base, count: seen.setdefault("commons", count) and [] or [])
     monkeypatch.setattr(A, "_fetch_openverse",
@@ -380,15 +382,18 @@ def test_fallback_providers_get_a_smaller_slice(monkeypatch):
     assert seen["openverse"] < 6 and seen["ddg"] < 6
 
 
-def test_generic_providers_are_off_by_default(monkeypatch):
-    """A Midway render came out with ducks in front of a flag.
+def test_stock_is_pexels_and_openverse_is_off_by_default(monkeypatch):
+    """Pexels is the stock source; Openverse/Flickr and DDG are off.
 
-    DDG and Openverse carry no Commons metadata, so validate_candidate() cannot
-    score them and nothing screened what they returned.
+    Openverse's loosely-tagged uploads are what filled a serious news story with
+    unrelated snapshots. Pexels is curated and royalty-free, so it leads the
+    generic/symbolic path; Commons stays the archive for real subjects.
     """
     from src.agents.asset import agent as A
     import src.agents.asset.commons as C
-    assert C.ASSET_ENABLE_GENERIC is False, "generic web-image sources are on"
+    assert C.ASSET_ENABLE_PEXELS is True, "Pexels is the stock provider now"
+    assert A._ENABLE_OPENVERSE is False, "Openverse must be off by default"
+    assert A._ENABLE_GENERIC is False, "generic web-image sources are on"
     called = []
     monkeypatch.setattr(A, "_ENABLE_GENERIC", False)
     monkeypatch.setattr(A, "_fetch_wikimedia_commons",
@@ -401,6 +406,21 @@ def test_generic_providers_are_off_by_default(monkeypatch):
     assert called == ["commons"], called
 
 
+def test_openverse_supplement_is_capped(monkeypatch):
+    """Openverse must never take the whole budget from Commons."""
+    from src.agents.asset import agent as A
+    seen = {"openverse": 0}
+    monkeypatch.setattr(A, "_ENABLE_OPENVERSE", True)
+    monkeypatch.setattr(A, "_ENABLE_PEXELS", False)
+    monkeypatch.setattr(A, "_fetch_wikimedia_commons", lambda kw, base, count: [])
+    monkeypatch.setattr(
+        A, "_fetch_openverse",
+        lambda kw, base, count: seen.__setitem__("openverse", max(seen["openverse"], count)) or [])
+    monkeypatch.setattr(A, "_fetch_ddg", lambda kw, base, count: [])
+    A._fetch_for_keyword("Battle of Midway", 0, "/tmp/a", 18)
+    assert seen["openverse"] <= 2, seen
+
+
 def test_relevance_gate_rejects_a_stock_photo_of_ducks():
     """The alt-text gate that would have caught the ducks."""
     from src.agents.asset.agent import _relevance_ok
@@ -408,6 +428,102 @@ def test_relevance_gate_rejects_a_stock_photo_of_ducks():
                           "USS Akagi Battle of Midway") is False
     assert _relevance_ok("Japanese aircraft carrier Akagi burning at sea",
                           "USS Akagi Battle of Midway") is True
+
+
+# --- shot planner: understand the story, not the sentence ------------------
+# A private missing-person story reached the fetcher as entities "Resolved",
+# "social media" and "Ireland", and the event anchor glued the whole headline
+# onto each ("Ireland Resolved. Patrick O'Sullivan disappeared"). The planner
+# replaces "search the words" with "decide what each beat shows".
+
+def test_plan_parses_a_narrative_topic():
+    from src.agents.asset import plan as P
+    raw = ('{"mode":"symbolic","year":1992,"real_subjects":["Ireland"],'
+           '"shots":{"1":{"kind":"generic","intent":"man on a phone",'
+           '"queries":["man looking at phone","phone screen close up"]},'
+           '"2":{"kind":"symbolic","intent":"grief","queries":["empty chair"]}}}')
+    plan = P.parse_plan(raw, line_ids=[1, 2])
+    assert plan["mode"] == "symbolic"
+    assert plan["year"] == 1992
+    assert plan["real_subjects"] == ["Ireland"]
+    assert plan["shots"][1]["kind"] == "generic"
+    assert plan["shots"][2]["queries"] == ["empty chair"]
+
+
+def test_plan_rejects_junk_and_unknown_lines():
+    from src.agents.asset import plan as P
+    assert P.parse_plan("no json here") is None
+    assert P.parse_plan("") is None
+    raw = '{"mode":"weird","shots":{"9":{"kind":"banana","queries":["x"]}}}'
+    plan = P.parse_plan(raw, line_ids=[1, 2])
+    assert plan is None, "a plan covering no real line is unusable"
+    raw2 = '{"mode":"weird","shots":{"1":{"kind":"banana","queries":["x"]}}}'
+    plan2 = P.parse_plan(raw2, line_ids=[1])
+    assert plan2["mode"] == "archival", "unknown mode falls back, never crashes"
+    assert plan2["shots"][1]["kind"] == "generic", "unknown kind falls back"
+
+
+def test_apply_plan_sets_queries_and_kind_only_for_planned_lines():
+    from src.agents.asset.agent import _apply_plan
+    lines = [{"id": 1, "search_queries": ["old"]},
+             {"id": 2, "search_queries": ["keep me"]}]
+    _apply_plan({"shots": {"1": {"kind": "generic", "intent": "x",
+                                 "queries": ["man looking at phone"]}}}, lines)
+    assert lines[0]["search_queries"] == ["man looking at phone"]
+    assert lines[0]["asset_kind"] == "generic"
+    assert lines[1]["search_queries"] == ["keep me"], "unplanned line untouched"
+    assert "asset_kind" not in lines[1]
+
+
+def test_focused_query_never_anchors_a_generic_term():
+    """The bug behind 'Ireland Resolved. Patrick O'Sullivan disappeared'."""
+    from src.agents.asset.agent import _focused_query
+    topic = ("Resolved. Patrick O'Sullivan disappeared in 1992 in Ireland.")
+    assert _focused_query("social media", topic) == "social media"
+    assert _focused_query("police", topic) == "police"
+    anchored = _focused_query("USS Enterprise", "The Battle of Midway")
+    assert anchored == "USS Enterprise Battle of Midway"
+
+
+def test_generic_shot_routes_to_stock_before_commons(monkeypatch):
+    """A narrative beat has no archive photo, so Pexels leads and Commons stays out."""
+    from src.agents.asset import agent as A
+    calls = []
+    monkeypatch.setattr(A, "_ENABLE_PEXELS", True)
+    monkeypatch.setattr(A, "_ENABLE_OPENVERSE", False)
+    monkeypatch.setattr(A, "_ENABLE_GENERIC", False)
+    monkeypatch.setattr(A, "_fetch_pexels",
+                        lambda kw, base, count: calls.append("pexels") or ["/a/p.jpg"])
+    monkeypatch.setattr(A, "_fetch_wikimedia_commons",
+                        lambda kw, base, count: calls.append("commons") or [])
+    out = A._fetch_for_keyword("man looking at phone", 0, "/tmp/a", 2, kind="generic")
+    assert out == ["/a/p.jpg"]
+    assert calls == ["pexels"], "commons must not run when stock delivered"
+
+
+def test_generic_shot_falls_back_to_commons_when_stock_is_empty(monkeypatch):
+    from src.agents.asset import agent as A
+    calls = []
+    monkeypatch.setattr(A, "_ENABLE_PEXELS", True)
+    monkeypatch.setattr(A, "_ENABLE_OPENVERSE", False)
+    monkeypatch.setattr(A, "_ENABLE_GENERIC", False)
+    monkeypatch.setattr(A, "_fetch_pexels", lambda kw, base, count: calls.append("pexels") or [])
+    monkeypatch.setattr(A, "_fetch_wikimedia_commons",
+                        lambda kw, base, count: calls.append("commons") or ["/a/c.jpg"])
+    out = A._fetch_for_keyword("man looking at phone", 0, "/tmp/a", 2, kind="generic")
+    assert calls == ["pexels", "commons"]
+    assert out == ["/a/c.jpg"]
+
+
+def test_plan_subjects_are_validated_like_model_entities():
+    """A planner-named subject still has to pass every deterministic gate."""
+    from src.agents.asset.entities import clean_entities
+    body = "Resolved. Patrick O'Sullivan disappeared in 1992 in Ireland."
+    kept = clean_entities(["Ireland", "Battle", "1992"],
+                          "Resolved. Patrick O'Sullivan disappeared...", body)
+    assert "Ireland" in kept
+    assert "Battle" not in kept, "generic words are dropped"
+    assert "1992" not in kept, "a bare year is never a subject"
 
 
 # --- per-term cap in assignment ------------------------------------------
@@ -485,7 +601,7 @@ def test_mapping_paths_is_ordered_and_unique():
 def test_pool_budget_is_bounded_by_video_length(monkeypatch):
     from src.agents.asset import agent as A
     calls = {}
-    def fake(kw, idx, d, n):
+    def fake(kw, idx, d, n, **kw2):
         calls[kw] = n
         return [f"/a/{kw}_{i}.jpg" for i in range(n)]
     monkeypatch.setattr(A, "_fetch_for_keyword", fake)
@@ -1008,3 +1124,413 @@ def test_backoff_never_shortens_below_three_words():
     floor = min(3, len(term))
     variants = [" ".join(term[:n]) for n in range(len(term), floor - 1, -1)]
     assert all(len(v.split()) >= 3 for v in variants), variants
+
+
+def test_research_lookup_does_not_return_another_topics_body(tmp_path, monkeypatch):
+    """A new video must not inherit the previous topic's research.
+
+    The generic "*research*.txt" fallback matches every topic ever researched,
+    and preferring the LONGEST text made a Sue Robinson video run on the Midway
+    article: entities came back as Akagi/Pearl Harbor/Lexington, the era gate
+    locked to 1942, and every image search failed. Only the topic's own file may
+    win, and the newest one at that.
+    """
+    import time
+    from src.utils import file_helpers as FH
+
+    dbg = tmp_path / "debug_output"
+    dbg.mkdir()
+    (dbg / "20260101_010000_01_research_midway.txt").write_text(
+        "M " * 4000 + "USS Akagi Pearl Harbor Lexington")
+    time.sleep(0.01)
+    (dbg / "20260101_020000_01_research_sue_robinson.txt").write_text(
+        "Debora Green poisoned her husband with ricin")
+
+    monkeypatch.setattr(FH, "DEBUG_DIR", str(dbg))
+    monkeypatch.setattr(FH, "TEMP_DIR", str(tmp_path / "temp"))
+
+    got = FH.topic_body_text("Sue Robinson: The Stage Fire That Burned Her Family")
+    assert "Debora Green" in got, got
+    assert "USS Akagi" not in got, got
+
+    # With no artifact of its own, the fallback must take the NEWEST file, not
+    # the longest one -- that longest-wins rule was the original bug.
+    fallback = FH.topic_body_text("Some Entirely New Topic")
+    assert "Debora Green" in fallback, fallback
+
+
+def test_research_must_mention_the_subject_before_scripting():
+    """Unrelated web noise must not be turned into a confident 10-line video.
+
+    "Sue Robinson: The Stage Fire That Burned Her Family" researched into a
+    fire-safety essay, a poem, French student protests and Russian site
+    boilerplate -- no Sue Robinson anywhere -- and the pipeline rendered it
+    anyway as a story about an unrelated retail theft crew.
+    """
+    from src.agents.research.sources import research_is_on_topic as on
+    topic = "Sue Robinson: The Stage Fire That Burned Her Family"
+
+    noise = ("Fire Safety Fires that happen in the home are a very serious "
+             "problem today. Family-run retail theft crew in Southern "
+             "California taken down by L.A. police.")
+    assert not on(topic, noise)
+
+    real = "Robinson was a circus performer. Her stage caught fire in 1900."
+    assert on(topic, real)
+
+    # A real subject name must not be accepted because a generic word matched.
+    assert not on(topic, "A story about fire safety and the family home.")
+
+
+def test_subject_gate_passes_a_normal_researched_topic():
+    from src.agents.research.sources import research_is_on_topic as on
+    topic = ("The Battle of Midway: How the US Navy Carrier Force Found "
+             "the Japanese Fleet in 1942")
+    assert on(topic, "The Battle of Midway was a major naval battle in the "
+                     "Pacific Theater of World War II.")
+
+
+# --------------------------------------------------------------------------
+# Pivot: the channel sources from the story subs instead of WW2 material.
+# --------------------------------------------------------------------------
+def test_story_subreddits_are_tiered_with_popularity_floors():
+    from src.agents.topic import helpers as H
+
+    assert H.REDDIT_SUBREDDITS == H.REDDIT_PRIMARY_SUBS + H.REDDIT_SECONDARY_SUBS
+    assert set(H.REDDIT_PRIMARY_SUBS) == {"history", "UnresolvedMysteries", "TrueCrime"}
+    # The old military/dark subs are gone: they are what the channel is off.
+    for gone in ("militaryhistory", "TheGrittyPast", "HighStrangeness",
+                 "OldSchoolCreepy", "HumanoidEncounters",
+                 "HistoricalWhatIf", "AskHistorians"):
+        assert gone not in H.REDDIT_SUBREDDITS
+    # Every story sub carries its own floor, because vote counts differ by
+    # an order of magnitude between r/history and a niche sub.
+    for sub in H.REDDIT_SUBREDDITS:
+        assert H.REDDIT_SCORE_FLOORS[sub] > 0
+
+
+def test_crime_gate_is_suspended_on_the_crime_subs_only():
+    from src.agents.topic import helpers as H
+
+    base = {"content": "x" * 500, "score": 5000, "upvote_ratio": 0.95,
+            "source_urls": ["u"]}
+
+    murder = dict(base, title="The Murder That Solved Itself")
+    assert not H._passes_filters({**murder, "source": "reddit:history"})
+    # ...but the same headline is the story on a true-crime sub.
+    assert H._passes_filters({**murder, "source": "reddit:TrueCrime"})
+    assert H._passes_filters({**murder, "source": "reddit:UnresolvedMysteries"})
+
+
+def test_trusted_subs_do_not_need_the_ww2_wordlist():
+    from src.agents.topic import helpers as H
+
+    # A frontier/ancient headline with none of NICHE_STRONG's military and
+    # legend words must still count as on-niche: the sub IS the niche.
+    c = {"source": "reddit:history",
+         "title": "A Farmer Found A Bronze Chest Under His Field",
+         "content": "y" * 600}
+    assert H._is_niche(c)
+    assert not any(k in c["title"].lower() for k in H.NICHE_STRONG)
+
+
+def test_reddit_outranks_the_llm_and_the_wikipedia_backstop():
+    from src.agents.topic.helpers import _rank_key
+
+    reddit = _rank_key({"source": "reddit:history", "score": 9000})
+    llm = _rank_key({"source": "llm", "score": 80})
+    wiki = _rank_key({"source": "wikipedia", "title": "x"})
+    channel = _rank_key({"source": "channel:yt", "score": 10})
+    assert channel > reddit > llm > wiki
+
+
+def test_legacy_pillars_are_carried_at_zero_weight():
+    from src.agents.topic.agent import NICHE_WEIGHTS
+
+    for legacy in ("experiments", "ww1_ww2_stories", "dark_legends"):
+        assert NICHE_WEIGHTS[legacy] == 0.0, "legacy pillar took a slot"
+    live = {n: w for n, w in NICHE_WEIGHTS.items() if w > 0}
+    assert live == {"frontier_history": 0.34, "true_crime": 0.34,
+                    "ancient_world": 0.32}
+    assert math.isclose(sum(live.values()), 1.0)
+
+
+def test_vet_lets_a_recent_crime_story_through_on_a_new_niche():
+    from src.agents.research.helpers import _vet_idea
+
+    idea = _vet_idea({"title": "The 1991 Murders Still Open in Tacoma",
+                      "niche": "true_crime"})
+    assert idea is not None, "a modern cold case is the story, not a mis-click"
+    assert idea["angle"] in {"mystery", "injustice", "scary", "heroic"}
+
+
+def test_vet_still_rejects_recent_and_crime_on_the_legacy_niches():
+    from src.agents.research.helpers import _vet_idea
+
+    assert _vet_idea({"title": "The 1991 Murders Still Open"}) is None
+    assert _vet_idea({"title": "Police Arrest Suspect In Murder"}) is None
+
+
+def test_reddit_specs_cover_every_story_sub():
+    from src.agents.topic.collectors import _ALL_REDDIT_SUBS
+    from src.agents.topic.helpers import REDDIT_SUBREDDITS
+    from src.agents.topic.sources import SOURCES
+
+    reddit_specs = [s for s in SOURCES if s.get("kind") == "reddit"]
+    assert set(_ALL_REDDIT_SUBS) == set(REDDIT_SUBREDDITS)
+    niches = {s["niche"] for s in reddit_specs}
+    assert niches == {"frontier_history", "true_crime", "ancient_world"}
+    # One browser session has to be able to fetch them all, or the crawl
+    # pool launches a headless Chromium per spec.
+    assert len(_ALL_REDDIT_SUBS) == len(REDDIT_SUBREDDITS)
+
+
+def test_imagery_gate_only_blocks_what_it_can_prove(monkeypatch):
+    from src.agents.topic import wikipedia as W
+
+    monkeypatch.setattr(W, "_resolve_article",
+                        lambda t: ("Buffalo Bill", ["File:x.jpg"]))
+    monkeypatch.setattr(W, "_commons_hits", lambda s: 0)
+    assert W.has_source_imagery("Buffalo Bill Cody") is False, \
+        "resolved subject with no Commons files must be blocked"
+
+    monkeypatch.setattr(W, "_commons_hits", lambda s: 40)
+    assert W.has_source_imagery("Buffalo Bill Cody") is True
+
+    # An unresolvable headline (or a dead API) says nothing about imagery.
+    monkeypatch.setattr(W, "_resolve_article", lambda t: ("", []))
+    assert W.has_source_imagery("A Farmer Found A Bronze Chest") is True
+    monkeypatch.setattr(W, "_commons_hits", lambda s: None)
+    monkeypatch.setattr(W, "_resolve_article",
+                        lambda t: ("Buffalo Bill", ["File:x.jpg"]))
+    assert W.has_source_imagery("Buffalo Bill Cody") is True
+
+
+def test_subject_of_names_the_entity_not_the_battle():
+    from src.agents.asset.agent import _subject_of
+
+    topic = "The Battle of Midway: How the US Navy Found the Fleet in 1942"
+    assert _subject_of("USS Akagi Battle of Midway", topic) == "USS Akagi"
+    # A per-line query has no anchor on the end, so it is left alone.
+    assert _subject_of("dive bombers over a flight deck", topic) == \
+        "dive bombers over a flight deck"
+    # A query that IS the anchor must not be stripped down to nothing.
+    assert _subject_of("Battle of Midway", topic) == "Battle of Midway"
+
+
+def test_vision_filter_drops_only_an_explicit_mismatch(monkeypatch):
+    from src.agents.asset import agent as A
+
+    answers = {"keep.jpg": True, "drop.jpg": False, "unsure.jpg": None}
+    monkeypatch.setattr(A, "_subject_matches",
+                        lambda p, s: answers[os.path.basename(p)])
+    kept = {
+        "keep.jpg": ("Buffalo Bill", "Buffalo Bill", None),
+        "drop.jpg": ("Buffalo Bill", "Buffalo Bill", None),
+        "unsure.jpg": ("Buffalo Bill", "Buffalo Bill", None),
+    }
+    out = A._vision_filter(kept, "Buffalo Bill: Wild West Show")
+    assert set(out) == {"keep.jpg", "unsure.jpg"}, \
+        "an unjudgeable answer must never empty the pool"
+
+
+def test_entity_fetch_asks_the_category_before_keyword_search(monkeypatch):
+    from src.agents.asset import agent as A
+
+    order = []
+    monkeypatch.setattr(A, "_category_pass", lambda e, b, n: order.append("cat") or [])
+    monkeypatch.setattr(A, "_fetch_wikimedia_commons",
+                        lambda e, b, n: order.append("search") or [])
+    monkeypatch.setattr(A, "_fetch_openverse", lambda e, b, n: [])
+    monkeypatch.setattr(A, "_ENABLE_PEXELS", False)
+    monkeypatch.setattr(A, "_ENABLE_GENERIC", False)
+
+    A._fetch_for_keyword("Buffalo Bill", 0, "/tmp/x", 3, prefer_category=True)
+    assert order == ["cat", "search"], "entity must try its category first"
+
+    order.clear()
+    A._fetch_for_keyword("dive bombers", 1, "/tmp/x", 3)
+    assert order == ["search"], "a prose query has no category to ask for"
+
+
+
+def test_discussion_threads_are_not_stories():
+    from src.agents.topic.helpers import _passes_filters as passes
+
+    base = {"source": "reddit:medievalhistory", "content": "x" * 300,
+            "score": 4000, "upvote_ratio": 0.95, "source_urls": ["u"]}
+    poll = dict(base, title="Almost a quarter of a century has passed since "
+                            "this film premiered. What are your thoughts?")
+    assert not passes(poll)
+    ask = dict(base, title="Does anyone know what armour the Hussites used?")
+    assert not passes(ask)
+    # ...and a real story from the same sub still passes.
+    assert passes({**base,
+                   "title": "The Hussites defeated Europe's "
+                            "richest armies in the 15th century"})
+
+
+# --------------------------------------------------------------------------
+# Source imagery: a private story must show its OWN photos, not lookalike stock
+# --------------------------------------------------------------------------
+
+def test_reddit_images_are_harvested_from_post_media():
+    from src.agents.topic.generator import _reddit_images
+    post = {
+        "url_overridden_by_dest": "https://i.redd.it/abc.jpg",
+        "preview": {"images": [{"source": {"url":
+            "https://preview.redd.it/x.jpg?width=640&amp;format=pjpg"}}]},
+        "media_metadata": {"a": {"status": "valid",
+                                 "s": {"u": "https://i.redd.it/gallery.png"}}},
+    }
+    urls = _reddit_images(post, "body sees https://i.redd.it/inline.webp here")
+    assert "https://i.redd.it/abc.jpg" in urls
+    assert "https://preview.redd.it/x.jpg?width=640&format=pjpg" in urls, \
+        "HTML-escaped preview URLs must be unescaped"
+    assert "https://i.redd.it/gallery.png" in urls
+    assert "https://i.redd.it/inline.webp" in urls
+
+
+def test_article_images_are_harvested_from_og_and_body():
+    from bs4 import BeautifulSoup
+    from src.agents.topic.collectors import _extract_images
+    html = ('<html><head><meta property="og:image" '
+            'content="https://news.example/lead.jpg"></head><body>'
+            '<img src="/logo.png"><img srcset="/small.jpg 200w, /big.jpg 1200w">'
+            '</body></html>')
+    urls = _extract_images(BeautifulSoup(html, "html.parser"),
+                           "https://news.example/story")
+    assert "https://news.example/lead.jpg" in urls
+    assert "https://news.example/big.jpg" in urls, "largest srcset wins"
+    assert not any("logo" in u for u in urls), "chrome/logos are dropped"
+
+
+def test_source_images_lead_the_subject_beats():
+    from src.agents.asset import agent as A
+    A._source_meta["/tmp/a/source0.jpg"] = {"license": "x",
+                                            "source": A._SOURCE_PROVIDER}
+    lines = [{"id": 1, "text": "Patrick O'Sullivan vanished in 1992.",
+              "search_queries": ["missing person poster"]},
+             {"id": 2, "text": "The town kept asking questions.",
+              "search_queries": ["irish village"]}]
+    mapping = {1: ["/tmp/a/stock1.jpg"], 2: ["/tmp/a/stock2.jpg"]}
+    out = A._prefer_source_images(mapping, lines, {"/tmp/a/source0.jpg": ("", None)},
+                                  "Patrick O'Sullivan disappeared")
+    assert out[1][0] == "/tmp/a/source0.jpg", "real photo leads the subject beat"
+    A._source_meta.pop("/tmp/a/source0.jpg", None)
+
+
+def test_stock_vision_is_strict_and_commons_is_not(monkeypatch):
+    from src.agents.asset import agent as A
+    monkeypatch.setattr(A, "_subject_matches", lambda p, s: None)  # unconfirmed
+    A._source_meta["/tmp/s/pex.jpg"] = {"license": "x", "source": "Pexels"}
+    A._source_meta["/tmp/s/com.jpg"] = {"license": "x", "source": "Wikimedia Commons"}
+    kept = {
+        "/tmp/s/pex.jpg": ("man on a phone", "man on a phone", None),
+        "/tmp/s/com.jpg": ("USS Akagi", "USS Akagi", None),
+    }
+    out = A._vision_filter(kept, "USS Akagi")
+    assert "/tmp/s/pex.jpg" not in out, "unconfirmed stock is dropped (strict)"
+    assert "/tmp/s/com.jpg" in out, "unconfirmed Commons is kept (permissive)"
+    A._source_meta.pop("/tmp/s/pex.jpg", None)
+    A._source_meta.pop("/tmp/s/com.jpg", None)
+
+
+def test_a_vision_timeout_never_empties_the_pool(monkeypatch):
+    """A wedged model returns _VISION_ERROR (not None): the image was never
+    judged, so even strict stock must be kept rather than dropped."""
+    from src.agents.asset import agent as A
+    monkeypatch.setattr(A, "_subject_matches", lambda p, s: A._VISION_ERROR)
+    A._source_meta["/tmp/e/pex.jpg"] = {"license": "x", "source": "Pexels"}
+    kept = {"/tmp/e/pex.jpg": ("man on a phone", "man on a phone", None)}
+    out = A._vision_filter(kept, "a missing man")
+    assert "/tmp/e/pex.jpg" in out, "a transport/timeout failure must never drop"
+    A._source_meta.pop("/tmp/e/pex.jpg", None)
+
+
+# --------------------------------------------------------------------------
+# Image QUALITY fixes: text/collage in any language, duplicate faces, ranking
+# --------------------------------------------------------------------------
+
+def _fake_ocr(boxes):
+    """Build a pytesseract.image_to_data stub from (conf, w, h) tuples."""
+    def _fn(img, output_type=None, config=None):
+        n = len(boxes)
+        return {"conf": [b[0] for b in boxes], "text": ["x"] * n,
+                "left": [0] * n, "top": [0] * n,
+                "width": [b[1] for b in boxes], "height": [b[2] for b in boxes]}
+    return _fn
+
+
+def test_text_page_is_rejected_in_any_language(monkeypatch, tmp_path):
+    """The Cyrillic classifieds collage: many boxes at a loose floor, low
+    coverage. English word-confidence alone never caught it (2.9% coverage)."""
+    from PIL import Image
+    from src.agents.asset import agent as A
+    p = tmp_path / "collage.jpg"
+    Image.new("RGB", (200, 400), "white").save(p)
+    # 40 unreadable boxes at conf 35 (below the *high* floor, above the loose one).
+    monkeypatch.setattr(A.pytesseract, "image_to_data", _fake_ocr([(35, 2, 2)] * 40))
+    assert A._image_has_text_overlay(str(p)) is True
+
+
+def test_a_lone_large_box_is_not_a_text_overlay(monkeypatch, tmp_path):
+    """A good 'phone on a grid notebook' photo scored 29.6% from ONE mis-read box
+    and was being thrown away. Coverage must come from several words."""
+    from PIL import Image
+    from src.agents.asset import agent as A
+    p = tmp_path / "grid.jpg"
+    Image.new("RGB", (100, 100), "white").save(p)
+    monkeypatch.setattr(A.pytesseract, "image_to_data", _fake_ocr([(80, 100, 100)]))
+    assert A._image_has_text_overlay(str(p)) is False
+
+
+def test_near_duplicate_images_are_collapsed(tmp_path):
+    """Same face twice (line 4 and line 8) came from two DIFFERENT files, so the
+    file-hash dedup missed it. A perceptual hash collapses them."""
+    from PIL import Image
+    from src.agents.asset import agent as A
+    base = tmp_path / "a.jpg"
+    Image.new("RGB", (64, 64), "white").save(base)
+    dup = tmp_path / "a_copy.jpg"
+    Image.open(base).save(dup)                      # byte-identical content
+    diff = tmp_path / "b.jpg"
+    half = Image.new("RGB", (64, 64), "white")
+    for x in range(32, 64):
+        for y in range(64):
+            half.putpixel((x, y), (0, 0, 0))        # left white / right black
+    half.save(diff)
+    out = A._drop_near_duplicates(
+        {str(base): ("x", 1), str(dup): ("x", 2), str(diff): ("y", 3)})
+    assert str(base) in out and str(diff) in out
+    assert str(dup) not in out, "a near-identical copy must be dropped"
+
+
+def test_pexels_results_are_ranked_by_alt_relevance(monkeypatch, tmp_path):
+    """A literal query must keep the on-topic photo, not the loose tail match."""
+    from src.agents.asset import agent as A
+
+    photos = [
+        {"src": {"large2x": "http://x/off.jpg"},
+         "alt": "a bowl of fruit on a wooden table"},
+        {"src": {"large2x": "http://x/on.jpg"},
+         "alt": "woman using her smartphone on a couch"},
+    ]
+
+    class _Resp:
+        def json(self):
+            return {"photos": photos}
+
+    class _Sess:
+        def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(A, "PEXELS_API_KEY", "test-key")
+    monkeypatch.setattr(A, "_session", lambda: _Sess())
+    got = []
+    monkeypatch.setattr(A, "_download_image",
+                        lambda url, path, headers=None: got.append(url) or True)
+    monkeypatch.setattr(A, "_remember", lambda *a, **k: True)
+
+    A._fetch_pexels("woman using smartphone", str(tmp_path / "p"), count=1)
+    assert got == ["http://x/on.jpg"], "alt-relevant result must be kept first"

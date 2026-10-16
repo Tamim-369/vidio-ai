@@ -7,7 +7,7 @@ long-form text to score specificity and to seed the script-later.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -44,12 +44,27 @@ class Lead:
     published: Optional[datetime] = None
     summary: str = ""
     body: str = ""
+    engagement: int = 0
+    upvote_ratio: float = 1.0
     collected_at: Optional[datetime] = None
+    # Real photos that came WITH the story (Reddit post media, the article's
+    # og:image / in-body images). For a private/personal topic these are the
+    # only true images of the actual subject; the asset stage uses them before
+    # it ever falls back to generic stock.
+    images: list = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.title = clean_text(self.title)[:300]
         if len(self.body) > MAX_BODY_CHARS:
             self.body = self.body[:MAX_BODY_CHARS] + " …"
+        seen, clean = set(), []
+        for u in self.images or []:
+            u = (u or "").strip()
+            if not u.startswith(("http://", "https://")) or u in seen:
+                continue
+            seen.add(u)
+            clean.append(u)
+        self.images = clean[:12]
 
 
 def lead_to_topic(lead: Lead, angle: str, score: int, niche: str) -> dict:
@@ -60,6 +75,7 @@ def lead_to_topic(lead: Lead, angle: str, score: int, niche: str) -> dict:
         "category": niche,
         "angle": angle,
         "source_urls": [lead.url],
+        "source_images": list(lead.images or []),
         "summary": lead.summary or lead.title,
         "content": lead.body or f"{lead.title}\n(no body captured)",
         "novelty_score": 50,

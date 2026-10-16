@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 
 from src.utils.file_helpers import ensure_workspace, cleanup_temp, dump_artifact
-from src.agents.research.sources import research
+from src.agents.research.sources import research, research_is_on_topic
 from src.agents.asset.agent import fetch_assets
 from src.agents.voice import agent as voice_manager
 from src.services.tts import generate_audio
@@ -61,7 +61,8 @@ def _timed(label: str, step, *args, timing: dict, **kwargs):
 
 
 def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: str = "",
-                 script_only: bool = False, gate_heavy: bool = False):
+                 script_only: bool = False, gate_heavy: bool = False,
+                 source_images: list | None = None):
     """Run the full pipeline for a single topic and produce a video.
 
     If raw_data is provided (e.g. a Reddit story from the topic generator),
@@ -71,6 +72,8 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
     voice: optional voice id to force ("" = round-robin picks the next voice).
     script_only: stop right after the script is built and dump it —
     skip assets, audio, assembly, and upload entirely.
+    source_images: real photos that came WITH the story (Reddit post media,
+    article og:image). Used by the asset stage before any generic stock.
     """
     if publish is None:
         publish = True
@@ -90,6 +93,12 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
         else:
             print(f"\n🔍 Researching: {topic}")
             raw_data = research(topic)
+            if not research_is_on_topic(topic, raw_data or ""):
+                raise ValueError(
+                    f"Research returned material that never mentions "
+                    f"'{topic}'. Refusing to build a video from unrelated web "
+                    f"noise. Retry the topic, or supply a source URL for it.")
+            print("   ✅ Research mentions the subject")
         timing["research"] = time.monotonic() - t0
         dump_artifact("research", raw_data, topic)
 
@@ -119,7 +128,8 @@ def create_video(topic: str, raw_data: str = None, publish: bool = True, voice: 
             metadata_future = _get_metadata_pool().submit(generate_metadata, topic, script)
 
         print("\n🖼️  Fetching images...")
-        script["lines"] = _timed("assets", fetch_assets, script["lines"], topic=topic, timing=timing)
+        script["lines"] = _timed("assets", fetch_assets, script["lines"], topic=topic,
+                                 source_images=source_images, timing=timing)
 
         print("\n🎙️  Generating voiceover...")
         if gate_heavy:
@@ -173,4 +183,5 @@ def create_video_from_topic(topic: dict, publish: bool = True, voice: str = "", 
         raw_data = research(topic["title"], urls=topic.get("source_urls") or [])
 
     return create_video(topic["title"], raw_data=raw_data, publish=publish, voice=voice,
-                        script_only=script_only, gate_heavy=gate_heavy)
+                        script_only=script_only, gate_heavy=gate_heavy,
+                        source_images=topic.get("source_images") or [])

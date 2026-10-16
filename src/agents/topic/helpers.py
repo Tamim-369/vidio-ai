@@ -13,23 +13,35 @@ import threading
 
 from src.utils.file_helpers import OUTPUT_DIR
 
-# Story subreddits (secondary source, currently unreliable on this ISP).
-# Niche: WW1/WW2 epic stories, crazy human/animal experiments, and scary
-# legends/curses/hauntings. No modern-war or crime/paranormal fuel.
-REDDIT_SUBREDDITS = [
-    "AskHistorians",      # documented history discussions
-    "history",            # general history stories
-    "militaryhistory",    # military history
-    "TheGrittyPast",      # dark / grim history
-    "HistoryWhatIf",      # story-driven military history discussions
-    "HighStrangeness",    # legends / unexplained / scary
-    "UnresolvedMysteries",  # true-history mysteries & unresolved stories
-    "OldSchoolCreepy",    # vintage photos, WWII-era oddities and creepy history
-    "HumanoidEncounters", # legends / folklore encounters
+# Story subreddits, tiered by how well the sub's material maps to the
+# channel's proven topic shape: a NAMED subject, physical stakes, and a
+# truth-vs-lies framing, in 20-38s. Reddit exposes `score` (upvotes) but no
+# view count, so popularity is enforced with a per-sub score floor below.
+REDDIT_PRIMARY_SUBS = [
+    "history",              # general history stories; the channel's best AVD
+    "UnresolvedMysteries",  # unresolved stories with a subject and a stake
+    "TrueCrime",            # historical crime, the channel's top performer
 ]
+REDDIT_SECONDARY_SUBS = [
+    "AncientHistory",  # 1 video @ 107.8% AVD (low volume, proven shape)
+    "medievalhistory", # discussion-poor -> only its highest-scored posts
+]
+REDDIT_SUBREDDITS = REDDIT_PRIMARY_SUBS + REDDIT_SECONDARY_SUBS
 
-# Subreddits whose content is inherently contested -> flag for manual check
+# Subs whose content is inherently contested -> flag for manual check
 CONTESTED_SUBREDDITS = set()
+
+# Per-sub popularity floor. `forgottenhistory`-class subs top out in the
+# tens of votes, while the story-shaped posts we want on the primary subs
+# start in the thousands — one shared floor would either accept noise or
+# reject the whole of a small sub.
+REDDIT_SCORE_FLOORS = {
+    "history": 3000,
+    "UnresolvedMysteries": 3000,
+    "TrueCrime": 2000,
+    "AncientHistory": 800,
+    "medievalhistory": 800,
+}
 
 # Crime / serial-killer / missing-person content to exclude from the niche.
 # "was killed" / "death of" are intentionally ABSENT — casualty and destruction
@@ -40,6 +52,19 @@ CRIME_BLOCK_KEYWORDS = [
     "school shooting", "mass shooter", "investigation", "arrested",
     "police", "criminal", "manslaughter",
 ]
+
+# Subs where that same vocabulary IS the story rather than a mis-click, so
+# the crime gate is suspended for them. The rest of the filters (meta
+# patterns, score floor, upvote ratio, niche gate) still apply.
+CRIME_EXEMPT_SUBS = {"TrueCrime", "UnresolvedMysteries"}
+
+# The sub itself defines the niche, so no story keyword must be found in the
+# title (the WW2/legend wording in NICHE_STRONG would otherwise reject every
+# frontier/true-crime/ancient title out of hand).
+TRUSTED_SUBS = {
+    "history", "TrueCrime", "UnresolvedMysteries",
+    "AncientHistory", "medievalhistory",
+}
 
 # Meta/announcement/listicle posts that aren't video topics
 NON_TOPIC_PATTERNS = [
@@ -59,24 +84,30 @@ NON_TOPIC_PATTERNS = [
     "which one", "name this", "help me identify", "looking for", "need help",
     "officially re-opened", "can't believe no-one has posted this", "i'm going to",
     "is officially", "starting things off", "reopened", "re-opened",
+    # meta / engagement-farming shapes common on the story subs
+    "discussion thread", "weekly discussion", "reminder that", "reminder:",
+    "self-promo", "self promo", "does anyone else", "do you think",
+    "am i wrong", "unpopular opinion", "change my mind", "would you",
+    "what would happen if", "rate this", "how old is this", "identify this",
+    "everyone's favourite", "everyone's favorite", "what's everyone's",
+    "what is everyone's", "your favourite", "your favorite",
+    "what are your thoughts", "your thoughts", "thoughts on this",
+    "what do you think", "does anyone know", "does anyone remember",
+    "has anyone seen", "anyone else", "i found this",
 ]
 
 # Subs that reliably produce story-driven material -> slight ranking boost
 STORY_SUBS = {
-    "militaryhistory", "TheGrittyPast", "AskHistorians", "history",
-    "HistoryWhatIf", "UnresolvedMysteries",
+    "history", "TrueCrime", "UnresolvedMysteries",
+    "AncientHistory", "medievalhistory",
 }
 
 CATEGORY_MAP = {
-    "AskHistorians": "story",
     "history": "story",
-    "militaryhistory": "story",
-    "HistoryWhatIf": "story",
-    "TheGrittyPast": "mystery",
-    "HighStrangeness": "mystery",
+    "TrueCrime": "story",
     "UnresolvedMysteries": "mystery",
-    "OldSchoolCreepy": "mystery",
-    "HumanoidEncounters": "mystery",
+    "AncientHistory": "story",
+    "medievalhistory": "story",
 }
 
 COOKIE_FILE = "cookie"
@@ -150,6 +181,11 @@ def _min_selftext(c: dict) -> int:
     sub = c["source"].split(":", 1)[-1]
     if sub in TITLE_BASED_SUBS:
         return 40
+    if sub in TRUSTED_SUBS:
+        # The title carries the story; the body only has to exist. The
+        # research stage re-sources the subject from scratch anyway, so a
+        # short post must not gate a strong headline.
+        return 80
     return MIN_SELFTEXT
 
 
@@ -161,6 +197,9 @@ def _min_score(c: dict) -> int:
     if c.get("source", "").startswith("channel:"):
         return 0
     sub = c["source"].split(":", 1)[-1]
+    floor = REDDIT_SCORE_FLOORS.get(sub)
+    if floor is not None:
+        return floor
     if sub in TITLE_BASED_SUBS:
         return 200
     return MIN_SCORE
@@ -177,9 +216,12 @@ def _passes_filters(c: dict) -> bool:
     low_title = c["title"].lower()
     if any(p in low_title for p in NON_TOPIC_PATTERNS):
         return False
-    # Hard niche gate: must be military / experiments / dark history, not crime.
-    if any(b in low_title for b in CRIME_BLOCK_KEYWORDS):
-        return False
+    # Hard niche gate: must be military / experiments / dark history, not
+    # crime — except on the subs where crime IS the topic.
+    sub = c["source"].split(":", 1)[-1]
+    if sub not in CRIME_EXEMPT_SUBS:
+        if any(b in low_title for b in CRIME_BLOCK_KEYWORDS):
+            return False
     if not _is_niche(c):
         return False
     return True
@@ -209,6 +251,10 @@ def _is_niche(c: dict) -> bool:
         return True
 
     sub = c["source"].split(":", 1)[-1]
+    if sub in TRUSTED_SUBS:
+        # The sub defines the niche; NICHE_STRONG is WW2/legend wording and
+        # would reject every frontier, true-crime and ancient title.
+        return True
     if any(k in low_title for k in NICHE_STRONG):
         return True
     if sub in TITLE_BASED_SUBS:
@@ -339,11 +385,15 @@ def _to_topic(c: dict) -> dict:
 def _rank_key(c: dict):
     if c.get("source", "").startswith("channel:"):
         return (0, 4, c["score"])  # by views — proven viral topics surface first
+    if c.get("source", "").startswith("reddit:"):
+        # Engagement-verified stories are the primary source now, so they rank
+        # above the unproven LLM proposals and above the Wikipedia backstop.
+        return (0, 3, c["score"])
     if c.get("source") == "llm":
-        return (0, 3, c["score"])  # fresh proposals, grounded but unproven
+        return (0, 2, c["score"])  # grounded but unproven
     if c.get("source") == "wikipedia":
-        return (0, 2, c["title"])  # backstop source
-    return (0, 1, c["score"])
+        return (0, 1, c["title"])  # backstop source
+    return (0, 0, c["score"])
 
 
 def _save_used(titles: list) -> None:
